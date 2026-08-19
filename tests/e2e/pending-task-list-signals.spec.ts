@@ -55,6 +55,34 @@ async function waitForTaskCondition(
  * even on failure — restores the original bytes so later specs (and
  * webhooks.spec.ts's own use of this fixture) see it armed again.
  */
+/**
+ * Runs `body`, then always runs `cleanup`. A cleanup failure is preserved
+ * as the test failure rather than swallowed — unless `body` itself already
+ * threw, in which case the original (more informative) error wins and the
+ * cleanup failure does not clobber it.
+ */
+async function runWithGuaranteedCleanup(
+  body: () => Promise<void>,
+  cleanup: () => Promise<void>,
+): Promise<void> {
+  let bodyError: unknown;
+  try {
+    await body();
+  } catch (err) {
+    bodyError = err;
+  }
+
+  let cleanupError: unknown;
+  try {
+    await cleanup();
+  } catch (err) {
+    cleanupError = err;
+  }
+
+  if (bodyError) throw bodyError;
+  if (cleanupError) throw cleanupError;
+}
+
 async function withPendingWebhookChange(
   request: import('@playwright/test').APIRequestContext,
   body: () => Promise<void>,
@@ -62,19 +90,50 @@ async function withPendingWebhookChange(
   const taskJsPath = path.join(tasksDir(), 'hello-webhook', 'task.js');
   const original = fs.readFileSync(taskJsPath, 'utf8');
 
-  try {
-    fs.writeFileSync(taskJsPath, original + '\n// e2e-pending-signal-probe\n', 'utf8');
-    await waitForTaskCondition(request, WEBHOOK_TASK_ID, (t) => t.pending_approval === true);
-    await body();
-  } finally {
-    try {
+  await runWithGuaranteedCleanup(
+    async () => {
+      fs.writeFileSync(taskJsPath, original + '\n// e2e-pending-signal-probe\n', 'utf8');
+      await waitForTaskCondition(request, WEBHOOK_TASK_ID, (t) => t.pending_approval === true);
+      await body();
+    },
+    async () => {
       fs.writeFileSync(taskJsPath, original, 'utf8');
       await waitForTaskCondition(request, WEBHOOK_TASK_ID, (t) => t.pending_approval !== true);
-    } catch (cleanupError) {
-      console.error('withPendingWebhookChange cleanup failed:', cleanupError);
-    }
-  }
+    },
+  );
 }
+
+test.describe('runWithGuaranteedCleanup', () => {
+  test('surfaces a cleanup failure when body succeeded', async () => {
+    const cleanupErr = new Error('cleanup boom');
+    await expect(
+      runWithGuaranteedCleanup(
+        async () => {},
+        async () => { throw cleanupErr; },
+      ),
+    ).rejects.toBe(cleanupErr);
+  });
+
+  test('a body failure wins over a cleanup failure, not swallowed', async () => {
+    const bodyErr = new Error('body boom');
+    const cleanupErr = new Error('cleanup boom');
+    await expect(
+      runWithGuaranteedCleanup(
+        async () => { throw bodyErr; },
+        async () => { throw cleanupErr; },
+      ),
+    ).rejects.toBe(bodyErr);
+  });
+
+  test('cleanup always runs even when body succeeds', async () => {
+    let cleanupRan = false;
+    await runWithGuaranteedCleanup(
+      async () => {},
+      async () => { cleanupRan = true; },
+    );
+    expect(cleanupRan).toBe(true);
+  });
+});
 
 test.describe('Task list pending-approval signals', () => {
   test('a pending row reads as held, not live: no green dot, no dead link, Run disabled', async ({ page, request }) => {
