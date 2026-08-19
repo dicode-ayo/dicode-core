@@ -614,6 +614,19 @@ func TestCreateTask_ConcurrentSameName_OnlyOneWins(t *testing.T) {
 	if !strings.Contains(string(yaml), "name: regcheck") {
 		t.Errorf("task.yaml looks corrupted: %q", yaml)
 	}
+
+	// The registration side must also be exclusive: a regression that let
+	// AddTaskEntry run more than once for "regcheck" (e.g. two winners of a
+	// weaker directory-exclusivity check) would still pass the assertions
+	// above while leaving the taskset unresolvable, since a duplicate key in
+	// spec.entries is undefined YAML map behavior.
+	ts, err := os.ReadFile(filepath.Join(dir, "taskset.yaml"))
+	if err != nil {
+		t.Fatalf("read taskset.yaml: %v", err)
+	}
+	if n := strings.Count(string(ts), "regcheck:"); n != 1 {
+		t.Errorf("taskset.yaml has %d regcheck entries, want 1:\n%s", n, ts)
+	}
 }
 
 // TestCreateTask_RegistrationFailureCleansUpDirectory locks in the cleanup

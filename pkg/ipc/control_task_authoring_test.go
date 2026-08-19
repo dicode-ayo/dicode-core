@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,16 @@ type mockAuthoring struct {
 	cancelErr    error
 	baseURL      string
 
+	// mu guards every field below. The concurrency tests in this file drive
+	// several goroutines through handleTaskEdit against one mockAuthoring;
+	// EditTask/UpdateAgentSessionID are safe unsynchronized only because
+	// lockForTaskEdit is expected to serialize the calls that reach them —
+	// which is exactly the property those tests exist to verify. Without
+	// this mutex, a regressed lock would hand two goroutines concurrent
+	// access to agentSessionIDs and the Go runtime would abort the test
+	// binary with "concurrent map writes" instead of failing an assertion.
+	mu sync.Mutex
+
 	agentSessionIDs map[string]string
 	updateErr       error
 
@@ -44,11 +55,15 @@ type mockAuthoring struct {
 }
 
 func (m *mockAuthoring) CreateTask(_ context.Context, name, source string) (AuthoringCreateResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastCreateName, m.lastCreateSource = name, source
 	return m.createResult, m.createErr
 }
 
 func (m *mockAuthoring) EditTask(_ context.Context, sessionID, taskID string) (AuthoringEditResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastEditSession, m.lastEditTask = sessionID, taskID
 	res := m.editResult
 	if asid, ok := m.agentSessionIDs[res.SessionID]; ok {
@@ -58,16 +73,22 @@ func (m *mockAuthoring) EditTask(_ context.Context, sessionID, taskID string) (A
 }
 
 func (m *mockAuthoring) SaveTask(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastSaveSession = sessionID
 	return m.saveErr
 }
 
 func (m *mockAuthoring) CancelTask(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastCancelSess = sessionID
 	return m.cancelErr
 }
 
 func (m *mockAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agentSessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastUpdateSession, m.lastUpdateAgentSession = sessionID, agentSessionID
 	if m.updateErr != nil {
 		return m.updateErr
