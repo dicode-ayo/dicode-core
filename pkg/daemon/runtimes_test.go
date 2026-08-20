@@ -91,7 +91,7 @@ func isNilValue(v reflect.Value) bool {
 // NewExecutor took — rather than from the live manager, and that buildRuntimes
 // must therefore have set before it constructs an executor. A dependency wired
 // onto the manager afterwards is nil for every run that executor serves.
-var snapshotDeps = []string{"Registry", "DB", "Log", "IPCSecret", "Engine", "Gateway", "SecretsManager"}
+var snapshotDeps = []string{"Registry", "DB", "Log", "IPCSecret", "Engine", "Gateway", "SecretsManager", "ProviderRunner"}
 
 // TestExecutorSnapshotsDeps holds each socket-bridge runtime's NewExecutor
 // copy list to the set NewIPCServer reads from its receiver: a per-version
