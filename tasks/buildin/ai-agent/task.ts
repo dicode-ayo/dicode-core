@@ -220,18 +220,19 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
     parameters: objectSchema({
       source: { type: "string", description: "Source name as it appears in dicode.yaml." },
       enabled: { type: "boolean", description: "true to enter dev mode, false to leave it." },
-      branch: { type: "string", description: "Branch to check out in the clone. Mutually exclusive with local_path." },
+      branch: { type: "string", description: "Branch to check out in the clone." },
       base: { type: "string", description: "Branch to fork from when `branch` does not exist remotely." },
-      local_path: { type: "string", description: "Resolve through an existing local checkout instead of cloning. Mutually exclusive with branch." },
     }, ["source", "enabled"]),
-    // run_id names the clone directory and is fixed to this run so two sessions
-    // cannot collide on one clone, and so leaving dev mode reaches the same one.
+    // Clone mode only. run_id names the clone directory and is fixed to this run
+    // so two sessions cannot collide on one clone, and so leaving dev mode
+    // reaches the same one. local_path is withheld: it redirects the daemon's
+    // taskset resolution at an arbitrary path on the host, which would let a
+    // caller decide what the daemon loads as tasks.
     run: (dicode, args) =>
       dicode.sources.set_dev_mode(argStr(args, "source"), {
         enabled: argBool(args, "enabled"),
         branch: argStr(args, "branch"),
         base: argStr(args, "base"),
-        local_path: argStr(args, "local_path"),
         run_id: dicode.run_id,
       }),
   },
@@ -285,26 +286,26 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
     name: "dicode_git_commit_push",
     cap: "git.commit_push",
     description:
-      "Commit the working tree of a source's repo and push it, returning the " +
-      "commit hash. Pushing to main/master requires allow_main; every other " +
-      "branch must carry branch_prefix.",
+      "Commit the working tree of a source's repo and push it to a branch, " +
+      "returning the commit hash. The branch must start with branch_prefix; " +
+      "main and master cannot be pushed to.",
     parameters: objectSchema({
       source_id: { type: "string", description: "Source name as it appears in dicode.yaml." },
       message: { type: "string", description: "Commit message." },
-      branch: { type: "string", description: "Branch to push to." },
+      branch: { type: "string", description: "Branch to push to. Must start with branch_prefix." },
       branch_prefix: { type: "string", description: "Prefix the branch must start with, e.g. 'fix/'." },
-      allow_main: { type: "boolean", description: "Permit a push to main/master. Only with branch set to main or master." },
       files: { type: "array", items: { type: "string" }, description: "Paths to stage. Omit to stage everything changed." },
       author_name: { type: "string", description: "Commit author name. Defaults to this agent." },
       author_email: { type: "string", description: "Commit author email. Defaults to this agent." },
       auth_token_env: { type: "string", description: "Env var holding the push token. Must be declared in this task's permissions.env." },
-    }, ["source_id", "message", "branch"]),
+    }, ["source_id", "message", "branch", "branch_prefix"]),
+    // allow_main is withheld: it is a per-call branch-protection bypass, not a
+    // capability, and the branch to protect is not the caller's decision.
     run: (dicode, args) =>
       dicode.git.commit_push(argStr(args, "source_id"), {
         message: argStr(args, "message"),
         branch: argStr(args, "branch"),
         branch_prefix: argStr(args, "branch_prefix"),
-        allow_main: argBool(args, "allow_main"),
         files: argStrList(args, "files"),
         author_name: argStr(args, "author_name", `dicode ${dicode.task_id}`),
         author_email: argStr(args, "author_email", "noreply@dicode.local"),

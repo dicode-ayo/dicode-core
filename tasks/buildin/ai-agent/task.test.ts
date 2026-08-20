@@ -542,3 +542,67 @@ test("a failing built-in returns an error result rather than killing the turn", 
   assert.equal(reply, "done");
   assert.equal(toolResult.error, "task pending approval");
 });
+
+test("set_dev_mode withholds local_path: the model cannot redirect taskset resolution", async () => {
+  // local_path points the daemon's taskset resolution at an arbitrary path on
+  // the host. Reachable from a tool argument, it would let a caller choose what
+  // the daemon loads as tasks, so the tool offers clone mode only.
+  useLocal();
+  params.set("prompt", "enter dev mode");
+  dicode.caps = ["sources.set_dev_mode"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.sources = {
+    // deno-lint-ignore no-explicit-any
+    set_dev_mode: async (name: string, opts: any) => {
+      calls.push(opts);
+      return { ok: true };
+    },
+  };
+
+  const sentSchema = () => {
+    const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+    const tool = (sent.tools ?? []).find(
+      (t: { function: { name: string } }) => t.function.name === "dicode_set_dev_mode",
+    );
+    return tool.function.parameters.properties;
+  };
+
+  await runBuiltinCall("dicode_set_dev_mode", {
+    source: "scratch",
+    enabled: true,
+    local_path: "/etc",
+  });
+
+  assert.equal(sentSchema().local_path, undefined);
+  assert.equal(calls[0].local_path, undefined);
+});
+
+test("commit_push withholds allow_main: the model cannot waive branch protection", async () => {
+  useLocal();
+  params.set("prompt", "push it");
+  dicode.caps = ["git.commit_push"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.git = {
+    // deno-lint-ignore no-explicit-any
+    commit_push: async (_id: string, opts: any) => {
+      calls.push(opts);
+      return { commit: "abc1234" };
+    },
+  };
+
+  await runBuiltinCall("dicode_git_commit_push", {
+    source_id: "scratch",
+    message: "sneak",
+    branch: "main",
+    allow_main: true,
+  });
+
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const tool = (sent.tools ?? []).find(
+    (t: { function: { name: string } }) => t.function.name === "dicode_git_commit_push",
+  );
+  assert.equal(tool.function.parameters.properties.allow_main, undefined);
+  assert.equal(calls[0].allow_main, undefined);
+});

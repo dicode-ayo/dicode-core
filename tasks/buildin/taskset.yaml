@@ -212,10 +212,10 @@ spec:
     # Override of ai-agent that scaffolds a brand-new task from a natural-
     # language description. This is Phase 0 of docs/design/ai-task-authoring.md
     # ("task create --ai returns a real AI turn") — the AI-authoring
-    # counterpart to auto-fix's AI-diagnosis, cloning its exact permission
-    # set (dev-mode clones, tasks.test, git-pr landing) because scaffolding a
-    # task needs the same sandboxed write → validate → test loop that fixing
-    # one does. Fired via FireManual from the IPC control plane
+    # counterpart to auto-fix's AI-diagnosis, carrying the sandboxed write →
+    # validate → test loop's capabilities (dev-mode clones, tasks.test, git-pr
+    # landing) minus auto-fix's run-input reads, which scaffolding has no use
+    # for. Fired via FireManual from the IPC control plane
     # (`dicode task create --ai "<prompt>"` / `dicode task edit <id>
     # "<prompt>"`) — trigger stays manual: true, never a webhook, since the
     # authoring session (not an HTTP caller) owns dispatch.
@@ -291,11 +291,10 @@ spec:
         net:
           - api.openai.com
         timeout: 1800s
+        # Scaffolding a task has no prior run to read, pin or replay, so the
+        # run-input capabilities auto-fix needs are not granted here. Every
+        # capability listed becomes a tool the model can call.
         dicode:
-          runs_replay:           true
-          runs_get_input:        true
-          runs_pin_input:        true
-          runs_unpin_input:      true
           sources_set_dev_mode:  true
           tasks_test:            true
           git_commit_push:       true
