@@ -271,9 +271,15 @@ spec:
             3. Never invent a secret name. When the task needs a credential
                you have no evidence exists, name it in your reply as
                something the user must set.
-            4. Close by reporting which files you wrote, and state plainly
-               what you could not verify — you have no tool that runs the
-               task or its tests, so never report them as passing.
+            4. Run dicode_test_task on the task you just wrote and fix
+               what it reports, repeating until it passes. A newly created
+               task is held pending approval, and the tool refuses to test
+               a pending task — if that is the answer you get, say so in
+               your reply: the user must approve the task before its tests
+               can run.
+            5. Close by reporting which files you wrote and what the test
+               run did. Never report a test as passing that you did not
+               watch pass, and state plainly whatever you could not verify.
 
             When the description is ambiguous — missing channel, schedule,
             endpoint, or similar — ask one focused clarifying question

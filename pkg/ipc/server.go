@@ -373,6 +373,9 @@ func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 // dependency direction).
 type SourceDevModeSetter interface {
 	SetDevMode(ctx context.Context, name string, enabled bool, opts taskset.DevModeOpts) error
+	// DevRootPath returns the root taskset.yaml the source resolves through in
+	// dev mode, or "" when it is not in dev mode.
+	DevRootPath(name string) string
 }
 
 // SetSourceManager attaches a SourceDevModeSetter (typically *webui.SourceManager)
@@ -1120,7 +1123,14 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
-			reply(req.ID, map[string]any{"ok": true}, "")
+			// The clone directory is the only handle a caller has on the files it
+			// just asked for; without it the enable is a no-op it cannot act on.
+			res := map[string]any{"ok": true}
+			if devRoot := s.sourceMgr.DevRootPath(req.Name); devRoot != "" {
+				res["dev_root_path"] = devRoot
+				res["clone_path"] = filepath.Dir(devRoot)
+			}
+			reply(req.ID, res, "")
 
 		case "dicode.git.commit_push":
 			if !hasCap(caps, CapGitCommitPush) {

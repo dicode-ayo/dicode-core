@@ -78,6 +78,7 @@ These are two different concepts that dicode uses with specific meanings:
 | Concept | What it is | Where it lives | How the agent sees it |
 | ------- | ---------- | -------------- | --------------------- |
 | **Tool** | A dicode task the agent can execute | `tasks/**/task.yaml` | As an OpenAI tool schema built from the task's params; invoked via `dicode.run_task()` |
+| **Built-in tool** | A dicode SDK operation the agent can perform directly | `permissions.dicode` in the agent's own `task.yaml` | As an OpenAI tool schema, offered only when the matching capability was granted |
 | **Skill** | A markdown file with domain context | `tasks/skills/*.md` | Concatenated into the system prompt at the start of every turn |
 
 This mirrors the convention used by Claude Code and the broader agent ecosystem. Think of tools as *capabilities* and skills as *knowledge*.
@@ -96,6 +97,33 @@ curl -X POST http://localhost:8080/hooks/ai \
 ```
 
 The agent still has full access to the *result* of each tool call — it's a scoping mechanism, not a permission system. Real permission control is in the task's `permissions.dicode.tasks` allowlist (the buildin uses `["*"]`; presets inherit this unless overridden).
+
+### Built-in tools (SDK-calling)
+
+Firing another task is not the only thing the model can do. Every capability the
+agent's own `permissions.dicode` block grants is also offered as a tool, so the
+model can act on dicode itself rather than only on tasks:
+
+| Tool | Granted by |
+| ---- | ---------- |
+| `dicode_list_tasks` | `list_tasks` |
+| `dicode_get_runs` | `get_runs` |
+| `dicode_test_task` | `tasks_test` |
+| `dicode_set_dev_mode` | `sources_set_dev_mode` |
+| `dicode_get_run_input` | `runs_get_input` |
+| `dicode_pin_run_input` / `dicode_unpin_run_input` | `runs_pin_input` / `runs_unpin_input` |
+| `dicode_replay_run` | `runs_replay` |
+| `dicode_git_commit_push` | `git_commit_push` |
+
+The grant is the whole gate: a capability the taskset never declared produces no
+tool, so the model never sees an operation it would only be denied on calling.
+The generic `ai-agent` buildin declares none of these and is therefore offered
+none — the authoring presets (`task-create`, `auto-fix`) declare the set their
+write → test → land loop needs.
+
+`dicode_set_dev_mode` takes no run id: the clone is named after the calling run
+so two sessions cannot reach into each other's working copy. It returns
+`clone_path`, which is what `git-pr` expects.
 
 ### Skills (prompt markdown)
 

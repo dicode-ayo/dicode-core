@@ -269,6 +269,19 @@ func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled boo
 	return src.SetDevMode(ctx, enabled, opts)
 }
 
+// DevRootPath returns the root taskset.yaml path a source currently resolves
+// through in dev mode, or "" when the source is unknown or not in dev mode.
+// Implements ipc.SourceDevModeSetter.
+func (m *SourceManager) DevRootPath(name string) string {
+	m.mu.RLock()
+	src, ok := m.tasksets[name]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return src.DevRootPath()
+}
+
 // ResolveRepoPath returns the on-disk repo path for the named taskset source.
 // Implements ipc.RepoPathResolver.
 func (m *SourceManager) ResolveRepoPath(name string) (string, error) {
