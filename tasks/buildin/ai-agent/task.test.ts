@@ -522,11 +522,42 @@ test("commit_push defaults the commit author instead of asking the model to inve
     source_id: "scratch",
     message: "fix it",
     branch: "fix/thing",
-    branch_prefix: "fix/",
   });
 
   assert.equal(calls[0].opts.author_name, "dicode buildin/auto-fix");
   assert.equal(calls[0].opts.author_email, "noreply@dicode.local");
+});
+
+test("commit_push takes its branch prefix from config, not from the model", async () => {
+  // A prefix the model supplies alongside the branch it bounds constrains
+  // nothing, so the prefix is a task param and never a tool argument.
+  useLocal();
+  params.set("prompt", "push it");
+  params.set("git_branch_prefix", "fix/");
+  dicode.caps = ["git.commit_push"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.git = {
+    // deno-lint-ignore no-explicit-any
+    commit_push: async (_id: string, opts: any) => {
+      calls.push(opts);
+      return { commit: "abc1234" };
+    },
+  };
+
+  await runBuiltinCall("dicode_git_commit_push", {
+    source_id: "scratch",
+    message: "sneak",
+    branch: "release/1.0",
+    branch_prefix: "release/",
+  });
+
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const tool = (sent.tools ?? []).find(
+    (t: { function: { name: string } }) => t.function.name === "dicode_git_commit_push",
+  );
+  assert.equal(tool.function.parameters.properties.branch_prefix, undefined);
+  assert.equal(calls[0].branch_prefix, "fix/");
 });
 
 test("a failing built-in returns an error result rather than killing the turn", async () => {

@@ -44,7 +44,9 @@ dicode SDK any other way.
      `dicode_get_runs` until that run reaches a terminal status.
    - If both green → exit loop.
 5. **Commit + push.**
-   - `dicode_git_commit_push(source_id, message=…, branch=<fixBranch>, branch_prefix=…)`.
+   - `dicode_git_commit_push(source_id, message=…, branch=<fixBranch>)`. The
+     branch prefix is fixed by the agent's configuration, not by you: a push to
+     a branch outside it is refused.
 6. **Open the PR (review mode only).**
    - `task_buildin_git-pr` with `source_id`, `branch`, `base`, `title`, `body`,
      and `clone_path` — the value step 3 returned.

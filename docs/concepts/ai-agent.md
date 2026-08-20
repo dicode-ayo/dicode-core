@@ -117,13 +117,20 @@ model can act on dicode itself rather than only on tasks:
 
 The grant is the whole gate: a capability the taskset never declared produces no
 tool, so the model never sees an operation it would only be denied on calling.
-The generic `ai-agent` buildin declares none of these and is therefore offered
-none — the authoring presets (`task-create`, `auto-fix`) declare the set their
-write → test → land loop needs.
+The generic `ai-agent` buildin declares `list_tasks` and nothing else, so
+`dicode_list_tasks` is the one built-in every preset inherits; the rest arrive
+only where a taskset asks for them. The authoring presets (`task-create`,
+`auto-fix`) declare the set their write → test → land loop needs.
 
-`dicode_set_dev_mode` takes no run id: the clone is named after the calling run
-so two sessions cannot reach into each other's working copy. It returns
-`clone_path`, which is what `git-pr` expects.
+Some arguments behind these tools are withheld from the model on purpose:
+
+- `dicode_set_dev_mode` takes no `run_id` — the clone is named after the calling
+  run, so two sessions cannot reach into each other's working copy — and no
+  `local_path`, which would let the caller choose what the daemon loads as
+  tasks. It returns `clone_path`, which is what `git-pr` expects.
+- `dicode_git_commit_push` takes no `allow_main`, and reads its branch prefix
+  from the `git_branch_prefix` param. A prefix the model picked alongside the
+  branch would bound nothing.
 
 ### Skills (prompt markdown)
 

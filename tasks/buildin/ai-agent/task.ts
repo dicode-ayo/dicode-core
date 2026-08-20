@@ -134,12 +134,19 @@ function paramsToJsonSchema(
 // run-input retention sweep (list_expired / delete_input) stay off it: those
 // belong to the task process, not to the model driving it.
 
+// Values a built-in needs that come from the task's own params rather than from
+// the model. A boundary the model can set alongside the value it bounds is not
+// a boundary, so anything of that shape lives here.
+interface BuiltinConfig {
+  gitBranchPrefix: string;
+}
+
 interface BuiltinTool {
   name: string;
   cap: string;
   description: string;
   parameters: Record<string, unknown>;
-  run(dicode: Dicode, args: Record<string, unknown>): Promise<unknown>;
+  run(dicode: Dicode, args: Record<string, unknown>, cfg: BuiltinConfig): Promise<unknown>;
 }
 
 type SchemaProps = Record<string, Record<string, unknown>>;
@@ -287,25 +294,26 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
     cap: "git.commit_push",
     description:
       "Commit the working tree of a source's repo and push it to a branch, " +
-      "returning the commit hash. The branch must start with branch_prefix; " +
-      "main and master cannot be pushed to.",
+      "returning the commit hash. The branch must start with the prefix this " +
+      "agent is configured to push under; main and master cannot be pushed to.",
     parameters: objectSchema({
       source_id: { type: "string", description: "Source name as it appears in dicode.yaml." },
       message: { type: "string", description: "Commit message." },
-      branch: { type: "string", description: "Branch to push to. Must start with branch_prefix." },
-      branch_prefix: { type: "string", description: "Prefix the branch must start with, e.g. 'fix/'." },
+      branch: { type: "string", description: "Branch to push to. Must start with the agent's configured branch prefix." },
       files: { type: "array", items: { type: "string" }, description: "Paths to stage. Omit to stage everything changed." },
       author_name: { type: "string", description: "Commit author name. Defaults to this agent." },
       author_email: { type: "string", description: "Commit author email. Defaults to this agent." },
       auth_token_env: { type: "string", description: "Env var holding the push token. Must be declared in this task's permissions.env." },
-    }, ["source_id", "message", "branch", "branch_prefix"]),
+    }, ["source_id", "message", "branch"]),
     // allow_main is withheld: it is a per-call branch-protection bypass, not a
     // capability, and the branch to protect is not the caller's decision.
-    run: (dicode, args) =>
+    // branch_prefix comes from config for the same reason — as an argument it
+    // would be the caller bounding the caller.
+    run: (dicode, args, cfg) =>
       dicode.git.commit_push(argStr(args, "source_id"), {
         message: argStr(args, "message"),
         branch: argStr(args, "branch"),
-        branch_prefix: argStr(args, "branch_prefix"),
+        branch_prefix: cfg.gitBranchPrefix,
         files: argStrList(args, "files"),
         author_name: argStr(args, "author_name", `dicode ${dicode.task_id}`),
         author_email: argStr(args, "author_email", "noreply@dicode.local"),
@@ -456,6 +464,7 @@ interface AgentRuntime {
   tools: any[];
   toolNameToTaskId: Record<string, string>;
   builtins: Record<string, BuiltinTool>;
+  builtinCfg: BuiltinConfig;
   compactionCfg: CompactionConfig;
   maxToolIterations: number;
   responseMaxTokens: number;
@@ -555,6 +564,8 @@ async function resolveAgentRuntime(
   const skillsDir = (await params.get("skills_dir")) ?? "";
   const skillsBlob = await loadSkills(skillsDir, skillNames);
 
+  const gitBranchPrefix = (await params.get("git_branch_prefix")) ?? "";
+
   const client = new OpenAI({ apiKey, baseURL });
 
   // Build tool list from list_tasks(), filtered by toolFilter. When no
@@ -615,6 +626,7 @@ async function resolveAgentRuntime(
       tools,
       toolNameToTaskId,
       builtins,
+      builtinCfg: { gitBranchPrefix },
       compactionCfg: {
         maxHistoryTokens,
         keepTurns: compactionKeepTurns,
@@ -637,7 +649,7 @@ async function runAgentTurn(
   rt: AgentRuntime,
   dicode: Dicode,
 ): Promise<string> {
-  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
+  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
 
   // Append user turn
   session.messages.push({ role: "user", content: message });
@@ -745,7 +757,7 @@ async function runAgentTurn(
               ? JSON.parse(call.function.arguments)
               : {};
             if (builtin) {
-              result = await builtin.run(dicode, parsed);
+              result = await builtin.run(dicode, parsed, builtinCfg);
             } else {
               // dicode.run_task expects Record<string, string> — stringify non-string values
               const stringified: Record<string, string> = {};
