@@ -33,7 +33,7 @@ func suspendedRun(t *testing.T, reg *registry.Registry) string {
 		t.Fatalf("StartRun: %v", err)
 	}
 	schema := []byte(`{"type":"object","properties":{"a":{"type":"string"}}}`)
-	ok, err := reg.SuspendRun(ctx, runID, []byte(`{}`), schema, "tok", 1, 0, nil)
+	ok, err := reg.SuspendRun(ctx, runID, []byte(`{}`), schema, "tok", 1, 0, nil, nil)
 	if err != nil || !ok {
 		t.Fatalf("SuspendRun: ok=%v err=%v", ok, err)
 	}

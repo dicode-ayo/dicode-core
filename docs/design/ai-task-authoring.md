@@ -154,6 +154,12 @@ and is re-persisted per suspend, so **big-state offload is a required companion,
 store a structured `{store, key}` reference in `resume_state`, offload the blob to
 `buildin/blob-storage` / `buildin/local-storage`, rehydrate on resume via the storage task's `get`
 (never a raw fetchable URL — SSRF/coupling), GC keyed to the root run on conversation end.
+**Shipped (#570, 2026-08-12) — see "Resume-state offload, as shipped" below for the concrete
+threshold/columns/GC design that landed. One detail above doesn't match: the reference is NOT
+a `{store, key}` structure embedded in `resume_state` — it's three dedicated `runs` columns
+(`resume_state_storage_key`/`_size`/`_stored_at`), with `resume_state` left NULL when offloaded.
+Everything else — offload the blob, rehydrate via the storage task's `get`, never a raw fetchable
+URL, GC keyed to the run — matches what landed.**
 
 **Ending a conversation:** the run ends when the handler **returns instead of suspending**,
 triggered by (a) an explicit end-marker in the resume input → `success` (primary), (b) idle TTL —
@@ -201,14 +207,26 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
 
 ### Dedup — reuse, do not rebuild
 
-- **Big-state offload (#570) reuses `registry.InputStore`.** Go already has the exact
-  mechanism: marshal → AES-encrypt (`InputCrypto`) → delegate `{op,key,value}` to a
-  config-dialed storage task (`run_inputs.storage_task`, default `buildin/local-storage`),
-  reference on the runs row, GC by a cleanup buildin. #570 is a threshold-check on
-  `len(resume_state)` at the suspend write + an InputStore sibling (`prefix: resume-state/`,
-  keyed by **root run id** for conversation-scoped GC). The `{store,key}` reference is
-  **internal to Go, invisible to tasks** (and encrypted) — not a task-side protocol. The
-  8 MiB IPC frame cap makes this non-optional, not a nicety.
+- **Big-state offload (#570, shipped) reuses the `registry.InputStore` architecture without
+  reusing its columns.** Go already had the exact mechanism: marshal → AES-encrypt
+  (`InputCrypto`) → delegate `{op,key,value}` to a config-dialed storage task
+  (`defaults.resume_state.storage_task`, default `buildin/local-storage`), reference on the
+  runs row, GC by a cleanup buildin. #570 added a **sibling**, `registry.ResumeStateStore` —
+  its own encryption sub-key (`dicode/resume-state/v1`, distinct from run-inputs'
+  `dicode/run-inputs/v1`), its own storage-key prefix (`resume-state/<runID>`) AND its own
+  root directory (`${DATADIR}/resume-state`, not `${DATADIR}/run-inputs`) passed explicitly
+  on every storage-task call, and its own `runs` columns
+  (`resume_state_storage_key`/`_size`/`_stored_at`) — so it can never collide with run-input
+  offload even though both share `buildin/local-storage` as the byte store. See "Resume-state
+  offload, as shipped" below for the full design. **Encryption scope:** the blob itself
+  (`AES`/`InputCrypto`, AEAD-bound to the run) is encrypted — the `resume_state_storage_key`/
+  `_size`/`_stored_at` columns that reference it are plain metadata, not encrypted, and are
+  reachable by any task holding the `runs_list_expired_resume_state`/`runs_delete_resume_state`
+  permission via `dicode.runs.*` (currently only `buildin/resume-state-cleanup`). The reference
+  is **internal to Go, invisible to tasks** as a value they read or construct — not a
+  task-side protocol. The 8 MiB IPC frame cap
+  (raised from the pre-#593 ~128 KiB single-write cliff) is what makes offload non-optional
+  for a long conversation, not a nicety.
 - **Suspend/end notification reuses the `approvalNotifier` pattern.** The WebUI already
   broadcasts `run:finished` with `Status:"suspended"` off `runFinishedHook`. Missing is
   only a `notify_task` fire — a ~50-line `suspendNotifier` mirroring
@@ -239,12 +257,58 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
 |---|---|---|
 | 1 | **#566** — protect `suspended` dev-clones (one line) | — |
 | 2 | **Skill-truth fix** — real MCP tool surface in the shared `.md`s | `tasks/skills/` |
-| 3 | **#570** — `resume_state` offload in Go | `InputStore`/`InputCrypto`, `local-storage`, `root_run_id` |
+| 3 | ~~**#570** — `resume_state` offload in Go~~ — done | `InputStore`/`InputCrypto`, `local-storage`, `root_run_id` |
 | 4 | **Seam + #571a** — extract `ai-agent-core/chat.ts`; migrate `ai-agent` onto it | claude-cli envelope, #569, #570 |
 | 5 | **#571b** — drivers (`handleAI` / `/api/ai/chat` / `dicode ai`) drive suspend→resume | shipped CLI resume loop |
 | 6 | **Suspend-notify** — `suspendNotifier` on `runFinishedHook` | `approval_notify` pattern, `buildin/notify` |
 | 7 | ~~**`task-create` + prompt-threading** — kills #288~~ — done (#568) | `auto-fix` override, `handleAI` |
 | 8 | ~~Follow-up — `hash_include` for shared-module hash coverage~~ — done (#585) | — |
+
+## Resume-state offload, as shipped (#570, 2026-08-12)
+
+Wires threshold-based offload into the real suspend/resume path
+(`pkg/registry/registry.go`'s `SuspendRun`, `pkg/trigger/resume.go`'s `suspendRun`/`ResumeRun`)
+rather than a new task-facing primitive — `dicode.suspend({ state, externalize: true })` stays
+an explicit non-goal.
+
+**Threshold:** 32 KiB (`registry.DefaultResumeStateThresholdBytes`), configurable via
+`defaults.resume_state.threshold_bytes`. Comfortably above a single LLM turn (a few KB of JSON)
+so a short chat stays on the inline fast path, and far below both the 8 MiB IPC frame cap
+(`pkg/ipc.maxMessageSize`) and `InputCrypto`'s 64 MiB plaintext cap — the two hard ceilings that
+gave the number its order of magnitude. The real driver is the O(n²) SQLite-rewrite cost the
+issue describes, not either cap directly: 32 KiB bounds that cost to short conversations only.
+
+**Storage:** a new `registry.ResumeStateStore`, architecturally a sibling of `InputStore` (same
+marshal → `InputCrypto` AES-encrypt → delegate-to-storage-task shape) but never sharing state
+with it — see the "Dedup" section above for exactly how the two stay namespaced apart (distinct
+sub-key, distinct key prefix, distinct storage root, distinct `runs` columns).
+
+**Ordering / failure mode:** `suspendRun` calls `ResumeStateStore.Persist` and only calls
+`registry.SuspendRun` (the write that makes the run visibly `suspended`) after the blob write
+succeeds. A `Persist` failure returns an error straight out of `suspendRun` — the run lands
+`StatusFailure`, never `StatusSuspended` with a storage key pointing at nothing.
+
+**Resume-side transparency:** `ResumeRun` resolves `run.ResumeStateStorageKey` (if set) via
+`ResumeStateStore.Fetch` — using the *suspended row's own ID* as both the storage key's runID and
+the AEAD's AAD-binding runID, matching how it was written — before building
+`pkg/runtime.RunOptions.ResumeState`. The resolution happens before the resume token is consumed
+(same rationale as the pre-existing fire-guard probe): a fetch failure leaves the run suspended
+and the token intact, so a retry after a storage blip can still succeed. The task-facing state is
+therefore byte-identical whether or not offload happened.
+
+**GC:** two layers, both keyed off the row (which already carries `root_run_id`):
+1. **Eager** — `ResumeRun` best-effort deletes the blob and clears the offload columns
+   immediately after a successful resume (the state was single-use; nothing will ever fetch that
+   row's blob again).
+2. **TTL sweep (backstop)** — the `resume-state-cleanup` buildin (mirrors `run-inputs-cleanup`,
+   cron `23 * * * *`) calls `dicode.runs.list_expired_resume_state` /
+   `dicode.runs.delete_resume_state`. `Registry.ListExpiredResumeStates` excludes any row still
+   `status = suspended` regardless of age — that row's blob is a live reference a future resume
+   will dereference, so the sweep can never strand a dangling reference. A row only becomes
+   sweep-eligible once it has left `suspended` (resumed, cancelled by the resume-deadline sweep,
+   etc.) AND `resume_state_stored_at` is older than `defaults.resume_state.retention` (default
+   24h — short relative to run-input's 30d default because resume-state is single-use working
+   memory, not an audit trail).
 
 ## Open questions
 

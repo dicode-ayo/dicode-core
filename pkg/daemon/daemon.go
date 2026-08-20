@@ -239,6 +239,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// replayer is nil when persistence is disabled; consumed after webui.New.
 	replayer := wireRunInputPersistence(cfg, secretsChain, reg, eng, denoRT, pythonRT, log)
 
+	// 6b. Resume-state offload (#570): wire ResumeStateStore when enabled, so
+	// a large dicode.suspend() state gets written to the storage task instead
+	// of inline. Independent of run-input persistence — offload defaults on
+	// even when run-input persistence is disabled.
+	wireResumeStatePersistence(cfg, dataDir, secretsChain, eng, denoRT, pythonRT, log)
+
 	// 7. Sources + reconciler.
 	sourceMgr, rec, err := initSources(cfg, dataDir, reg, denoRT, pythonRT, log)
 	if err != nil {
@@ -373,6 +379,51 @@ func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg
 	return replayer
 }
 
+// wireResumeStatePersistence wires the ResumeStateStore into the engine when
+// enabled (step 6b, #570). A no-op (engine keeps writing resume_state inline
+// unconditionally) when disabled or when no SubKeyDeriver is available —
+// mirrors wireRunInputPersistence's fail-open posture: a daemon without a
+// local secrets provider still runs, just without offload.
+func wireResumeStatePersistence(cfg *config.Config, dataDir string, secretsChain secrets.Chain, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) {
+	if !cfg.Defaults.ResumeState.IsEnabled() {
+		log.Info("resume-state offload disabled by config")
+		return
+	}
+	var deriver secrets.SubKeyDeriver
+	for _, p := range secretsChain {
+		if d, ok := p.(secrets.SubKeyDeriver); ok {
+			deriver = d
+			break
+		}
+	}
+	if deriver == nil {
+		log.Warn("resume-state offload: no SubKeyDeriver available in secrets chain — offload disabled")
+		return
+	}
+	// Distinct sub-key from run-inputs' "dicode/run-inputs/v1" (see
+	// ResumeStateStore's doc comment) — same Argon2id rationale as
+	// wireRunInputPersistence: derived once at startup, not in a
+	// task-controlled loop.
+	key, err := deriver.DeriveSubKey("dicode/resume-state/v1")
+	if err != nil {
+		log.Warn("resume-state offload: sub-key derive failed", zap.Error(err))
+		return
+	}
+	runner := trigger.NewInputStoreTaskRunner(eng)
+	root := filepath.Join(dataDir, "resume-state")
+	rs := registry.NewResumeStateStore(registry.NewInputCrypto(key), runner, cfg.Defaults.ResumeState.StorageTask, root)
+	eng.SetResumeStateStore(rs)
+	eng.SetResumeStateThresholdBytes(cfg.Defaults.ResumeState.ThresholdBytes)
+	denoRT.SetResumeStateStore(rs)
+	pythonRT.SetResumeStateStore(rs)
+	log.Info("resume-state offload enabled",
+		zap.Int("threshold_bytes", cfg.Defaults.ResumeState.ThresholdBytes),
+		zap.Duration("retention", cfg.Defaults.ResumeState.Retention),
+		zap.String("storage_task", cfg.Defaults.ResumeState.StorageTask),
+		zap.String("root", root),
+	)
+}
+
 // initSources builds the task sources + source manager, wires them into both
 // runtimes, and creates the reconciler (step 7).
 func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) (*webui.SourceManager, *registry.Reconciler, error) {
@@ -420,6 +471,20 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		// reload, so the override is re-applied on every registration.
 		if isSpec && spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
 			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+			for i := range spec.Params {
+				if spec.Params[i].Name == "retention_seconds" {
+					spec.Params[i].Default = retStr
+					break
+				}
+			}
+		}
+		// Same override, for buildin/resume-state-cleanup's retention_seconds
+		// default — matches dicode.yaml's defaults.resume_state.retention (#570).
+		// Without this the task.yaml-baked 24h default silently ignores whatever
+		// an operator configures, exactly as run-inputs-cleanup's own override
+		// above exists to prevent.
+		if isSpec && spec.ID == "buildin/resume-state-cleanup" && cfg.Defaults.ResumeState.Retention > 0 {
+			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.ResumeState.Retention.Seconds()))
 			for i := range spec.Params {
 				if spec.Params[i].Name == "retention_seconds" {
 					spec.Params[i].Default = retStr

@@ -65,6 +65,13 @@ const (
 	CapRunsDeleteInput = "runs.delete_input" // dicode.runs.delete_input
 	CapRunsPinInput    = "runs.pin_input"    // dicode.runs.pin_input
 	CapRunsUnpinInput  = "runs.unpin_input"  // dicode.runs.unpin_input
+
+	// Resume-state offload retention management (#570) — gated per-task via
+	// permissions.dicode. Mirrors the run-input retention caps above; kept
+	// distinct so a task can be granted GC rights over one mechanism without
+	// the other.
+	CapRunsListExpiredResumeState = "runs.list_expired_resume_state" // dicode.runs.list_expired_resume_state
+	CapRunsDeleteResumeState      = "runs.delete_resume_state"       // dicode.runs.delete_resume_state
 	// CapRunsGetInput is granted via permissions.dicode.runs_get_input. Sensitive —
 	// grants cross-task input read. Redaction at write time (#233) bounds the surface.
 	CapRunsGetInput      = "runs.get_input"

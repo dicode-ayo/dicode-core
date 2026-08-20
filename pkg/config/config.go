@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/internal/gitops"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -65,6 +66,9 @@ type DefaultsConfig struct {
 
 	// RunInputs configures run-input persistence. See spec § 4.1.
 	RunInputs RunInputsConfig `yaml:"run_inputs,omitempty"`
+
+	// ResumeState configures large-suspend-state offload (#570).
+	ResumeState ResumeStateConfig `yaml:"resume_state,omitempty"`
 }
 
 // RunInputsConfig is the global default for run-input persistence (#233).
@@ -91,6 +95,42 @@ type RunInputsConfig struct {
 
 // IsEnabled returns the effective Enabled value (nil → true).
 func (c RunInputsConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// ResumeStateConfig is the global default for suspend/resume large-state
+// offload (#570) — a cumulative AI-conversation state re-persisted on every
+// suspend is offloaded to a storage task once it exceeds ThresholdBytes,
+// instead of being rewritten inline into runs.resume_state every turn.
+type ResumeStateConfig struct {
+	// Enabled toggles offload globally. Default (nil → true) applied in
+	// applyDefaults. Set to false to always write resume_state inline
+	// regardless of size (pre-#570 behavior).
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// ThresholdBytes is the len(state) cutoff above which a suspend offloads
+	// instead of writing inline. Default registry.DefaultResumeStateThresholdBytes
+	// (32 KiB) applied in applyDefaults.
+	ThresholdBytes int `yaml:"threshold_bytes,omitempty"`
+
+	// Retention is the maximum age of an offloaded-but-orphaned resume-state
+	// blob (a row that left `suspended` without a successful eager delete on
+	// resume — e.g. a resume-deadline timeout, or a daemon restart mid-resume)
+	// before the resume-state-cleanup buildin sweeps it. Default 24h applied
+	// in applyDefaults — short relative to run-input's 30d default because a
+	// resume-state blob is single-use working memory, not an audit trail.
+	Retention time.Duration `yaml:"retention,omitempty"`
+
+	// StorageTask is the task ID of the configured storage backend.
+	// Default "buildin/local-storage" applied in applyDefaults.
+	StorageTask string `yaml:"storage_task,omitempty"`
+}
+
+// IsEnabled returns the effective Enabled value (nil → true).
+func (c ResumeStateConfig) IsEnabled() bool {
 	if c.Enabled == nil {
 		return true
 	}
@@ -675,6 +715,18 @@ func applyDefaults(cfg *Config, configDir string) {
 	}
 	if cfg.Defaults.RunInputs.StorageTask == "" {
 		cfg.Defaults.RunInputs.StorageTask = "buildin/local-storage"
+	}
+	// ResumeState defaults (#570): 32 KiB offload threshold, 24h retention for
+	// orphaned blobs, local-storage backend. See ResumeStateConfig doc +
+	// registry.DefaultResumeStateThresholdBytes for the threshold rationale.
+	if cfg.Defaults.ResumeState.ThresholdBytes == 0 {
+		cfg.Defaults.ResumeState.ThresholdBytes = registry.DefaultResumeStateThresholdBytes
+	}
+	if cfg.Defaults.ResumeState.Retention == 0 {
+		cfg.Defaults.ResumeState.Retention = 24 * time.Hour
+	}
+	if cfg.Defaults.ResumeState.StorageTask == "" {
+		cfg.Defaults.ResumeState.StorageTask = "buildin/local-storage"
 	}
 	// DataDir default is set earlier during variable expansion.
 }

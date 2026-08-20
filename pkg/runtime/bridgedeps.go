@@ -40,8 +40,11 @@ type BridgeDeps struct {
 	SecretsManager secrets.Manager
 	// InputStore is optional; wired for dicode.runs.delete_input / get_input.
 	InputStore *registry.InputStore
-	DB         db.DB
-	Log        *zap.Logger
+	// ResumeStateStore is optional; wired for dicode.runs.delete_resume_state
+	// (#570) — the resume-state-cleanup buildin's GC path.
+	ResumeStateStore *registry.ResumeStateStore
+	DB               db.DB
+	Log              *zap.Logger
 	// IPCSecret is the per-daemon secret used to mint per-run IPC tokens.
 	IPCSecret []byte
 	Engine    ipc.EngineRunner
@@ -96,6 +99,7 @@ func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[stri
 	srv.SetGateway(d.Gateway)
 	srv.SetSecrets(d.SecretsManager)
 	srv.SetInputStore(live.InputStore)
+	srv.SetResumeStateStore(live.ResumeStateStore)
 	srv.SetRedactor(red)
 	srv.SetReplayer(live.Replayer)
 	if m := live.SourceMgr; m != nil {
@@ -151,6 +155,11 @@ func (d *BridgeDeps) SetSecretsManager(m secrets.Manager) { d.SecretsManager = m
 // dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
 // before any run; mirrors the SetEngine / SetGateway pattern.
 func (d *BridgeDeps) SetInputStore(is *registry.InputStore) { d.InputStore = is }
+
+// SetResumeStateStore wires the ResumeStateStore so the per-run IPC server
+// can serve dicode.runs.delete_resume_state calls (#570). Mirrors the
+// SetInputStore wiring.
+func (d *BridgeDeps) SetResumeStateStore(rs *registry.ResumeStateStore) { d.ResumeStateStore = rs }
 
 // SetReplayer wires the Replayer so the per-run IPC server can serve
 // dicode.runs.replay calls. Mirrors the SetInputStore wiring.

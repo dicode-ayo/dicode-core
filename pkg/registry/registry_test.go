@@ -488,7 +488,7 @@ func TestSuspendRun_RoundTrip(t *testing.T) {
 	suspendedAt := time.Now().UnixMilli()
 	deadline := suspendedAt + 86_400_000
 
-	if _, err := r.SuspendRun(ctx, runID, state, schema, token, suspendedAt, deadline, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, state, schema, token, suspendedAt, deadline, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -531,7 +531,7 @@ func TestSuspendRun_NoDeadlineNilBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.SuspendRun(ctx, runID, nil, nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, nil, nil, "tok", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -564,7 +564,7 @@ func TestCleanupStaleRuns_SkipsSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.SuspendRun(ctx, suspended, []byte(`{}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, suspended, []byte(`{}`), nil, "tok", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	running, err := r.StartRun(ctx, "task-b", "")
@@ -608,7 +608,7 @@ func TestSuspendRun_DoesNotResurrectCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	suspended, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil)
+	suspended, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil, nil)
 	if err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}

@@ -202,6 +202,10 @@ export interface Dicode {
     unpin_input:  (runID: string)                 => Promise<unknown>;
     get_input:    (runID: string)                 => Promise<unknown>;
     replay:       (runID: string, taskName?: string) => Promise<unknown>;
+    // Resume-state offload retention (#570) — mirrors list_expired/delete_input
+    // above but for offloaded dicode.suspend() state blobs, not run inputs.
+    list_expired_resume_state: (opts?: { before_ts?: number }) => Promise<unknown>;
+    delete_resume_state:       (runID: string)                 => Promise<unknown>;
   };
   tasks: {
     test: (taskID: string) => Promise<unknown>;
@@ -525,6 +529,10 @@ const dicode: Dicode = {
       __call__({ method: "dicode.runs.get_input", runID }),
     replay: (runID, taskName) =>
       __call__({ method: "dicode.runs.replay", runID, taskID: taskName ?? "" }),
+    list_expired_resume_state: (opts) =>
+      __call__({ method: "dicode.runs.list_expired_resume_state", before_ts: opts?.before_ts ?? 0 }),
+    delete_resume_state: (runID) =>
+      __call__({ method: "dicode.runs.delete_resume_state", runID }),
   },
   tasks: {
     test: (taskID) =>

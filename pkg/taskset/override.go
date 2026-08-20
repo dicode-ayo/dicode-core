@@ -207,6 +207,12 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	if overlay.RunsUnpinInput {
 		out.RunsUnpinInput = true
 	}
+	if overlay.RunsListExpiredResumeState {
+		out.RunsListExpiredResumeState = true
+	}
+	if overlay.RunsDeleteResumeState {
+		out.RunsDeleteResumeState = true
+	}
 	if overlay.RunsReplay {
 		out.RunsReplay = true
 	}

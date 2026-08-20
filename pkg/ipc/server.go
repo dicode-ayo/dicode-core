@@ -65,12 +65,13 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway      *Gateway             // optional; enables http.register for daemon tasks
-	inputStore   *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
-	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
-	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
-	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
-	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
+	gateway          *Gateway                   // optional; enables http.register for daemon tasks
+	inputStore       *registry.InputStore       // optional; enables dicode.runs.delete_input blob deletion
+	resumeStateStore *registry.ResumeStateStore // optional; enables dicode.runs.delete_resume_state blob deletion (#570)
+	replayer         *registry.Replayer         // optional; enables dicode.runs.replay
+	sourceMgr        SourceDevModeSetter        // optional; enables dicode.sources.set_dev_mode
+	repoResolver     RepoPathResolver           // optional; enables dicode.git.commit_push
+	crypto           *cryptoHandler             // optional; enables dicode.crypto.{encrypt, decrypt}
 	// testGuard vetoes dicode.tasks.test for a given task ID. The approval
 	// gate wires its FireGuard here: a pending (unapproved) task's test file
 	// runs with full host permissions, so it must be refused exactly like a
@@ -270,6 +271,12 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.RunsUnpinInput {
 			caps = append(caps, CapRunsUnpinInput)
 		}
+		if dp.RunsListExpiredResumeState {
+			caps = append(caps, CapRunsListExpiredResumeState)
+		}
+		if dp.RunsDeleteResumeState {
+			caps = append(caps, CapRunsDeleteResumeState)
+		}
 		if dp.RunsReplay {
 			caps = append(caps, CapRunsReplay)
 		}
@@ -362,6 +369,12 @@ func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
 // can call dicode.runs.delete_input() to remove the blob before clearing the
 // runs row. Must be called before Start.
 func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
+
+// SetResumeStateStore attaches the ResumeStateStore so tasks with
+// RunsDeleteResumeState permission can call dicode.runs.delete_resume_state()
+// to remove an offloaded resume-state blob before clearing the runs row
+// (#570). Must be called before Start.
+func (s *Server) SetResumeStateStore(rs *registry.ResumeStateStore) { s.resumeStateStore = rs }
 
 // SetReplayer attaches the Replayer so tasks with RunsReplay permission
 // can call dicode.runs.replay. nil disables (dispatch returns error).
@@ -952,6 +965,77 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 			}
 			if err := s.registry.ClearRunInput(s.ctx, req.RunID); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
+
+		// ── dicode.runs.*_resume_state (#570 offload retention) ──────────
+
+		case "dicode.runs.list_expired_resume_state":
+			if !hasCap(caps, CapRunsListExpiredResumeState) {
+				reply(req.ID, nil, "ipc: permission denied (runs.list_expired_resume_state)")
+				continue
+			}
+			beforeTs := req.BeforeTs
+			if beforeTs == 0 {
+				beforeTs = time.Now().Unix()
+			}
+			rows, err := s.registry.ListExpiredResumeStates(s.ctx, beforeTs)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, rows, "")
+
+		case "dicode.runs.delete_resume_state":
+			if !hasCap(caps, CapRunsDeleteResumeState) {
+				reply(req.ID, nil, "ipc: permission denied (runs.delete_resume_state)")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			run, err := s.registry.GetRun(s.ctx, req.RunID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			// A still-suspended row's blob is a live reference a future
+			// ResumeRun will dereference (same invariant ListExpiredResumeStates
+			// enforces for the batch GC path). Without this check, any caller
+			// holding runs_delete_resume_state could clear a DIFFERENT,
+			// in-flight conversation's offload columns out from under it: since
+			// SuspendRun nulls the inline resume_state column whenever a blob is
+			// offloaded, clearing the columns here leaves ResumeRun's fallback
+			// (resumeState := run.ResumeState) at nil — the token stays valid and
+			// the resume "succeeds" with silently empty state instead of erroring.
+			if run.Status == registry.StatusSuspended {
+				reply(req.ID, nil, "ipc: cannot delete resume state for a still-suspended run")
+				continue
+			}
+			// Clear the DB columns only once the blob is actually gone — the
+			// TTL sweep's next pass is this row's only remaining way to find
+			// an orphaned blob, and it can only do that via the very
+			// resume_state_storage_key column ClearResumeStateBlob would
+			// erase. Reporting success (or silently no-op'ing when no store
+			// is wired) while the blob still exists would strand it: no
+			// future sweep would ever revisit this row.
+			if run.ResumeStateStorageKey != "" {
+				if s.resumeStateStore == nil {
+					reply(req.ID, nil, "ipc: resume-state store not configured")
+					continue
+				}
+				if err := s.resumeStateStore.Delete(s.ctx, run.ResumeStateStorageKey); err != nil {
+					s.log.Warn("delete_resume_state: storage delete failed",
+						zap.String("run", req.RunID),
+						zap.String("error_class", "storage_delete"))
+					reply(req.ID, nil, "ipc: resume-state storage delete failed")
+					continue
+				}
+			}
+			if err := s.registry.ClearResumeStateBlob(s.ctx, req.RunID); err != nil {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
