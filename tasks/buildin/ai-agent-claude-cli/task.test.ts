@@ -4,7 +4,7 @@
 // binary.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import main, { buildClaudeArgs, decideEntryMode, isChatEnd, steps } from "./task.ts";
+import main, { buildClaudeArgs, decideEntryMode, isChatEnd, skillLoadError, steps } from "./task.ts";
 import { isValidSessionId } from "../ai-agent-core/chat.ts";
 
 const fakeDicode = {} as any;
@@ -650,4 +650,189 @@ JSON`,
     if (args.includes("--resume")) {
         throw new Error(`expected --resume to be omitted when chatId had to be replaced, got:\n${args.join(" ")}`);
     }
+});
+
+const SKILL_DOC = `---
+name: legit-skill
+description: A skill the CLI can load.
+---
+
+# legit skill
+body
+`;
+
+Deno.test("installs a skill as .claude/skills/<name>/SKILL.md", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const skillsDir = await Deno.makeTempDir();
+    await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/skill-doc`;
+    const result: any = await withStubClaude(
+        `cat "$PWD/.claude/skills/legit-skill/SKILL.md" > ${sentinel} 2>/dev/null || echo "(missing)" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () =>
+            main({
+                params: makeParams([
+                    ["prompt", "hi"],
+                    ["skills", "legit-skill"],
+                    ["skills_dir", skillsDir],
+                ]),
+                dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, true);
+    assertEquals(await Deno.readTextFile(sentinel), SKILL_DOC);
+});
+
+Deno.test("drops a skill whose frontmatter name disagrees with its filename", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const skillsDir = await Deno.makeTempDir();
+    await Deno.writeTextFile(
+        `${skillsDir}/legit-skill.md`,
+        SKILL_DOC.replace("name: legit-skill", "name: something-else"),
+    );
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/skills-listed`;
+    const result: any = await withStubClaude(
+        `ls "$PWD/.claude/skills" > ${sentinel} 2>/dev/null || echo "(empty)" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () =>
+            main({
+                params: makeParams([
+                    ["prompt", "hi"],
+                    ["skills", "legit-skill"],
+                    ["skills_dir", skillsDir],
+                ]),
+                dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, true);
+    assertEquals((await Deno.readTextFile(sentinel)).trim(), "");
+});
+
+Deno.test("skillLoadError: accepts a well-formed skill", () => {
+    assertEquals(skillLoadError("legit-skill", SKILL_DOC), "");
+});
+
+Deno.test("skillLoadError: accepts a block-scalar description", () => {
+    const doc = `---
+name: legit-skill
+description: |
+  A skill the CLI can load.
+---
+body
+`;
+    assertEquals(skillLoadError("legit-skill", doc), "");
+});
+
+Deno.test("skillLoadError: rejects missing frontmatter, name, and description", () => {
+    assertEquals(skillLoadError("legit-skill", "# no frontmatter\n"), "SKILL.md has no YAML frontmatter");
+    assertEquals(
+        skillLoadError("legit-skill", "---\ndescription: d\n---\n"),
+        "frontmatter declares no name",
+    );
+    assertEquals(
+        skillLoadError("legit-skill", "---\nname: legit-skill\n---\n"),
+        "frontmatter declares no description",
+    );
+});
+
+Deno.test("skillLoadError: rejects a name that disagrees with the directory", () => {
+    const err = skillLoadError("legit-skill", SKILL_DOC.replace("name: legit-skill", "name: other"));
+    if (!err.includes("does not match")) {
+        throw new Error(`expected a name-mismatch error, got ${JSON.stringify(err)}`);
+    }
+});
+
+Deno.test("skillLoadError: accepts a quoted name (the CLI reads YAML, not raw text)", () => {
+    assertEquals(skillLoadError("legit-skill", SKILL_DOC.replace("name: legit-skill", 'name: "legit-skill"')), "");
+});
+
+Deno.test("skillLoadError: a nested name key does not shadow the top-level one", () => {
+    const doc = `---
+name: legit-skill
+description: |
+  name: something-else
+---
+body
+`;
+    assertEquals(skillLoadError("legit-skill", doc), "");
+});
+
+Deno.test("counts a skill named twice once", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const skillsDir = await Deno.makeTempDir();
+    await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
+    // The wired count reaches the operator only through the run log, so that
+    // log line is the only place a double-count is observable.
+    const lines: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+    let result: any;
+    try {
+        result = await withStubClaude(
+            `cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+            () =>
+                main({
+                    params: makeParams([
+                        ["prompt", "hi"],
+                        ["skills", "legit-skill,legit-skill"],
+                        ["skills_dir", skillsDir],
+                    ]),
+                    dicode: fakeDicode,
+                }),
+        );
+    } finally {
+        console.log = origLog;
+    }
+    assertEquals(result.ok, true);
+    const invoking = lines.find((l) => l.includes("invoking")) ?? "";
+    if (!invoking.includes("skills=1")) {
+        throw new Error(`expected skills=1 for a name given twice, got: ${invoking}`);
+    }
+});
+
+Deno.test("a skill dropped from a later turn is uninstalled from the shared workdir", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const skillsDir = await Deno.makeTempDir();
+    await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/skills-listed`;
+    // Both turns share one chatId, so they share one workdir — that is what
+    // lets a stale skill survive into a turn that no longer asks for it.
+    const chatId = crypto.randomUUID();
+    const { dicode } = makeSuspendDicode();
+
+    const turn = async (skills: string) => {
+        try {
+            await steps.turn({
+                params: makeParams([["skills", skills], ["skills_dir", skillsDir]]),
+                input: { message: "hi" },
+                state: { claudeSessionId: "", chatId },
+                dicode,
+                output: {} as any,
+                mcp: {} as any,
+            } as any);
+        } catch (e) {
+            if (!(e instanceof SuspendSignal)) throw e;
+        }
+        return (await Deno.readTextFile(sentinel)).trim();
+    };
+
+    await withStubClaude(
+        `ls "$PWD/.claude/skills" > ${sentinel} 2>/dev/null || echo "(empty)" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        async () => {
+            assertEquals(await turn("legit-skill"), "legit-skill");
+            assertEquals(await turn(""), "");
+        },
+    );
 });

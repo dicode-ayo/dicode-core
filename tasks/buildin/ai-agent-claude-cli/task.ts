@@ -21,6 +21,7 @@
 // a value, not throws).
 
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import { parse as parseYaml } from "jsr:@std/yaml@1";
 import { chatStart, chatTurn, decideEntryMode, isChatEnd, isValidSessionId, resolveSessionId, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
 
 // Re-exported so the task's tests (and any importer) reach the shared envelope
@@ -223,6 +224,37 @@ async function oneShotTurn(
     };
 }
 
+// skillLoadError reports why the Claude CLI would ignore a skill document, or
+// "" when the CLI will load it. A SKILL.md needs frontmatter carrying a
+// description and a `name` that agrees with its directory; when it disagrees
+// the CLI drops the skill outright and says nothing, so the check has to happen
+// on this side of the spawn to be visible at all.
+export function skillLoadError(name: string, doc: string): string {
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(doc);
+    if (!fm) return "SKILL.md has no YAML frontmatter";
+    let front: unknown;
+    try {
+        // The CLI reads this block as YAML, so the comparison below has to see
+        // what YAML says the value is — `name: "x"` and `name: x` are the same
+        // skill, and a scan of the raw lines would disagree.
+        front = parseYaml(fm[1]);
+    } catch (e) {
+        return `frontmatter is not valid YAML: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (front === null || typeof front !== "object" || Array.isArray(front)) {
+        return "frontmatter is not a mapping";
+    }
+    const fields = front as Record<string, unknown>;
+    const declared = typeof fields.name === "string" ? fields.name.trim() : "";
+    if (!declared) return "frontmatter declares no name";
+    if (declared !== name) {
+        return `frontmatter name ${JSON.stringify(declared)} does not match the skill name ${JSON.stringify(name)}`;
+    }
+    const description = typeof fields.description === "string" ? fields.description.trim() : "";
+    if (!description) return "frontmatter declares no description";
+    return "";
+}
+
 // runClaudeTurn is the reusable Claude-invocation core: resolve auth + binary,
 // build the per-invocation .claude/ workdir (mcp.json + skills), spawn
 // `claude -p`, and decode the response. It is session-mapping-agnostic — the
@@ -275,7 +307,8 @@ async function runClaudeTurn(opts: {
 
     // Per-invocation working directory. Claude CLI honors a project-local
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
-    // additional MCP servers, `.claude/skills/*.md` are loaded as skills.
+    // additional MCP servers, `.claude/skills/<name>/SKILL.md` are loaded as
+    // skills.
     //
     // workdirKey (dicode session id for one-shot, chat id for the loop) is
     // stable across a conversation's turns — it MUST be, because Claude CLI's
@@ -307,6 +340,14 @@ async function runClaudeTurn(opts: {
     let skillsWired = 0;
     const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
     try {
+        // The workdir is stable across a conversation's turns, so a skill
+        // dropped from the `skills` param on a later turn would otherwise stay
+        // installed and keep loading.
+        try {
+            await Deno.remove(`${claudeDir}/skills`, { recursive: true });
+        } catch (e) {
+            if (!(e instanceof Deno.errors.NotFound)) throw e;
+        }
         await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
 
         // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks as
@@ -327,20 +368,27 @@ async function runClaudeTurn(opts: {
             mcpWired = true;
         }
 
-        // Skills wiring: copy each named skill file from skills_dir into
-        // .claude/skills/. Names are validated against a strict regex to defang
-        // any attempt at traversal via "../" or absolute paths.
+        // Skills wiring: install each named skill from skills_dir as
+        // .claude/skills/<name>/SKILL.md. Names are validated against a strict
+        // regex to defang any attempt at traversal via "../" or absolute paths.
+        // A skill whose frontmatter fails skillLoadError() is dropped rather
+        // than installed, so skillsWired counts only what the CLI will load.
         if (skillsParam && skillsDir) {
-            const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
+            const names = [...new Set(skillsParam.split(",").map((s) => s.trim()).filter(Boolean))];
             for (const name of names) {
                 if (!SAFE_SKILL_NAME.test(name)) {
                     console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
                     continue;
                 }
-                const src = `${skillsDir}/${name}.md`;
-                const dst = `${claudeDir}/skills/${name}.md`;
                 try {
-                    await Deno.copyFile(src, dst);
+                    const doc = await Deno.readTextFile(`${skillsDir}/${name}.md`);
+                    const problem = skillLoadError(name, doc);
+                    if (problem) {
+                        console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${problem}`);
+                        continue;
+                    }
+                    await Deno.mkdir(`${claudeDir}/skills/${name}`, { recursive: true });
+                    await Deno.writeTextFile(`${claudeDir}/skills/${name}/SKILL.md`, doc);
                     skillsWired++;
                 } catch (e) {
                     console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${e instanceof Error ? e.message : String(e)}`);
