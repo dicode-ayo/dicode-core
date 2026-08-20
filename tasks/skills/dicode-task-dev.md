@@ -18,7 +18,7 @@ hand back an instruction to make the call yourself.
 | `get_task(id)` | Returns one task's spec (id, name, description, params) by namespaced ID. |
 | `run_task(id, params?)` | Triggers a task, blocks until it finishes, returns its run result. `params` is a string-valued object. |
 | `list_sources` | Lists the configured sources: name, type, git URL, branch, dev-mode state. No host paths. |
-| `switch_dev_mode(source, enabled, branch?, base?)` | Enters or leaves dev mode. Entering with a branch clones the source and returns `clone_path` — edit there, not in the live source. |
+| `switch_dev_mode(source, enabled, branch?, base?, run_id?)` | Enters or leaves dev mode. Entering with a branch clones the source and returns `clone_path` — edit there, not in the live source. `run_id` names the clone; omit it, the daemon binds it to your run. |
 | `test_task(id)` | Runs a task's sibling test file and returns the results. Refused while the approval gate holds the task pending. |
 
 A call you are not entitled to make comes back as a JSON-RPC error naming the

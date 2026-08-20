@@ -138,7 +138,7 @@ test.describe('MCP — JSON-RPC dispatch', () => {
     expect(body.error!.message).toContain('not found');
   });
 
-  test('tools/call list_sources returns a hint string (not a hard error)', async ({ request }) => {
+  test('tools/call list_sources returns the source listing, without host paths', async ({ request }) => {
     const res = await request.post(MCP_URL, {
       headers: { 'Content-Type': 'application/json' },
       data: {
@@ -150,9 +150,19 @@ test.describe('MCP — JSON-RPC dispatch', () => {
     });
     expect(res.ok()).toBe(true);
     const body = (await res.json()) as JsonRpcResponse<ToolsCallResult>;
-    // The buildin task intentionally returns a hint pointing at /api/sources
-    // — MCP clients have the dicode API key already and can call it directly.
-    expect(body.result?.content[0].text).toContain('/api/sources');
+    expect(body.error).toBeUndefined();
+
+    const sources = JSON.parse(body.result!.content[0].text) as Array<Record<string, unknown>>;
+    expect(Array.isArray(sources)).toBe(true);
+    const fixture = sources.find((s) => s.name === 'e2e-tests');
+    expect(fixture).toBeDefined();
+
+    // sources_list is grantable on its own, so the listing must not carry the
+    // daemon's filesystem layout — GET /api/sources is where those live.
+    for (const source of sources) {
+      expect(source).not.toHaveProperty('path');
+      expect(source).not.toHaveProperty('dev_path');
+    }
   });
 
   test('unknown method returns -32601', async ({ request }) => {

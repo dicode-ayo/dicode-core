@@ -2878,10 +2878,22 @@ func TestIPC_SourcesList_ReturnsSummaries(t *testing.T) {
 // no filesystem path, so a task holding only sources_list learns nothing about
 // the daemon's layout. A path reaches a task through set_dev_mode, which
 // returns the clone it just made.
+//
+// Asserted as the exact field set rather than a deny-list of path-ish names:
+// a deny-list only catches the names someone thought to write down, and the
+// next field copied over from webui.SourceInfo — which does carry paths —
+// would not be one of them.
 func TestIPC_SourcesList_WithholdsHostPaths(t *testing.T) {
-	for _, field := range []string{"Path", "DevPath", "LocalPath"} {
-		if _, found := reflect.TypeOf(SourceSummary{}).FieldByName(field); found {
-			t.Errorf("SourceSummary carries a host path field %q", field)
-		}
+	want := []string{"Name", "Type", "URL", "Branch", "DevMode"}
+
+	typ := reflect.TypeOf(SourceSummary{})
+	got := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		got = append(got, typ.Field(i).Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SourceSummary fields = %v, want exactly %v.\n"+
+			"A new field here reaches every caller holding sources_list; if it "+
+			"names a host path, drop it instead of adding it to this list.", got, want)
 	}
 }

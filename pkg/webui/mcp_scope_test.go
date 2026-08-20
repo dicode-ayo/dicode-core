@@ -672,6 +672,17 @@ func TestHandleMCP_ScopedKey_OversizedBodyRejected(t *testing.T) {
 
 // ── mcpScopeRewrite ─────────────────────────────────────────────────────────
 
+// rewrite calls mcpScopeRewrite and fails the test if it could not bind the
+// call — every body in these tests is one it must be able to re-encode.
+func rewrite(t *testing.T, scope *pkgruntime.MCPScope, body []byte) []byte {
+	t.Helper()
+	out, ok := mcpScopeRewrite(scope, body)
+	if !ok {
+		t.Fatalf("mcpScopeRewrite refused to bind: %s", body)
+	}
+	return out
+}
+
 // argsOf pulls params.arguments back out of a rewritten JSON-RPC envelope.
 func argsOf(t *testing.T, body []byte) map[string]any {
 	t.Helper()
@@ -695,7 +706,7 @@ func TestMcpScopeRewrite_BindsRunIDToTheMintingRun(t *testing.T) {
 		"source": "demo", "enabled": true, "branch": "fix/x", "run_id": "run-someone-else",
 	})
 
-	args := argsOf(t, mcpScopeRewrite(scope, body))
+	args := argsOf(t, rewrite(t, scope, body))
 	if got := args["run_id"]; got != "run-mine" {
 		t.Errorf("run_id = %v, want %q", got, "run-mine")
 	}
@@ -716,7 +727,7 @@ func TestMcpScopeRewrite_SuppliesRunIDWhenAbsent(t *testing.T) {
 		"source": "demo", "enabled": true, "branch": "fix/x",
 	})
 
-	if got := argsOf(t, mcpScopeRewrite(scope, body))["run_id"]; got != "run-mine" {
+	if got := argsOf(t, rewrite(t, scope, body))["run_id"]; got != "run-mine" {
 		t.Errorf("run_id = %v, want %q", got, "run-mine")
 	}
 }
@@ -736,7 +747,7 @@ func TestMcpScopeRewrite_LeavesOtherCallsUntouched(t *testing.T) {
 		{"no arguments object", rpcBody(t, 3, "tools/call", "switch_dev_mode", nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mcpScopeRewrite(scope, tc.body); !bytes.Equal(got, tc.body) {
+			if got := rewrite(t, scope, tc.body); !bytes.Equal(got, tc.body) {
 				t.Errorf("body rewritten: got %s, want %s", got, tc.body)
 			}
 		})
@@ -751,7 +762,7 @@ func TestMcpScopeRewrite_PreservesLargeIntegerID(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":9007199254740993,"method":"tools/call",` +
 		`"params":{"name":"switch_dev_mode","arguments":{"source":"demo","enabled":true}}}`)
 
-	if got := mcpScopeRewrite(scope, body); !bytes.Contains(got, []byte("9007199254740993")) {
+	if got := rewrite(t, scope, body); !bytes.Contains(got, []byte("9007199254740993")) {
 		t.Errorf("id lost precision in rewrite: %s", got)
 	}
 }
@@ -794,16 +805,13 @@ func TestHandleMCP_ScopedKey_ForwardsBoundRunID(t *testing.T) {
 	}
 }
 
-// TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody is a regression test for a
-// bypass the rewrite introduced: mcpScopeCheck allows a body it cannot parse,
-// on the reasoning that the task's own parse error is the better answer. If
-// the rewrite parses that same body more leniently, it hands the task a clean,
-// executable call the check never gated.
+// TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody pins the invariant that
+// ties the check and the rewrite together: a body mcpScopeCheck waved through
+// as unparseable must stay unparseable on the wire. If the rewrite reads it
+// more leniently, it hands the task a clean, executable call nothing gated.
 //
-// The concrete payload is a valid switch_dev_mode envelope with trailing
-// data. Unmarshal rejects it; a bare Decode stops at the first value and
-// accepts it. Both must reach the same verdict, so the forwarded body stays
-// exactly as unparseable as the check believed it was.
+// The payload is a valid switch_dev_mode envelope with trailing data — the
+// case where a strict and a lenient JSON read disagree.
 func TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody(t *testing.T) {
 	// No SetDevMode granted — this caller may not switch dev mode at all.
 	scope := &pkgruntime.MCPScope{RunID: "run-mine"}
@@ -814,7 +822,7 @@ func TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody(t *testing.T) {
 		t.Fatal("precondition changed: the check now rejects this body outright, " +
 			"which is fine but means this test no longer covers what it was written for")
 	}
-	if got := mcpScopeRewrite(scope, body); !bytes.Equal(got, body) {
+	if got := rewrite(t, scope, body); !bytes.Equal(got, body) {
 		t.Errorf("rewrite normalized a body the check never gated:\n got: %s\nwant: %s", got, body)
 	}
 }

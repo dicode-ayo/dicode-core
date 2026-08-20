@@ -2305,7 +2305,11 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		forwarded := mcpScopeRewrite(scope, body)
+		forwarded, ok := mcpScopeRewrite(scope, body)
+		if !ok {
+			jsonErr(w, "failed to bind request to its run", http.StatusInternalServerError)
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(forwarded))
 		// The rewrite changes the body's length; a stale Content-Length
 		// would truncate it downstream.
@@ -2319,14 +2323,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // decodeRPCEnvelope decodes body as a single JSON-RPC envelope, reporting
 // false for anything that is not exactly one top-level JSON object.
 //
-// mcpScopeCheck and mcpScopeRewrite MUST agree on what "one envelope" means.
-// They ran different decoders once, and the gap was a bypass: encoding/json's
-// Unmarshal rejects trailing data while a Decoder's Decode stops at the first
-// value, so a body of `<valid call> {}` read as unparseable to the check —
-// which allows unparseable bodies, on the reasoning that the task's own parse
-// error is the better answer — and as a well-formed call to the rewrite, which
-// then re-encoded it into a clean call the check had never gated. One decoder,
-// used by both, is what keeps that class of divergence closed.
+// Every read of the body must go through here. mcpScopeCheck allows a body it
+// cannot parse, deferring to the task's own parse error; mcpScopeRewrite
+// rewrites one it can. Should the two ever disagree about what parses, a body
+// the check waved through as malformed becomes a well-formed call to the
+// rewrite, which re-encodes it into a clean call nothing gated. The decoders
+// differ in exactly the way that matters: Unmarshal rejects trailing data,
+// while a Decoder stops at the first value and ignores the rest.
+//
+// The trailing-data check below is what makes this stricter reading match
+// Unmarshal's, and pkg/trigger/webhook.go parses the body with Unmarshal to
+// build the task's input — so all three reads agree.
 //
 // Numbers are decoded with UseNumber so a large JSON-RPC id survives being
 // re-encoded, and so a denial echoes back the id the client actually sent.
@@ -2477,34 +2484,38 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 // PATCH /api/sources/{name}/dev.
 //
 // Anything that doesn't parse as a switch_dev_mode envelope is returned
-// untouched — mcpScopeCheck has already decided such a body is allowed, and
-// the task's own error path gives it a better message than a rewrite could.
-// Numbers are decoded with UseNumber so a large JSON-RPC id survives the
-// round-trip that re-encoding the envelope requires.
-func mcpScopeRewrite(scope *pkgruntime.MCPScope, body []byte) []byte {
-	raw, ok := decodeRPCEnvelope(body)
-	if !ok {
-		return body
+// untouched, ok true — mcpScopeCheck has already decided such a body is
+// allowed, and the task's own error path gives it a better message than a
+// rewrite could.
+//
+// ok is false only when a call that does need binding could not be re-encoded.
+// The caller must refuse such a request: forwarding the original would hand
+// the task the caller's own run_id, which is the one outcome this function
+// exists to prevent.
+func mcpScopeRewrite(scope *pkgruntime.MCPScope, body []byte) (out []byte, ok bool) {
+	raw, decoded := decodeRPCEnvelope(body)
+	if !decoded {
+		return body, true
 	}
 	if method, _ := raw["method"].(string); method != "tools/call" {
-		return body
+		return body, true
 	}
 	params, _ := raw["params"].(map[string]any)
 	if name, _ := params["name"].(string); name != "switch_dev_mode" {
-		return body
+		return body, true
 	}
-	arguments, ok := params["arguments"].(map[string]any)
-	if !ok {
+	arguments, isObject := params["arguments"].(map[string]any)
+	if !isObject {
 		// arguments absent or not an object: the call is missing its
 		// required `source` either way, so let the task reject it.
-		return body
+		return body, true
 	}
 	arguments["run_id"] = scope.RunID
-	out, err := json.Marshal(raw)
+	rewritten, err := json.Marshal(raw)
 	if err != nil {
-		return body
+		return nil, false
 	}
-	return out
+	return rewritten, true
 }
 
 // apiQueryRuns handles GET /api/runs with one of three filter modes:

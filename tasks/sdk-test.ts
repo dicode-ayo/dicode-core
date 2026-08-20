@@ -86,19 +86,36 @@ function freshDicode(): MockDicode {
     },
     _setGroupCalls: groups,
     tasks: {
-      // Records the task id and reports a passing suite. Override
-      // dicode.tasks.test outright to model a failing or erroring run.
+      // Field names mirror pkg/tasktest.Result's json tags exactly. A mock
+      // that renamed one would let a task read the wrong key, pass its tests,
+      // and fail against the daemon. Override dicode.tasks.test outright to
+      // model a failing or erroring run.
       test: async (taskID: string) => {
         testedTasks.push(String(taskID ?? ""));
-        return { task_id: taskID, passed: 0, failed: 0, output: "" };
+        return {
+          taskID,
+          runtime: "deno",
+          passed: 0,
+          failed: 0,
+          skipped: 0,
+          durationNs: 0,
+          exitCode: 0,
+          output: "",
+          testFile: "",
+        };
       },
     },
     sources: {
       // Empty unless a test pushes onto dicode._sources.
       list: async () => sources,
+      // The daemon omits the path keys entirely when dev mode was disabled,
+      // so the mock omits them too rather than returning empty strings a
+      // caller might treat as a path.
       set_dev_mode: async (name: string, opts: Record<string, unknown>) => {
         devModeCalls.push({ name, ...opts });
-        return { ok: true, dev_root_path: "", clone_path: "" };
+        return opts.enabled
+          ? { ok: true, dev_root_path: "/dev-clones/test/taskset.yaml", clone_path: "/dev-clones/test" }
+          : { ok: true };
       },
     },
     _testTaskCalls: testedTasks,

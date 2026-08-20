@@ -84,6 +84,9 @@ test("test_task runs the task's tests and returns the result", async () => {
   const text = await textOf();
   assert.equal(dicode._testTaskCalls.length, 1);
   assert.equal(dicode._testTaskCalls[0], "demo/thing");
+  // The reply carries the daemon's result verbatim, keyed as pkg/tasktest
+  // spells it.
+  assert.ok(text.includes('"taskID"'), `test result missing from reply: ${text}`);
   assert.ok(text.includes("demo/thing"), `test result missing from reply: ${text}`);
 });
 
