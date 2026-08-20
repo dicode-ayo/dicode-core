@@ -21,6 +21,7 @@
 // a value, not throws).
 
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import { parse as parseYaml } from "jsr:@std/yaml@1";
 import { chatStart, chatTurn, decideEntryMode, isChatEnd, isValidSessionId, resolveSessionId, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
 
 // Re-exported so the task's tests (and any importer) reach the shared envelope
@@ -231,21 +232,25 @@ async function oneShotTurn(
 export function skillLoadError(name: string, doc: string): string {
     const fm = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(doc);
     if (!fm) return "SKILL.md has no YAML frontmatter";
-    const fields = new Map<string, string>();
-    for (const line of fm[1].split(/\r?\n/)) {
-        const kv = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
-        // First key wins: a nested mapping under a multi-line value must not
-        // shadow the top-level key of the same name.
-        if (kv && !fields.has(kv[1])) fields.set(kv[1], kv[2].trim());
+    let front: unknown;
+    try {
+        // The CLI reads this block as YAML, so the comparison below has to see
+        // what YAML says the value is — `name: "x"` and `name: x` are the same
+        // skill, and a scan of the raw lines would disagree.
+        front = parseYaml(fm[1]);
+    } catch (e) {
+        return `frontmatter is not valid YAML: ${e instanceof Error ? e.message : String(e)}`;
     }
-    const declared = fields.get("name") ?? "";
+    if (front === null || typeof front !== "object" || Array.isArray(front)) {
+        return "frontmatter is not a mapping";
+    }
+    const fields = front as Record<string, unknown>;
+    const declared = typeof fields.name === "string" ? fields.name.trim() : "";
     if (!declared) return "frontmatter declares no name";
     if (declared !== name) {
         return `frontmatter name ${JSON.stringify(declared)} does not match the skill name ${JSON.stringify(name)}`;
     }
-    // A "|" or ">" value opens a block scalar whose text follows on later
-    // lines, so the marker alone counts as a present description.
-    const description = fields.get("description") ?? "";
+    const description = typeof fields.description === "string" ? fields.description.trim() : "";
     if (!description) return "frontmatter declares no description";
     return "";
 }
@@ -335,6 +340,14 @@ async function runClaudeTurn(opts: {
     let skillsWired = 0;
     const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
     try {
+        // The workdir is stable across a conversation's turns, so a skill
+        // dropped from the `skills` param on a later turn would otherwise stay
+        // installed and keep loading.
+        try {
+            await Deno.remove(`${claudeDir}/skills`, { recursive: true });
+        } catch (e) {
+            if (!(e instanceof Deno.errors.NotFound)) throw e;
+        }
         await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
 
         // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks as
@@ -361,7 +374,7 @@ async function runClaudeTurn(opts: {
         // A skill whose frontmatter fails skillLoadError() is dropped rather
         // than installed, so skillsWired counts only what the CLI will load.
         if (skillsParam && skillsDir) {
-            const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
+            const names = [...new Set(skillsParam.split(",").map((s) => s.trim()).filter(Boolean))];
             for (const name of names) {
                 if (!SAFE_SKILL_NAME.test(name)) {
                     console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
