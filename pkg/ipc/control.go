@@ -445,6 +445,12 @@ type AuthoringEditResult struct {
 	SandboxPath string
 	Source      string
 	SourceKind  string
+	// TaskDir is the absolute directory holding the task's files. The
+	// authoring agent writes through a tool that takes absolute paths, and
+	// dicode.list_tasks does not carry TaskDir, so the session is the only
+	// thing that can tell the agent where to write. Empty when the directory
+	// can't be resolved; the prompt then names the target task alone.
+	TaskDir string
 	// AgentSessionID is the ai-agent run's own session id stored on this
 	// authoring session from a prior turn (#568), or "" if no AI turn has
 	// happened on it yet. handleTaskEdit reads this before firing the next
@@ -563,7 +569,8 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
 	}
 
-	// The agent's target must ride in `prompt` itself, not a bare `task_id`
+	// The agent's target — task id and the directory its files live in —
+	// must ride in `prompt` itself, not a bare `task_id`
 	// param: buildin/ai-agent's task.yaml declares no such param and
 	// oneShotTurn never reads one (#723) — `dicode.task_id` inside the
 	// task refers to ai-agent's OWN identity, a different thing entirely.
@@ -573,8 +580,12 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	// supposed to be working on. Prefixing the target into the prompt text
 	// is the cheapest fix that's guaranteed visible to the model regardless
 	// of which ai-agent-family task cfg.AI.CreateTask points at.
+	header := fmt.Sprintf("(Target task: %s)", res.TaskID)
+	if res.TaskDir != "" {
+		header = fmt.Sprintf("(Target task: %s — its files live in %s; write them there with the write-task-file tool)", res.TaskID, res.TaskDir)
+	}
 	params := map[string]string{
-		"prompt": fmt.Sprintf("(Target task: %s)\n\n%s", res.TaskID, req.Prompt),
+		"prompt": header + "\n\n" + req.Prompt,
 	}
 	if res.AgentSessionID != "" {
 		params["session_id"] = res.AgentSessionID

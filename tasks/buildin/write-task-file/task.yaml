@@ -1,0 +1,45 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Write Task File"
+description: |
+  Writes one file of a dicode task to disk, creating the task's directory if
+  needed. Call once per file — task.yaml, task.ts (or task.py) and
+  task.test.ts. `path` is absolute and names a file inside the task's own
+  directory; `content` is the entire file.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  content:
+    type: string
+    required: true
+    description: "The entire file contents."
+  path:
+    type: string
+    required: true
+    description: "Absolute path of the file, inside the task's own directory."
+
+permissions:
+  # The writable roots ride in env, not params: an ai-agent turns every
+  # declared param into a model-settable tool argument, so a roots param
+  # would let the caller widen the boundary meant to contain it.
+  env:
+    - name: DICODE_TASK_FILE_ROOTS
+      value: "${DATADIR}/ai-tasks"
+
+  # The caller picks the path, so this grant is the outer boundary and
+  # task.ts's assertTaskFilePath is the inner one. Widening this to a source
+  # the daemon resolves taskset files from hands the caller the daemon's
+  # own git credentials via a ref's auth.token_env.
+  fs:
+    - path: "${DATADIR}/ai-tasks"
+      permission: rw
+
+# Task source is not secret, but it is bulky and lands on disk anyway.
+run_inputs:
+  enabled: false
+
+timeout: 30s

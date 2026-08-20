@@ -658,3 +658,35 @@ func TestCreateTask_RegistrationFailureCleansUpDirectory(t *testing.T) {
 		t.Errorf("scaffold directory survived a registration failure (stat err = %v) — it will permanently 409 every future create of this name", statErr)
 	}
 }
+
+// The authoring agent writes files through a tool that takes an absolute
+// path, and list_tasks does not carry TaskDir — so the session is the only
+// thing that can tell it where the task's files live (#734).
+func TestEditTask_ReportsTaskDir(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+
+	w := postJSON(srv.Handler(), "/api/task/create", map[string]string{"name": "dirprobe"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d; body: %s", w.Code, w.Body.String())
+	}
+
+	res, err := srv.EditTask(context.Background(), "", "ai-scratch/dirprobe")
+	if err != nil {
+		t.Fatalf("EditTask: %v", err)
+	}
+	want := filepath.Join(dir, "dirprobe")
+	if res.TaskDir != want {
+		t.Errorf("TaskDir = %q, want %q", res.TaskDir, want)
+	}
+
+	// A resumed session must carry it too — every turn after the first goes
+	// through this path.
+	resumed, err := srv.EditTask(context.Background(), res.SessionID, "")
+	if err != nil {
+		t.Fatalf("EditTask resume: %v", err)
+	}
+	if resumed.TaskDir != want {
+		t.Errorf("resumed TaskDir = %q, want %q", resumed.TaskDir, want)
+	}
+}

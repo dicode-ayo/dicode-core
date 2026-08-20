@@ -65,14 +65,11 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 		return ipc.AuthoringCreateResult{}, authErr(400, "invalid task name: %v", err)
 	}
 
-	// Scaffold beside the source's root taskset file, not at the repo root:
-	// the entry added below points at "./<name>/task.yaml", which the resolver
-	// reads relative to the taskset file's own directory.
 	tasksetPath := src.RootTaskSetPath()
 	if tasksetPath == "" {
 		return ipc.AuthoringCreateResult{}, authErr(503, "source has no repo path; is it started?")
 	}
-	taskDir := filepath.Join(filepath.Dir(tasksetPath), name)
+	taskDir := scaffoldDir(tasksetPath, name)
 	// Exclusive create, not Stat-then-MkdirAll: two concurrent CreateTask
 	// calls for the same (source, name) — a double-submitted request, a
 	// client retry racing the original — could otherwise both pass the Stat
@@ -165,14 +162,7 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 			return ipc.AuthoringEditResult{}, authErr(409, "session %s belongs to task %q, not %q", sess.ID, sess.TaskID, taskID)
 		}
 		_ = s.authoringSessions.UpdateLastTurn(ctx, sess.ID)
-		return ipc.AuthoringEditResult{
-			SessionID:      sess.ID,
-			TaskID:         sess.TaskID,
-			SandboxPath:    sess.SandboxPath,
-			Source:         sess.Source,
-			SourceKind:     s.resolveSourceKind(sess.Source),
-			AgentSessionID: derefOrEmpty(sess.AgentSessionID),
-		}, nil
+		return s.editResultFor(sess), nil
 	}
 
 	if taskID == "" {
@@ -219,15 +209,9 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		return ipc.AuthoringEditResult{}, authErr(500, "create session: %v", err)
 	}
 
-	return ipc.AuthoringEditResult{
-		SessionID:   sessID,
-		TaskID:      taskID,
-		SandboxPath: sess.SandboxPath,
-		Source:      source,
-		SourceKind:  s.resolveSourceKind(source),
-		// AgentSessionID is always empty here: this is a brand-new session,
-		// there is no prior AI turn to have set it.
-	}, nil
+	// AgentSessionID stays empty: this is a brand-new session, there is no
+	// prior AI turn to have set it.
+	return s.editResultFor(&sess), nil
 }
 
 // resumeOrConflict resumes an existing open session for a source when it is the
@@ -238,14 +222,57 @@ func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSessio
 		return ipc.AuthoringEditResult{}, authErr(409, "source %q already has an open session %s for task %q (#283)", source, existing.ID, existing.TaskID)
 	}
 	_ = s.authoringSessions.UpdateLastTurn(ctx, existing.ID)
+	return s.editResultFor(existing), nil
+}
+
+// editResultFor projects a session onto the IPC wire shape every EditTask
+// path returns.
+func (s *Server) editResultFor(sess *AuthoringSession) ipc.AuthoringEditResult {
 	return ipc.AuthoringEditResult{
-		SessionID:      existing.ID,
-		TaskID:         existing.TaskID,
-		SandboxPath:    existing.SandboxPath,
-		Source:         existing.Source,
-		SourceKind:     s.resolveSourceKind(existing.Source),
-		AgentSessionID: derefOrEmpty(existing.AgentSessionID),
-	}, nil
+		SessionID:      sess.ID,
+		TaskID:         sess.TaskID,
+		SandboxPath:    sess.SandboxPath,
+		TaskDir:        s.taskDirFor(sess.TaskID),
+		Source:         sess.Source,
+		SourceKind:     s.resolveSourceKind(sess.Source),
+		AgentSessionID: derefOrEmpty(sess.AgentSessionID),
+	}
+}
+
+// taskDirFor resolves the absolute directory holding taskID's files, or ""
+// when it can't be determined. The registry is authoritative, but a task
+// scaffolded seconds ago isn't in it until the reconciler's next sync, so fall
+// back to the layout CreateTask scaffolds into.
+func (s *Server) taskDirFor(taskID string) string {
+	if s.registry != nil {
+		if spec, ok := s.registry.Get(taskID); ok && spec.TaskDir != "" {
+			return spec.TaskDir
+		}
+	}
+	if s.sourceMgr == nil {
+		return ""
+	}
+	source, name, ok := strings.Cut(taskID, "/")
+	if !ok || source == "" || name == "" {
+		return ""
+	}
+	src, ok := s.sourceMgr.Get(source)
+	if !ok {
+		return ""
+	}
+	tasksetPath := src.RootTaskSetPath()
+	if tasksetPath == "" {
+		return ""
+	}
+	return scaffoldDir(tasksetPath, name)
+}
+
+// scaffoldDir returns the directory a task named name occupies in the source
+// rooted at tasksetPath. The taskset entry points at "./<name>/task.yaml",
+// which the resolver reads relative to the taskset file's own directory, so
+// scaffolding anywhere else makes the task unresolvable.
+func scaffoldDir(tasksetPath, name string) string {
+	return filepath.Join(filepath.Dir(tasksetPath), name)
 }
 
 // derefOrEmpty returns *p, or "" when p is nil. Used to flatten the

@@ -661,3 +661,43 @@ func TestControl_TaskCancel(t *testing.T) {
 		t.Errorf("cancel session = %q", m.lastCancelSess)
 	}
 }
+
+// A write tool is useless without a target. The agent's only clue about where
+// the task's files live is the prompt — list_tasks withholds TaskDir and the
+// model has no way to ask for it (#734).
+func TestControl_TaskEdit_PromptCarriesTaskDir(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{
+		SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: "/data/ai-tasks/t",
+	}}
+	eng := &promptCapturingEngine{reply: "ok", sessID: "asid-1"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "scaffold it"}); err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	got := eng.calls[0]["prompt"]
+	if !strings.Contains(got, "/data/ai-tasks/t") {
+		t.Errorf("prompt param = %q, want it to name the task directory", got)
+	}
+	if !strings.Contains(got, "ai-scratch/t") {
+		t.Errorf("prompt param = %q, want it to keep naming the target task", got)
+	}
+	if !strings.HasSuffix(got, "\n\nscaffold it") {
+		t.Errorf("prompt param = %q, want the user's prompt kept verbatim after the header", got)
+	}
+}
+
+// A source whose directory can't be resolved must still fire a usable turn,
+// naming the target task on its own.
+func TestControl_TaskEdit_PromptOmitsEmptyTaskDir(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
+	eng := &promptCapturingEngine{reply: "ok", sessID: "asid-1"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "scaffold it"}); err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	if want, got := "(Target task: ai-scratch/t)\n\nscaffold it", eng.calls[0]["prompt"]; got != want {
+		t.Errorf("prompt param = %q, want %q", got, want)
+	}
+}
