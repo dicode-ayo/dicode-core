@@ -68,7 +68,7 @@ type Server struct {
 	gateway      *Gateway             // optional; enables http.register for daemon tasks
 	inputStore   *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
 	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
-	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
+	sourceMgr    SourceController     // optional; enables dicode.sources.*
 	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
 	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
 	// testGuard vetoes dicode.tasks.test for a given task ID. The approval
@@ -279,6 +279,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.TasksTest {
 			caps = append(caps, CapTasksTest)
 		}
+		if dp.SourcesList {
+			caps = append(caps, CapSourcesList)
+		}
 		if dp.SourcesSetDevMode {
 			caps = append(caps, CapSourcesSetDevMode)
 		}
@@ -367,20 +370,36 @@ func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
 // can call dicode.runs.replay. nil disables (dispatch returns error).
 func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 
-// SourceDevModeSetter is satisfied by webui.SourceManager. Defined in
+// SourceSummary is the per-source view dicode.sources.list() returns.
+// Host paths — the source's local checkout and its dev-mode root — are
+// withheld: sources.list is grantable on its own, and a caller holding only
+// it must not learn the daemon's filesystem layout. A task that needs the
+// path asks for it through sources.set_dev_mode, which returns the clone it
+// just created.
+type SourceSummary struct {
+	Name    string `json:"name"`
+	Type    string `json:"type,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	DevMode bool   `json:"dev_mode"`
+}
+
+// SourceController is satisfied by webui.SourceManager. Defined in
 // pkg/ipc so the daemon can wire the source manager without forcing
 // pkg/ipc to import pkg/webui (which would invert the established
 // dependency direction).
-type SourceDevModeSetter interface {
+type SourceController interface {
 	SetDevMode(ctx context.Context, name string, enabled bool, opts taskset.DevModeOpts) error
 	// DevRootPath returns the root taskset.yaml the source resolves through in
 	// dev mode, or "" when it is not in dev mode.
 	DevRootPath(name string) string
+	// Sources lists the configured sources, trimmed to SourceSummary.
+	Sources() []SourceSummary
 }
 
-// SetSourceManager attaches a SourceDevModeSetter (typically *webui.SourceManager)
-// for dicode.sources.set_dev_mode dispatch. nil disables.
-func (s *Server) SetSourceManager(m SourceDevModeSetter) { s.sourceMgr = m }
+// SetSourceManager attaches a SourceController (typically *webui.SourceManager)
+// for dicode.sources.* dispatch. nil disables.
+func (s *Server) SetSourceManager(m SourceController) { s.sourceMgr = m }
 
 // RepoPathResolver maps a source name to its on-disk repo path. Defined in
 // pkg/ipc to avoid an upward import; satisfied by *webui.SourceManager.
@@ -1099,6 +1118,21 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, result, "")
+
+		case "dicode.sources.list":
+			if !hasCap(caps, CapSourcesList) {
+				reply(req.ID, nil, "ipc: permission denied (sources.list)")
+				continue
+			}
+			if s.sourceMgr == nil {
+				reply(req.ID, nil, "ipc: source manager not available")
+				continue
+			}
+			summaries := s.sourceMgr.Sources()
+			if summaries == nil {
+				summaries = []SourceSummary{}
+			}
+			reply(req.ID, summaries, "")
 
 		case "dicode.sources.set_dev_mode":
 			if !hasCap(caps, CapSourcesSetDevMode) {

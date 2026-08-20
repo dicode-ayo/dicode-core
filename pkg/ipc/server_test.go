@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -2717,22 +2718,26 @@ func TestServer_Suspend_GrantedForDeno(t *testing.T) {
 	}
 }
 
-// fakeDevModeSetter records the SetDevMode call and reports a fixed dev root.
-type fakeDevModeSetter struct {
+// fakeSourceCtl records the SetDevMode call, reports a fixed dev root, and
+// serves a fixed source listing.
+type fakeSourceCtl struct {
 	gotName    string
 	gotEnabled bool
 	gotOpts    taskset.DevModeOpts
 	devRoot    string
+	sources    []SourceSummary
 }
 
-func (f *fakeDevModeSetter) SetDevMode(_ context.Context, name string, enabled bool, opts taskset.DevModeOpts) error {
+func (f *fakeSourceCtl) SetDevMode(_ context.Context, name string, enabled bool, opts taskset.DevModeOpts) error {
 	f.gotName = name
 	f.gotEnabled = enabled
 	f.gotOpts = opts
 	return nil
 }
 
-func (f *fakeDevModeSetter) DevRootPath(string) string { return f.devRoot }
+func (f *fakeSourceCtl) DevRootPath(string) string { return f.devRoot }
+
+func (f *fakeSourceCtl) Sources() []SourceSummary { return f.sources }
 
 // TestIPC_SourcesSetDevMode_ReturnsClonePath verifies the enable reply carries
 // the clone the caller was just handed. Without it the caller has no way to
@@ -2747,7 +2752,7 @@ func TestIPC_SourcesSetDevMode_ReturnsClonePath(t *testing.T) {
 	}
 
 	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
-	fake := &fakeDevModeSetter{devRoot: "/data/dev-clones/scratch/run-7/taskset.yaml"}
+	fake := &fakeSourceCtl{devRoot: "/data/dev-clones/scratch/run-7/taskset.yaml"}
 	srv.SetSourceManager(fake)
 
 	sendMsg(t, conn, map[string]any{
@@ -2789,7 +2794,7 @@ func TestIPC_SourcesSetDevMode_DisableOmitsClonePath(t *testing.T) {
 	}
 
 	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
-	srv.SetSourceManager(&fakeDevModeSetter{devRoot: ""})
+	srv.SetSourceManager(&fakeSourceCtl{devRoot: ""})
 
 	sendMsg(t, conn, map[string]any{
 		"id":      "dev-2",
@@ -2810,5 +2815,73 @@ func TestIPC_SourcesSetDevMode_DisableOmitsClonePath(t *testing.T) {
 	}
 	if _, present := res["dev_root_path"]; present {
 		t.Errorf("dev_root_path must be absent when there is no clone, got %#v", res)
+	}
+}
+
+// TestIPC_SourcesList_RequiresCap verifies a task without
+// permissions.dicode.sources_list cannot call dicode.sources.list.
+func TestIPC_SourcesList_RequiresCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				// SourcesList omitted; a neighbouring sources capability is
+				// granted to show the two are not one gate.
+				SourcesSetDevMode: true,
+			},
+		},
+	}
+
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetSourceManager(&fakeSourceCtl{sources: []SourceSummary{{Name: "scratch"}}})
+
+	sendMsg(t, conn, map[string]any{"id": "srcs-1", "method": "dicode.sources.list"})
+	resp := recvMsg(t, conn)
+	if errMsg, _ := resp["error"].(string); !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("expected permission denied error, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}
+
+// TestIPC_SourcesList_ReturnsSummaries verifies the granted path returns the
+// source manager's listing.
+func TestIPC_SourcesList_ReturnsSummaries(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{SourcesList: true},
+		},
+	}
+
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetSourceManager(&fakeSourceCtl{sources: []SourceSummary{
+		{Name: "scratch", Type: "taskset", URL: "https://example.com/x.git", Branch: "main", DevMode: true},
+	}})
+
+	sendMsg(t, conn, map[string]any{"id": "srcs-2", "method": "dicode.sources.list"})
+	resp := recvMsg(t, conn)
+	if errMsg, _ := resp["error"].(string); errMsg != "" {
+		t.Fatalf("sources.list failed: %s", errMsg)
+	}
+	list, ok := resp["result"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("expected one summary, got %#v", resp["result"])
+	}
+	got, _ := list[0].(map[string]any)
+	if got["name"] != "scratch" || got["branch"] != "main" || got["dev_mode"] != true {
+		t.Errorf("summary = %#v, want the fake's source", got)
+	}
+}
+
+// TestIPC_SourcesList_WithholdsHostPaths pins the trim: SourceSummary carries
+// no filesystem path, so a task holding only sources_list learns nothing about
+// the daemon's layout. A path reaches a task through set_dev_mode, which
+// returns the clone it just made.
+func TestIPC_SourcesList_WithholdsHostPaths(t *testing.T) {
+	for _, field := range []string{"Path", "DevPath", "LocalPath"} {
+		if _, found := reflect.TypeOf(SourceSummary{}).FieldByName(field); found {
+			t.Errorf("SourceSummary carries a host path field %q", field)
+		}
 	}
 }

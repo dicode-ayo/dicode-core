@@ -89,7 +89,9 @@ permissions:
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
 | `permissions.dicode.mcp` | list of strings | | MCP daemon task IDs the script may call via `mcp.call()`; use `["*"]` for all |
 | `permissions.dicode.list_tasks` | bool | | Allow `dicode.list_tasks()` |
-| `permissions.dicode.tasks_test` | bool | | Allow `dicode.tasks.test()` (runs a task's sibling test file via `pkg/tasktest`). Also gates the ephemeral per-run MCP token's access to `POST /api/tasks/{id}/test` — a scoped token whose task doesn't set this is refused with 403 on that REST endpoint, even though the JSON-RPC `test_task` hint tool that points to it is itself always allowed. |
+| `permissions.dicode.tasks_test` | bool | | Allow `dicode.tasks.test()` (runs a task's sibling test file via `pkg/tasktest`). Also gates both MCP surfaces that run a test file for an ephemeral per-run token: the JSON-RPC `test_task` tool and `POST /api/tasks/{id}/test`. |
+| `permissions.dicode.sources_list` | bool | | Allow `dicode.sources.list()` — names, types, git URL/branch, and dev-mode state of the configured sources. Host paths are withheld, so this grants no filesystem visibility. Also gates the MCP `list_sources` tool. |
+| `permissions.dicode.sources_set_dev_mode` | bool | | Allow `dicode.sources.set_dev_mode()` — enter or leave dev mode on a source, cloning it when a branch is given. Also gates the MCP `switch_dev_mode` tool. Sensitive: dev mode decides which files the daemon loads as tasks for that source. |
 | `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
 | `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
 | `permissions.dicode.secrets_has` | bool | | Allow `dicode.secrets.has(key)` — boolean presence check, never returns the value |

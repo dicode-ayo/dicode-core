@@ -31,7 +31,7 @@ type TaskDeleteOutcome struct {
 // TaskDeleter removes a task from its owning source. It is implemented by
 // webui.SourceManager (which owns source state, repo paths, and dev-clones).
 // Defined here so pkg/ipc need not import pkg/webui — the same decoupling
-// pattern as APIKeyMinter and SourceDevModeSetter.
+// pattern as APIKeyMinter and SourceController.
 type TaskDeleter interface {
 	// ResolveTaskSource returns the owning source name for a task and whether
 	// that source is a git source. sourceOverride, when non-empty, forces the

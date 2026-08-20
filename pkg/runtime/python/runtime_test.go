@@ -68,14 +68,16 @@ func TestNewExecutor_SeesLateInputStore(t *testing.T) {
 	}
 }
 
-// fakeSourceDevModeSetter satisfies ipc.SourceDevModeSetter for testing.
-type fakeSourceDevModeSetter struct{}
+// fakeSourceController satisfies ipc.SourceController for testing.
+type fakeSourceController struct{}
 
-func (fakeSourceDevModeSetter) SetDevMode(_ context.Context, _ string, _ bool, _ taskset.DevModeOpts) error {
+func (fakeSourceController) SetDevMode(_ context.Context, _ string, _ bool, _ taskset.DevModeOpts) error {
 	return nil
 }
 
-func (fakeSourceDevModeSetter) DevRootPath(_ string) string { return "" }
+func (fakeSourceController) DevRootPath(_ string) string { return "" }
+
+func (fakeSourceController) Sources() []ipc.SourceSummary { return nil }
 
 // fakeRepoPathResolver satisfies ipc.RepoPathResolver for testing.
 type fakeRepoPathResolver struct{}
@@ -126,7 +128,7 @@ func TestRuntime_SetSourceManager_Propagates(t *testing.T) {
 		t.Error("expected nil before SetSourceManager")
 	}
 
-	var m ipc.SourceDevModeSetter = fakeSourceDevModeSetter{}
+	var m ipc.SourceController = fakeSourceController{}
 	rt.SetSourceManager(m)
 
 	if got := exec.parent.SourceMgr; got != m {

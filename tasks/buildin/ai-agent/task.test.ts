@@ -445,8 +445,21 @@ test("each built-in is offered only when its own cap was granted", async () => {
   const names = offeredTools();
   assert.ok(names.includes("dicode_test_task"), "tasks.test was granted");
   assert.ok(names.includes("dicode_set_dev_mode"), "sources.set_dev_mode was granted");
+  assert.ok(!names.includes("dicode_list_sources"), "sources.list was not granted");
   assert.ok(!names.includes("dicode_git_commit_push"), "git.commit_push was not granted");
   assert.ok(!names.includes("dicode_replay_run"), "runs.replay was not granted");
+});
+
+test("dicode_list_sources reaches the SDK when sources.list is granted", async () => {
+  useLocal();
+  params.set("prompt", "which sources are there");
+  dicode.caps = ["sources.list"];
+  const listed = [{ name: "scratch", type: "taskset", dev_mode: false }];
+  dicode.sources = { list: async () => listed };
+
+  const { toolResult } = await runBuiltinCall("dicode_list_sources", {});
+
+  assert.equal(toolResult, listed);
 });
 
 test("a built-in call reaches the SDK and its result feeds back to the model", async () => {

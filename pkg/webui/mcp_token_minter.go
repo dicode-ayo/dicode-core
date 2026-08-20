@@ -27,7 +27,12 @@ func newMCPTokenMinter(keys *apiKeyStore) *mcpTokenMinter {
 // directly. scope is stored as given, including the zero value MCPScope{}
 // (a spec with no dicode permissions declared), which correctly denies
 // every scoped tool call; it is never treated as "unscoped".
+//
+// RunID is stamped here rather than derived from the spec: it is what binds
+// switch_dev_mode's clone directory to this run, so it must come from the
+// mint, not from the tool call that later uses it.
 func (m *mcpTokenMinter) Mint(ctx context.Context, runID string, scope pkgruntime.MCPScope) (string, error) {
+	scope.RunID = runID
 	raw, _, err := m.keys.generateScoped(ctx, ephemeralKeyPrefix+runID, &scope)
 	return raw, err
 }

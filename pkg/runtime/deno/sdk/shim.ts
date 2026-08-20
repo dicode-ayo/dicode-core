@@ -140,6 +140,17 @@ export interface TaskSummary {
   enabled:      boolean;
 }
 
+// SourceSummary is one entry of what dicode.sources.list() returns. The
+// daemon withholds host paths from this listing; sources.set_dev_mode is what
+// hands back a path, and only for the clone it just made.
+export interface SourceSummary {
+  name:     string;
+  type?:    string;
+  url?:     string;
+  branch?:  string;
+  dev_mode: boolean;
+}
+
 // SetDevModeResult is what dicode.sources.set_dev_mode() returns. dev_root_path
 // is the root taskset.yaml inside the clone and clone_path its directory — the
 // value git-pr's clone_path expects. Both are absent when dev mode was disabled.
@@ -220,6 +231,7 @@ export interface Dicode {
     test: (taskID: string) => Promise<unknown>;
   };
   sources: {
+    list: () => Promise<SourceSummary[]>;
     set_dev_mode: (name: string, opts: {
       enabled: boolean;
       local_path?: string;
@@ -545,6 +557,8 @@ const dicode: Dicode = {
       __call__({ method: "dicode.tasks.test", taskID }),
   },
   sources: {
+    list: () =>
+      __call__({ method: "dicode.sources.list" }) as Promise<SourceSummary[]>,
     set_dev_mode: (name, opts) =>
       __call__({
         method: "dicode.sources.set_dev_mode",

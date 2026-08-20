@@ -216,6 +216,9 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	if overlay.TasksTest {
 		out.TasksTest = true
 	}
+	if overlay.SourcesList {
+		out.SourcesList = true
+	}
 	if overlay.SourcesSetDevMode {
 		out.SourcesSetDevMode = true
 	}

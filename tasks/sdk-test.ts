@@ -67,6 +67,9 @@ interface State {
 
 function freshDicode(): MockDicode {
   const groups: string[] = [];
+  const testedTasks: string[] = [];
+  const devModeCalls: Array<Record<string, unknown>> = [];
+  const sources: Array<Record<string, unknown>> = [];
   return {
     task_id: "test/task",
     run_id: "test-run",
@@ -82,6 +85,25 @@ function freshDicode(): MockDicode {
       groups.push(String(label ?? ""));
     },
     _setGroupCalls: groups,
+    tasks: {
+      // Records the task id and reports a passing suite. Override
+      // dicode.tasks.test outright to model a failing or erroring run.
+      test: async (taskID: string) => {
+        testedTasks.push(String(taskID ?? ""));
+        return { task_id: taskID, passed: 0, failed: 0, output: "" };
+      },
+    },
+    sources: {
+      // Empty unless a test pushes onto dicode._sources.
+      list: async () => sources,
+      set_dev_mode: async (name: string, opts: Record<string, unknown>) => {
+        devModeCalls.push({ name, ...opts });
+        return { ok: true, dev_root_path: "", clone_path: "" };
+      },
+    },
+    _testTaskCalls: testedTasks,
+    _setDevModeCalls: devModeCalls,
+    _sources: sources,
   };
 }
 

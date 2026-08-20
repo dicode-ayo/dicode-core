@@ -2250,12 +2250,12 @@ func randomRunID() string {
 // a Bearer API key only, no session-cookie fallback.
 //
 // Before forwarding a POST, a Bearer-authenticated caller holding a scoped
-// ephemeral per-run MCP token (#567) is checked against mcpScopeCheck: the
-// buildin/mcp task itself always runs with full dicode permissions
-// (list_tasks: true, tasks: ["*"]), so it cannot be relied on to
+// ephemeral per-run MCP token (#567) is checked against mcpScopeCheck, then
+// passed through mcpScopeRewrite: the buildin/mcp task itself runs with the
+// dicode permissions every tool it serves needs, so it cannot be relied on to
 // self-restrict — enforcement has to happen here, before the request ever
 // reaches it. Unscoped (operator/CLI/dashboard) API keys are unaffected and
-// forward exactly as before this change.
+// forward unchanged.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -2292,7 +2292,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "failed to read request body", http.StatusBadRequest)
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
 		if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -2306,10 +2305,43 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		forwarded := mcpScopeRewrite(scope, body)
+		r.Body = io.NopCloser(bytes.NewReader(forwarded))
+		// The rewrite changes the body's length; a stale Content-Length
+		// would truncate it downstream.
+		r.ContentLength = int64(len(forwarded))
 	}
 
 	r.URL.Path = "/hooks/mcp"
 	s.gateway.ServeHTTP(w, r)
+}
+
+// decodeRPCEnvelope decodes body as a single JSON-RPC envelope, reporting
+// false for anything that is not exactly one top-level JSON object.
+//
+// mcpScopeCheck and mcpScopeRewrite MUST agree on what "one envelope" means.
+// They ran different decoders once, and the gap was a bypass: encoding/json's
+// Unmarshal rejects trailing data while a Decoder's Decode stops at the first
+// value, so a body of `<valid call> {}` read as unparseable to the check —
+// which allows unparseable bodies, on the reasoning that the task's own parse
+// error is the better answer — and as a well-formed call to the rewrite, which
+// then re-encoded it into a clean call the check had never gated. One decoder,
+// used by both, is what keeps that class of divergence closed.
+//
+// Numbers are decoded with UseNumber so a large JSON-RPC id survives being
+// re-encoded, and so a denial echoes back the id the client actually sent.
+func decodeRPCEnvelope(body []byte) (map[string]any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var raw map[string]any
+	if err := dec.Decode(&raw); err != nil {
+		return nil, false
+	}
+	if dec.More() {
+		// Trailing data after the envelope.
+		return nil, false
+	}
+	return raw, true
 }
 
 // mcpScopeCheck decides whether a scoped ephemeral MCP token (scope) may
@@ -2323,15 +2355,14 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 //   - tools/call list_tasks / get_task: requires scope.ListTasks.
 //   - tools/call run_task: requires scope.RunTaskIDs to contain "*" or the
 //     call's params.arguments["id"].
-//   - tools/call list_sources / switch_dev_mode / test_task: always
-//     allowed — these three hint tools exercise no dicode capability and are
-//     unscoped by design. For test_task specifically: this only covers the
-//     JSON-RPC hint call itself, which just returns pointer text ("call
-//     POST /api/tasks/{id}/test directly"). The REST endpoint it points
-//     callers at is a separate surface reachable with the same Bearer
-//     token, and IS scope-gated — on scope.TestTasks, checked directly in
-//     apiTestTask (#590) — so don't conflate "the hint call is always
-//     allowed" with "the REST call it points to is always allowed".
+//   - tools/call list_sources: requires scope.ListSources.
+//   - tools/call test_task: requires scope.TestTasks — the same flag
+//     apiTestTask checks for the REST endpoint POST /api/tasks/{id}/test
+//     (#590). Both surfaces run the task's sibling test file with full host
+//     permissions, so they carry one gate between them.
+//   - tools/call switch_dev_mode: requires scope.SetDevMode, and additionally
+//     requires the token to carry a RunID — see mcpScopeRewrite for why the
+//     call's own run_id argument is not trusted.
 //   - tools/call for any other (unrecognized, or future) tool name: denied.
 //     This is fail-closed: nothing ties this switch to
 //     tasks/buildin/mcp/task.ts's TOOLS/dispatchTool list, so a future tool
@@ -2361,8 +2392,8 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // Returns allowed, the request's id (for echoing back in a denial), and a
 // human-readable denial message (empty when allowed).
 func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id any, deniedMsg string) {
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	raw, ok := decodeRPCEnvelope(body)
+	if !ok {
 		// Top level isn't a JSON object at all: genuinely not JSON-RPC.
 		return true, nil, ""
 	}
@@ -2402,10 +2433,24 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 			return false, id, fmt.Sprintf("capability not granted: %s for task %q", name, taskID)
 		}
 		return false, id, fmt.Sprintf("capability not granted: %s", name)
-	case "list_sources", "switch_dev_mode", "test_task":
-		// Unscoped by design: hint-only tools that exercise no dicode
-		// capability.
-		return true, id, ""
+	case "list_sources":
+		if scope.ListSources {
+			return true, id, ""
+		}
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
+	case "test_task":
+		if scope.TestTasks {
+			return true, id, ""
+		}
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
+	case "switch_dev_mode":
+		// A token with no RunID cannot be given a clone directory it owns,
+		// and mcpScopeRewrite has nothing to bind the call to — refuse
+		// rather than let the caller's own run_id through.
+		if scope.SetDevMode && scope.RunID != "" {
+			return true, id, ""
+		}
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
 	default:
 		// Fail closed: an unrecognized tool name — including any future
 		// tool added to tasks/buildin/mcp/task.ts that this switch hasn't
@@ -2413,6 +2458,53 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 		// full access from a scoped token.
 		return false, id, fmt.Sprintf("capability not granted: %s", name)
 	}
+}
+
+// mcpScopeRewrite returns body with any caller-supplied run_id on a
+// switch_dev_mode call replaced by the run the token was minted for, or body
+// unchanged when the call is anything else.
+//
+// run_id names the per-session clone directory dev mode creates, and
+// SetDevMode uses it again to find that directory on the way out. A caller
+// that picks the name picks which session's clone it addresses — so the name
+// is not the caller's to choose. Binding it here, in the forwarder, is the
+// only place that holds both the request and the identity it belongs to: the
+// buildin/mcp task cannot see the caller's token, and mcpScopeCheck is a pure
+// yes/no.
+//
+// Only a scoped token reaches this. An unscoped operator key still drives dev
+// mode with whatever run_id it likes, exactly as it can through
+// PATCH /api/sources/{name}/dev.
+//
+// Anything that doesn't parse as a switch_dev_mode envelope is returned
+// untouched — mcpScopeCheck has already decided such a body is allowed, and
+// the task's own error path gives it a better message than a rewrite could.
+// Numbers are decoded with UseNumber so a large JSON-RPC id survives the
+// round-trip that re-encoding the envelope requires.
+func mcpScopeRewrite(scope *pkgruntime.MCPScope, body []byte) []byte {
+	raw, ok := decodeRPCEnvelope(body)
+	if !ok {
+		return body
+	}
+	if method, _ := raw["method"].(string); method != "tools/call" {
+		return body
+	}
+	params, _ := raw["params"].(map[string]any)
+	if name, _ := params["name"].(string); name != "switch_dev_mode" {
+		return body
+	}
+	arguments, ok := params["arguments"].(map[string]any)
+	if !ok {
+		// arguments absent or not an object: the call is missing its
+		// required `source` either way, so let the task reject it.
+		return body
+	}
+	arguments["run_id"] = scope.RunID
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // apiQueryRuns handles GET /api/runs with one of three filter modes:

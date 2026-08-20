@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
@@ -269,9 +270,28 @@ func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled boo
 	return src.SetDevMode(ctx, enabled, opts)
 }
 
+// Sources lists the configured sources as ipc.SourceSummary, sorted by name
+// so a task reading the list sees a stable order across calls (List() walks a
+// map). Implements ipc.SourceController.
+func (m *SourceManager) Sources() []ipc.SourceSummary {
+	infos := m.List()
+	out := make([]ipc.SourceSummary, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, ipc.SourceSummary{
+			Name:    info.Name,
+			Type:    info.Type,
+			URL:     info.URL,
+			Branch:  info.Branch,
+			DevMode: info.DevMode,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // DevRootPath returns the root taskset.yaml path a source currently resolves
 // through in dev mode, or "" when the source is unknown or not in dev mode.
-// Implements ipc.SourceDevModeSetter.
+// Implements ipc.SourceController.
 func (m *SourceManager) DevRootPath(name string) string {
 	m.mu.RLock()
 	src, ok := m.tasksets[name]

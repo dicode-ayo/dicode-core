@@ -88,6 +88,8 @@ Returns registered tasks with ID, name, trigger type, last run status, and last 
 
 **`mcp_exposed` filter:** Tasks are hidden from MCP by default. Only tasks with `mcp_exposed: true` in their `task.yaml` appear in `list_tasks` and can be invoked via `tools/call`. This is a security feature to prevent unintended exposure of internal tasks to MCP clients.
 
+The filter is a boundary, not an oversight, and it stays: `/mcp` is reachable by any API-key holder, so an unfiltered `list_tasks` would hand every caller the whole registry. An agent authoring a task does not read the registry to do it — it gets the `task.yaml` schema from its skills, and it reads and writes its own task's files inside a dev-mode clone. A task that genuinely wants to be an agent's building block opts in.
+
 ```json
 {
   "tasks": [
@@ -127,50 +129,38 @@ Manually trigger a task. Returns a run ID.
 
 ### `list_sources`
 
-Returns all configured sources with their type, URL/path, branch, and current dev mode state.
+Returns the configured sources, sorted by name.
 
 ```json
-{
-  "sources": [
-    {
-      "name": "infra",
-      "type": "local",
-      "path": "/home/user/tasks/taskset.yaml",
-      "dev_mode": false,
-      "dev_path": ""
-    }
-  ]
-}
+[
+  { "name": "buildin", "type": "taskset", "dev_mode": false },
+  { "name": "infra", "type": "taskset", "url": "https://github.com/acme/tasks.git", "branch": "main", "dev_mode": true }
+]
 ```
 
-### `switch_dev_mode(source, enabled, local_path?)`
+Host paths are withheld. `permissions.dicode.sources_list` is grantable on its own, and a caller holding only it must not learn the daemon's filesystem layout — `switch_dev_mode` is what hands back a path, and only for the clone it just created. `GET /api/sources` still carries the full record for the dashboard.
 
-Enable or disable dev mode for a TaskSet source. When enabled, the source immediately re-resolves using `local_path` as the root taskset.yaml.
+### `switch_dev_mode(source, enabled, branch?, base?, run_id?)`
+
+Enter or leave dev mode on a TaskSet source. Entering with a `branch` clones the source repo into a scratch directory and returns `clone_path` — edit files there, not in the live source. Leaving removes the clone locally and keeps the remote branch. Changes take effect immediately: tasks from the clone appear in the registry within seconds.
 
 ```json
-{
-  "source": "infra",
-  "enabled": true,
-  "local_path": "/tmp/dev-tasks/taskset.yaml"
-}
+{ "ok": true, "dev_root_path": "/data/dev-clones/infra/run-7/taskset.yaml", "clone_path": "/data/dev-clones/infra/run-7" }
 ```
 
-Returns the updated source entry. Changes take effect immediately — tasks from the dev path appear in the registry within seconds.
+`local_path` is deliberately not a tool argument. It redirects the daemon's taskset resolution at any path on the host, which would let a caller decide what the daemon loads as tasks — and taskset resolution reads a ref's `auth.token_env` from the daemon environment before the approval gate is in the path (#740). Operators who need local-path dev mode use `PATCH /api/sources/{name}/dev`.
+
+`run_id` names the per-session clone directory. A caller holding an ephemeral per-run token does not choose it: the `/mcp` forwarder overwrites whatever the call carries with the run the token was minted for, so one session cannot address another session's clone.
 
 ### `test_task(id)`
 
-Hint-style tool: returns a text pointer telling the MCP client to call `POST /api/tasks/{id}/test` directly (with its API key) to run the task's sibling test file. It does not run the test itself.
+Runs the task's sibling test file (`task.test.ts` / `task.test.py`) and returns the result.
 
 ```json
-{
-  "content": [
-    {
-      "type": "text",
-      "text": "Task tests are not exposed via the dicode task SDK. Call `POST /api/tasks/infra/deploy-backend/test` directly with your API key."
-    }
-  ]
-}
+{ "taskID": "infra/deploy-backend", "runtime": "deno", "passed": 3, "failed": 0, "exitCode": 0, "output": "…" }
 ```
+
+Refused for a task the approval gate is still holding pending — the test file runs with full host permissions, so a pending task is turned away here exactly as it would be on a fire.
 
 ---
 
@@ -196,10 +186,14 @@ A task that declares `permissions.env: [{name: DICODE_MCP_API_KEY}]` gets a fres
 
 - `list_tasks` / `get_task` require `permissions.dicode.list_tasks: true`.
 - `run_task` requires the target task ID to appear in `permissions.dicode.tasks` (or `["*"]` for any task).
-- `list_sources`, `switch_dev_mode`, and `test_task` are always allowed — they're hint-only tools that exercise no dicode capability.
+- `list_sources` requires `permissions.dicode.sources_list: true`.
+- `switch_dev_mode` requires `permissions.dicode.sources_set_dev_mode: true`, and additionally requires the token to carry the run it was minted for — a token without one is refused rather than allowed to supply its own `run_id`.
+- `test_task` requires `permissions.dicode.tasks_test: true`. The REST endpoint `POST /api/tasks/{id}/test` is a separate surface reachable with the same Bearer token; it checks the same flag, so the two carry one gate between them.
 
-A task with no `permissions.dicode` block at all gets a token that can call none of the scoped tools. Enforcement happens in `pkg/webui`'s `/mcp` handler, before the request ever reaches the `buildin/mcp` task — the task itself always runs with full `list_tasks`/`run_task` permissions and isn't relied on to self-restrict. A denied call gets a JSON-RPC error back (HTTP 200, `error.code: -32001`) rather than being forwarded.
+A task with no `permissions.dicode` block at all gets a token that can call none of the scoped tools. An unrecognized tool name is denied by default, so a tool added to `tasks/buildin/mcp/task.ts` without a matching case in `mcpScopeCheck` fails closed rather than inheriting full access.
 
-The `test_task` tool call itself is always allowed as noted above, but it's a hint tool that just returns pointer text telling the MCP client to call `POST /api/tasks/{id}/test` directly with its Bearer token. That REST endpoint is a separate surface, still reachable with the same ephemeral token, and it runs the target task's sibling test file with full host permissions — so it's independently gated on `permissions.dicode.tasks_test: true`. A scoped token whose minting task didn't declare that flag gets HTTP 403 from `/api/tasks/{id}/test`, even though the JSON-RPC `test_task` call that pointed it there was itself unconditionally allowed. Don't conflate the two: scoping the three JSON-RPC tools above does not, by itself, scope every REST endpoint reachable with the same Bearer token — `tasks_test` is the one other case that's covered today.
+Enforcement happens in `pkg/webui`'s `/mcp` handler, before the request ever reaches the `buildin/mcp` task — the task holds the dicode permissions every tool it serves needs, so it isn't relied on to self-restrict. A denied call gets a JSON-RPC error back (HTTP 200, `error.code: -32001`) rather than being forwarded. The same handler rewrites `switch_dev_mode`'s `run_id` before forwarding; that is the one argument a scoped caller cannot choose.
+
+Scoping the JSON-RPC tools does not, by itself, scope every REST endpoint reachable with the same Bearer token. `tasks_test` is the one such case covered today.
 
 Operator-, CLI-, and dashboard-created API keys (`dicode mcp install`, the dashboard's Create API Key) are **unscoped** — full access, exactly as before this feature — since they aren't tied to a single task's declared permissions.

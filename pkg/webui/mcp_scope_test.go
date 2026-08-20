@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -228,20 +229,48 @@ func TestMcpScopeCheck(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
-			name:        "list_sources always allowed regardless of scope",
+			name:        "list_sources denied without ListSources",
 			scope:       zeroScope,
+			body:        rpcBody(t, 11, "tools/call", "list_sources", map[string]any{}),
+			wantAllowed: false,
+		},
+		{
+			name:        "list_sources allowed with ListSources",
+			scope:       &pkgruntime.MCPScope{ListSources: true},
 			body:        rpcBody(t, 11, "tools/call", "list_sources", map[string]any{}),
 			wantAllowed: true,
 		},
 		{
-			name:        "switch_dev_mode always allowed regardless of scope",
+			name:        "switch_dev_mode denied without SetDevMode",
 			scope:       zeroScope,
+			body:        rpcBody(t, 12, "tools/call", "switch_dev_mode", map[string]any{"source": "x", "enabled": true}),
+			wantAllowed: false,
+		},
+		{
+			// A token minted before RunID was carried, or one that somehow
+			// lost it, has nothing to bind the clone directory to. Denying
+			// is the only safe reading: allowing would let the call's own
+			// run_id through to name another session's clone.
+			name:        "switch_dev_mode denied when the token carries no RunID",
+			scope:       &pkgruntime.MCPScope{SetDevMode: true},
+			body:        rpcBody(t, 12, "tools/call", "switch_dev_mode", map[string]any{"source": "x", "enabled": true}),
+			wantAllowed: false,
+		},
+		{
+			name:        "switch_dev_mode allowed with SetDevMode and a RunID",
+			scope:       &pkgruntime.MCPScope{SetDevMode: true, RunID: "run-1"},
 			body:        rpcBody(t, 12, "tools/call", "switch_dev_mode", map[string]any{"source": "x", "enabled": true}),
 			wantAllowed: true,
 		},
 		{
-			name:        "test_task always allowed regardless of scope",
+			name:        "test_task denied without TestTasks",
 			scope:       zeroScope,
+			body:        rpcBody(t, 13, "tools/call", "test_task", map[string]any{"id": "repo/x"}),
+			wantAllowed: false,
+		},
+		{
+			name:        "test_task allowed with TestTasks",
+			scope:       &pkgruntime.MCPScope{TestTasks: true},
 			body:        rpcBody(t, 13, "tools/call", "test_task", map[string]any{"id": "repo/x"}),
 			wantAllowed: true,
 		},
@@ -638,5 +667,154 @@ func TestHandleMCP_ScopedKey_OversizedBodyRejected(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Error("expected a non-empty error message in the rejection body")
+	}
+}
+
+// ── mcpScopeRewrite ─────────────────────────────────────────────────────────
+
+// argsOf pulls params.arguments back out of a rewritten JSON-RPC envelope.
+func argsOf(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal rewritten body: %v", err)
+	}
+	params, _ := raw["params"].(map[string]any)
+	args, _ := params["arguments"].(map[string]any)
+	return args
+}
+
+// TestMcpScopeRewrite_BindsRunIDToTheMintingRun is the whole point of the
+// rewrite: run_id names the clone directory dev mode creates and later
+// removes, so a caller that chooses it chooses which session's clone it
+// addresses. Whatever the call carries must be replaced by the run the token
+// was minted for.
+func TestMcpScopeRewrite_BindsRunIDToTheMintingRun(t *testing.T) {
+	scope := &pkgruntime.MCPScope{SetDevMode: true, RunID: "run-mine"}
+	body := rpcBody(t, 1, "tools/call", "switch_dev_mode", map[string]any{
+		"source": "demo", "enabled": true, "branch": "fix/x", "run_id": "run-someone-else",
+	})
+
+	args := argsOf(t, mcpScopeRewrite(scope, body))
+	if got := args["run_id"]; got != "run-mine" {
+		t.Errorf("run_id = %v, want %q", got, "run-mine")
+	}
+	// Every other argument survives untouched.
+	if got := args["branch"]; got != "fix/x" {
+		t.Errorf("branch = %v, want %q", got, "fix/x")
+	}
+	if got := args["source"]; got != "demo" {
+		t.Errorf("source = %v, want %q", got, "demo")
+	}
+}
+
+// TestMcpScopeRewrite_SuppliesRunIDWhenAbsent covers the ordinary case: the
+// caller sends no run_id at all and the forwarder supplies it.
+func TestMcpScopeRewrite_SuppliesRunIDWhenAbsent(t *testing.T) {
+	scope := &pkgruntime.MCPScope{SetDevMode: true, RunID: "run-mine"}
+	body := rpcBody(t, 1, "tools/call", "switch_dev_mode", map[string]any{
+		"source": "demo", "enabled": true, "branch": "fix/x",
+	})
+
+	if got := argsOf(t, mcpScopeRewrite(scope, body))["run_id"]; got != "run-mine" {
+		t.Errorf("run_id = %v, want %q", got, "run-mine")
+	}
+}
+
+// TestMcpScopeRewrite_LeavesOtherCallsUntouched pins the narrow blast radius:
+// anything that isn't a switch_dev_mode tools/call comes back byte-identical,
+// so no other tool's arguments can be perturbed by this path.
+func TestMcpScopeRewrite_LeavesOtherCallsUntouched(t *testing.T) {
+	scope := &pkgruntime.MCPScope{SetDevMode: true, RunID: "run-mine"}
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"another tool", rpcBody(t, 1, "tools/call", "run_task", map[string]any{"id": "a", "run_id": "x"})},
+		{"another method", rpcBody(t, 2, "tools/list", "", nil)},
+		{"not json", []byte("not json")},
+		{"no arguments object", rpcBody(t, 3, "tools/call", "switch_dev_mode", nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mcpScopeRewrite(scope, tc.body); !bytes.Equal(got, tc.body) {
+				t.Errorf("body rewritten: got %s, want %s", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestMcpScopeRewrite_PreservesLargeIntegerID guards the re-encode: JSON
+// numbers decoded into float64 lose precision past 2^53, which would silently
+// change the id the client correlates its response by.
+func TestMcpScopeRewrite_PreservesLargeIntegerID(t *testing.T) {
+	scope := &pkgruntime.MCPScope{SetDevMode: true, RunID: "run-mine"}
+	body := []byte(`{"jsonrpc":"2.0","id":9007199254740993,"method":"tools/call",` +
+		`"params":{"name":"switch_dev_mode","arguments":{"source":"demo","enabled":true}}}`)
+
+	if got := mcpScopeRewrite(scope, body); !bytes.Contains(got, []byte("9007199254740993")) {
+		t.Errorf("id lost precision in rewrite: %s", got)
+	}
+}
+
+// TestHandleMCP_ScopedKey_ForwardsBoundRunID is the end-to-end half of the
+// rewrite: the body the buildin/mcp task actually receives must carry the
+// minting run's id, not the one the caller wrote. Registering a handler on
+// the gateway captures the forwarded body — without it the request 404s and
+// the test can only see that it was let through, not what was let through.
+func TestHandleMCP_ScopedKey_ForwardsBoundRunID(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	h := srv.Handler()
+
+	var forwarded []byte
+	srv.gateway.Register("/hooks/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() { srv.gateway.Unregister("/hooks/mcp") })
+
+	raw, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-mine",
+		pkgruntime.MCPScope{SetDevMode: true})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	body := rpcBody(t, 1, "tools/call", "switch_dev_mode", map[string]any{
+		"source": "demo", "enabled": true, "branch": "fix/x", "run_id": "run-someone-else",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if forwarded == nil {
+		t.Fatal("request never reached the gateway")
+	}
+	if got := argsOf(t, forwarded)["run_id"]; got != "run-mine" {
+		t.Errorf("forwarded run_id = %v, want %q (body: %s)", got, "run-mine", forwarded)
+	}
+}
+
+// TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody is a regression test for a
+// bypass the rewrite introduced: mcpScopeCheck allows a body it cannot parse,
+// on the reasoning that the task's own parse error is the better answer. If
+// the rewrite parses that same body more leniently, it hands the task a clean,
+// executable call the check never gated.
+//
+// The concrete payload is a valid switch_dev_mode envelope with trailing
+// data. Unmarshal rejects it; a bare Decode stops at the first value and
+// accepts it. Both must reach the same verdict, so the forwarded body stays
+// exactly as unparseable as the check believed it was.
+func TestMcpScopeRewrite_DoesNotSanitizeAnUngatedBody(t *testing.T) {
+	// No SetDevMode granted — this caller may not switch dev mode at all.
+	scope := &pkgruntime.MCPScope{RunID: "run-mine"}
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` +
+		`{"name":"switch_dev_mode","arguments":{"source":"x","enabled":true}}} {}`)
+
+	if allowed, _, _ := mcpScopeCheck(scope, body); !allowed {
+		t.Fatal("precondition changed: the check now rejects this body outright, " +
+			"which is fine but means this test no longer covers what it was written for")
+	}
+	if got := mcpScopeRewrite(scope, body); !bytes.Equal(got, body) {
+		t.Errorf("rewrite normalized a body the check never gated:\n got: %s\nwant: %s", got, body)
 	}
 }

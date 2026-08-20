@@ -217,6 +217,17 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
     run: (dicode, args) => dicode.tasks.test(argStr(args, "task_id")),
   },
   {
+    name: "dicode_list_sources",
+    cap: "sources.list",
+    description:
+      "List the configured sources: name, type, git URL, tracked branch, and " +
+      "whether the source is already in dev mode. Use it to find the source " +
+      "name dicode_set_dev_mode expects. Host paths are not returned; " +
+      "dicode_set_dev_mode is what hands back a path to edit in.",
+    parameters: objectSchema({}, []),
+    run: (dicode) => dicode.sources.list(),
+  },
+  {
     name: "dicode_set_dev_mode",
     cap: "sources.set_dev_mode",
     description:

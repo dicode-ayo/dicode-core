@@ -141,9 +141,9 @@ func (rt *Runtime) effectiveInputStore() *registry.InputStore { return rt.live()
 // propagates without extra bookkeeping.
 func (rt *Runtime) effectiveReplayer() *registry.Replayer { return rt.live().Replayer }
 
-// effectiveSourceMgr returns the live SourceDevModeSetter, reading from parent
+// effectiveSourceMgr returns the live SourceController, reading from parent
 // when this is a per-version executor.
-func (rt *Runtime) effectiveSourceMgr() ipc.SourceDevModeSetter { return rt.live().SourceMgr }
+func (rt *Runtime) effectiveSourceMgr() ipc.SourceController { return rt.live().SourceMgr }
 
 // effectiveRepoResolver returns the live RepoPathResolver, reading from parent
 // when this is a per-version executor.

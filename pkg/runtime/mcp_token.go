@@ -34,13 +34,22 @@ type MCPTokenMinter interface {
 type MCPScope struct {
 	ListTasks  bool     `json:"list_tasks,omitempty"`
 	RunTaskIDs []string `json:"run_task_ids,omitempty"` // nil = deny run_task; "*" = any task
-	// TestTasks gates POST /api/tasks/{id}/test — the REST endpoint the
-	// JSON-RPC test_task hint tool points MCP clients at. The hint tool
-	// call itself stays an unconditionally-allowed hint (see
-	// mcpScopeCheck in pkg/webui/server.go), but the REST endpoint it
-	// points to runs the task's sibling test file with full host
-	// permissions, so it's separately gated on this flag (#590).
+	// TestTasks gates both surfaces that run a task's sibling test file with
+	// full host permissions: the JSON-RPC test_task tool and the REST
+	// endpoint POST /api/tasks/{id}/test reachable with the same Bearer
+	// token (#590, #724).
 	TestTasks bool `json:"test_tasks,omitempty"`
+	// ListSources gates the JSON-RPC list_sources tool.
+	ListSources bool `json:"list_sources,omitempty"`
+	// SetDevMode gates the JSON-RPC switch_dev_mode tool, which redirects
+	// which files the daemon loads as tasks for the named source.
+	SetDevMode bool `json:"set_dev_mode,omitempty"`
+	// RunID is the run the token was minted for. switch_dev_mode names a
+	// clone directory, and a caller that picks that name can address another
+	// session's clone — so the name is bound to the minting run here rather
+	// than taken from the tool call. Empty on an unscoped or legacy token,
+	// which denies switch_dev_mode outright.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // MCPScopeFor derives the MCP capability scope an ephemeral token minted for
@@ -48,14 +57,22 @@ type MCPScope struct {
 // exactly what the task itself is allowed to do via the dicode SDK — the
 // token must not grant the MCP caller anything the task couldn't already do
 // directly. This covers both the JSON-RPC tools/call surface (ListTasks,
-// RunTaskIDs) and the REST /api/tasks/{id}/test surface reachable with the
-// same Bearer token (TestTasks).
+// RunTaskIDs, ListSources, SetDevMode) and the REST /api/tasks/{id}/test
+// surface reachable with the same Bearer token (TestTasks).
+//
+// RunID is not derived here — the spec does not know its run. The minter
+// fills it in.
 func MCPScopeFor(spec *task.Spec) MCPScope {
 	if spec == nil || spec.Permissions.Dicode == nil {
 		return MCPScope{}
 	}
 	d := spec.Permissions.Dicode
-	scope := MCPScope{ListTasks: d.ListTasks, TestTasks: d.TasksTest}
+	scope := MCPScope{
+		ListTasks:   d.ListTasks,
+		TestTasks:   d.TasksTest,
+		ListSources: d.SourcesList,
+		SetDevMode:  d.SourcesSetDevMode,
+	}
 	if len(d.Tasks) > 0 {
 		scope.RunTaskIDs = append([]string(nil), d.Tasks...)
 	}
