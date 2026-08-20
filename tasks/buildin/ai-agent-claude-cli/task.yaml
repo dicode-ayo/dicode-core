@@ -61,9 +61,11 @@ params:
     type: string
     default: ""
     description: |
-      Comma-separated skill markdown filenames (without .md). Each is copied
-      from skills_dir into a per-invocation .claude/skills/ that the Claude
-      CLI loads automatically. Mirrors buildin/ai-agent's `skills` param.
+      Comma-separated skill markdown filenames (without .md). Each is
+      installed into a per-invocation .claude/skills/<name>/SKILL.md, the
+      layout the Claude CLI loads automatically, and is skipped when its
+      frontmatter name disagrees with the filename. Mirrors buildin/ai-agent's
+      `skills` param.
   skills_dir:
     type: string
     default: "${TASK_SET_DIR}/../skills"
@@ -135,13 +137,13 @@ permissions:
     # rw lets it persist refreshed tokens and per-session rollups.
     - path: "${HOME}/.claude"
       permission: rw
-    # Read-only access to the shared skills directory. task.ts copies
+    # Read-only access to the shared skills directory. task.ts installs
     # files referenced by the `skills` param into the per-invocation
-    # .claude/skills/ subfolder; Claude CLI picks them up automatically.
+    # .claude/skills/<name>/SKILL.md; Claude CLI picks them up automatically.
     - path: "${TASK_SET_DIR}/../skills"
       permission: r
     # Per-invocation working directory. task.ts mkdirs a uuid-named
-    # subfolder, populates .claude/{mcp.json, skills/*.md}, and runs
+    # subfolder, populates .claude/{mcp.json, skills/<name>/SKILL.md}, and runs
     # `claude -p` with cwd = that subfolder. Cleaned up on task exit.
     - path: "${DATADIR}/tmp/claude-cli"
       permission: rw

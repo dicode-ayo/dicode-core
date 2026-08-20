@@ -148,7 +148,7 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 | `model` | string | `""` | E.g. `sonnet`, `opus`. Empty = CLI default. |
 | `system_prompt` | string | `""` | Appended via `--append-system-prompt`. |
 | `cli_path` | string | `""` | Override binary path. Empty = `CLAUDE_CLI_PATH` env, then `PATH` lookup. |
-| `skills` | string | `""` | Comma-separated skill markdown filenames (without `.md`). Each is copied from `skills_dir` into a per-invocation `.claude/skills/` that the Claude CLI loads automatically. |
+| `skills` | string | `""` | Comma-separated skill markdown filenames (without `.md`). Each is installed from `skills_dir` into a per-invocation `.claude/skills/<name>/SKILL.md` that the Claude CLI loads automatically. |
 | `skills_dir` | string | `${TASK_SET_DIR}/../skills` | Where the skill md files live. |
 | `enable_mcp` | bool | `true` | Wire dicode's `/mcp` endpoint into a per-invocation `.claude/mcp.json` so Claude can call dicode tasks as MCP tools. Requires `DICODE_MCP_API_KEY` (populated by `dicode mcp install`). |
 | `mcp_url` | string | `http://localhost:8080/mcp` | dicode MCP endpoint URL written into `.claude/mcp.json`. |
@@ -157,7 +157,10 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 
 On every invocation the task creates a per-session `.claude/` workdir, populates
 it with the requested skill markdowns and an `mcp.json`, and runs `claude -p`
-from that directory. **Skills** are auto-loaded from `.claude/skills/`. **MCP is
+from that directory. **Skills** are auto-loaded from
+`.claude/skills/<name>/SKILL.md` — one directory per skill, and the frontmatter
+`name` must match that directory or the CLI ignores the skill without a word.
+**MCP is
 mounted explicitly** via `--mcp-config <path> --strict-mcp-config` — the CLI does
 *not* auto-load `<cwd>/.claude/mcp.json`, and `--strict-mcp-config` loads *only*
 dicode's server, ignoring any operator-level `~/.claude.json` / project
