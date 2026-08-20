@@ -122,10 +122,10 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // NewExecutor returns an Executor that runs Python scripts via the uv binary
 // at binaryPath, connected to the dicode socket-bridge SDK.
 //
-// Note: this copy list is intentionally wider than the Deno runtime's
-// NewExecutor — it also snapshots SecretsManager, IPCSecret, Engine, and
-// Gateway. Preserved as-is by the #388 dedup (behavior-preserving); see that
-// issue for the follow-up on reconciling the two.
+// This copy list matches the Deno runtime's NewExecutor field-for-field
+// (issue #718) — see that function's doc for why copying SecretsManager,
+// IPCSecret, Engine, and Gateway here (unlike the pre-#718 Deno list) is
+// both necessary and safe.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
 		uvPath: binaryPath,

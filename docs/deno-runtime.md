@@ -19,6 +19,13 @@ runtimes:
     version: "2.3.3"
 ```
 
+Pinning a version routes every Deno run through a dedicated per-version
+executor instead of the default one. That executor gets the full SDK surface
+— `dicode.run_task`, `dicode.http.register`, `dicode.secrets_set`/
+`secrets_delete`, and correctly-signed per-run IPC capability tokens — the
+same as the unpinned default (fixed in [#718](https://github.com/dicode-ayo/dicode-core/issues/718); versions before that fix silently
+dropped these for a pinned executor).
+
 ---
 
 ## Task structure

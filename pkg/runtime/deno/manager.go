@@ -48,18 +48,33 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // on the manager (which happens in daemon.go after buildRuntimes returns) is
 // visible to all executors via effectiveInputStore().
 //
-// Note: this copy list is intentionally narrower than the Python runtime's
-// NewExecutor, which also snapshots SecretsManager, IPCSecret, Engine, and
-// Gateway. Preserved as-is by the #388 dedup (behavior-preserving); see that
-// issue for the follow-up on reconciling the two.
+// The copy list matches the Python runtime's NewExecutor field-for-field
+// (issue #718): both snapshot every construction-time BridgeDeps field —
+// Registry, SecretsChain, SecretsManager, DB, Log, IPCSecret, Engine,
+// Gateway, SecretOutputCh, ProviderRunner. Before #718 this list omitted
+// SecretsManager, IPCSecret, Engine, and Gateway, so a per-version Deno
+// executor (runtimes.deno.version pinned to an installed version) served
+// every run with those four fields nil: dicode.run_task failed with
+// "engine not available", dicode.http/secrets_set/secrets_delete were inert,
+// and — the security-relevant one — per-run IPC capability tokens were
+// minted and verified under a nil (empty) HMAC key instead of the daemon's
+// real IPCSecret. daemon.go always calls SetEngine/SetGateway/
+// SetSecretsManager on the manager before it calls NewExecutor for a pinned
+// version, and IPCSecret is set at construction in New(), so copying these
+// four here is sufficient — no field is genuinely unavailable at the time a
+// per-version executor is built.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &Runtime{
 		parent: rt,
 		BridgeDeps: pkgruntime.BridgeDeps{
 			Registry:       rt.Registry,
 			SecretsChain:   rt.SecretsChain,
+			SecretsManager: rt.SecretsManager,
 			DB:             rt.DB,
 			Log:            rt.Log,
+			IPCSecret:      rt.IPCSecret,
+			Engine:         rt.Engine,
+			Gateway:        rt.Gateway,
 			SecretOutputCh: rt.SecretOutputCh,
 			ProviderRunner: rt.ProviderRunner,
 		},
