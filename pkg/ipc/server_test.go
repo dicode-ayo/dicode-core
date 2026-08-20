@@ -19,6 +19,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
 )
 
@@ -2713,5 +2714,101 @@ func TestServer_Suspend_GrantedForDeno(t *testing.T) {
 	}
 	if srv.Suspend() == nil {
 		t.Fatal("expected suspend payload recorded for deno")
+	}
+}
+
+// fakeDevModeSetter records the SetDevMode call and reports a fixed dev root.
+type fakeDevModeSetter struct {
+	gotName    string
+	gotEnabled bool
+	gotOpts    taskset.DevModeOpts
+	devRoot    string
+}
+
+func (f *fakeDevModeSetter) SetDevMode(_ context.Context, name string, enabled bool, opts taskset.DevModeOpts) error {
+	f.gotName = name
+	f.gotEnabled = enabled
+	f.gotOpts = opts
+	return nil
+}
+
+func (f *fakeDevModeSetter) DevRootPath(string) string { return f.devRoot }
+
+// TestIPC_SourcesSetDevMode_ReturnsClonePath verifies the enable reply carries
+// the clone the caller was just handed. Without it the caller has no way to
+// reach the files it asked for.
+func TestIPC_SourcesSetDevMode_ReturnsClonePath(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{SourcesSetDevMode: true},
+		},
+	}
+
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	fake := &fakeDevModeSetter{devRoot: "/data/dev-clones/scratch/run-7/taskset.yaml"}
+	srv.SetSourceManager(fake)
+
+	sendMsg(t, conn, map[string]any{
+		"id":      "dev-1",
+		"method":  "dicode.sources.set_dev_mode",
+		"name":    "scratch",
+		"enabled": true,
+		"branch":  "fix/thing",
+		"run_id":  "run-7",
+	})
+	resp := recvMsg(t, conn)
+	if errMsg, _ := resp["error"].(string); errMsg != "" {
+		t.Fatalf("set_dev_mode failed: %s", errMsg)
+	}
+	res, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a result map, got %#v", resp["result"])
+	}
+	if got := res["dev_root_path"]; got != "/data/dev-clones/scratch/run-7/taskset.yaml" {
+		t.Errorf("dev_root_path = %v, want the source's dev root", got)
+	}
+	if got := res["clone_path"]; got != "/data/dev-clones/scratch/run-7" {
+		t.Errorf("clone_path = %v, want the dev root's directory", got)
+	}
+	if fake.gotName != "scratch" || !fake.gotEnabled || fake.gotOpts.Branch != "fix/thing" {
+		t.Errorf("SetDevMode got name=%q enabled=%v opts=%+v", fake.gotName, fake.gotEnabled, fake.gotOpts)
+	}
+}
+
+// TestIPC_SourcesSetDevMode_DisableOmitsClonePath verifies a disable reports no
+// clone: the path keys are absent rather than empty strings a caller might use.
+func TestIPC_SourcesSetDevMode_DisableOmitsClonePath(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{SourcesSetDevMode: true},
+		},
+	}
+
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetSourceManager(&fakeDevModeSetter{devRoot: ""})
+
+	sendMsg(t, conn, map[string]any{
+		"id":      "dev-2",
+		"method":  "dicode.sources.set_dev_mode",
+		"name":    "scratch",
+		"enabled": false,
+	})
+	resp := recvMsg(t, conn)
+	res, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a result map, got %#v", resp["result"])
+	}
+	if res["ok"] != true {
+		t.Errorf("ok = %v, want true", res["ok"])
+	}
+	if _, present := res["clone_path"]; present {
+		t.Errorf("clone_path must be absent when there is no clone, got %#v", res)
+	}
+	if _, present := res["dev_root_path"]; present {
+		t.Errorf("dev_root_path must be absent when there is no clone, got %#v", res)
 	}
 }

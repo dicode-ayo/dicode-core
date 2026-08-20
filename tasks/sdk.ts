@@ -119,6 +119,10 @@ export interface Dicode {
   task_id: string;
   // Id of the current run (uuid).
   run_id: string;
+  // The capability list the daemon granted this run, from the IPC handshake.
+  // A member below is only callable when its capability is present; calling
+  // one that is absent rejects with "permission denied".
+  caps: string[];
   run_task(taskID: string, params?: Record<string, string>): Promise<unknown>;
   list_tasks(): Promise<unknown[]>;
   get_runs(taskID: string, opts?: { limit?: number }): Promise<unknown[]>;
@@ -135,6 +139,64 @@ export interface Dicode {
   secrets_delete(key: string): Promise<void>;
   crypto: DicodeCrypto;
   audit: DicodeAudit;
+  runs: DicodeRuns;
+  tasks: DicodeTasks;
+  sources: DicodeSources;
+  git: DicodeGit;
+}
+
+// Run-input retention and replay. Every member is gated by its own
+// permissions.dicode capability.
+export interface DicodeRuns {
+  list_expired(opts?: { before_ts?: number }): Promise<unknown>;
+  delete_input(runID: string): Promise<unknown>;
+  pin_input(runID: string): Promise<unknown>;
+  unpin_input(runID: string): Promise<unknown>;
+  get_input(runID: string): Promise<unknown>;
+  // Re-fire a persisted run. taskName retargets the replay at a different task;
+  // omit it to replay against the run's own task.
+  replay(runID: string, taskName?: string): Promise<unknown>;
+}
+
+export interface DicodeTasks {
+  // Run a task's sibling test file. Refused for a task the approval gate holds
+  // pending, because the test file runs with full host permissions.
+  test(taskID: string): Promise<unknown>;
+}
+
+// dev_root_path is the root taskset.yaml inside the clone and clone_path its
+// directory — the value git-pr's clone_path expects. Both are absent when dev
+// mode was disabled.
+export interface SetDevModeResult {
+  ok: boolean;
+  dev_root_path?: string;
+  clone_path?: string;
+}
+
+export interface DicodeSources {
+  set_dev_mode(name: string, opts: {
+    enabled: boolean;
+    // local_path and branch are mutually exclusive: local_path points dev-ref
+    // resolution at an existing checkout, branch clones into a per-run dir.
+    local_path?: string;
+    branch?: string;
+    base?: string;
+    run_id?: string;
+  }): Promise<SetDevModeResult>;
+}
+
+export interface DicodeGit {
+  commit_push(sourceID: string, opts: {
+    message: string;
+    branch: string;
+    branch_prefix?: string;
+    allow_main?: boolean;
+    files?: string[];
+    author_name: string;
+    author_email: string;
+    // Must name an entry in the task's own permissions.env.
+    auth_token_env?: string;
+  }): Promise<{ commit: string }>;
 }
 
 // The context each task handler (main / resume / steps[x]) receives (#512).

@@ -559,6 +559,10 @@ class _Git:
 
 class _Dicode:
     def __init__(self):
+        # caps: the capability list the daemon granted this run, from the
+        # handshake. A dicode.* call is only permitted when its capability is
+        # present; calling one that is absent raises "permission denied".
+        self.caps = list(_caps)
         self.runs = _Runs()
         self.tasks = _Tasks()
         self.sources = _Sources()

@@ -119,6 +119,8 @@ func (fakeSourceDevModeSetter) SetDevMode(_ context.Context, _ string, _ bool, _
 	return nil
 }
 
+func (fakeSourceDevModeSetter) DevRootPath(_ string) string { return "" }
+
 // fakeRepoPathResolver satisfies ipc.RepoPathResolver for testing.
 type fakeRepoPathResolver struct{}
 

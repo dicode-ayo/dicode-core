@@ -7,11 +7,11 @@ import (
 	"github.com/dicode/dicode/pkg/taskset"
 )
 
-// TestTaskCreateEntry_HasExpectedDicodePerms mirrors
-// TestAutoFixEntry_HasExpectedDicodePerms: task-create (issue #568, Phase 0
-// of docs/design/ai-task-authoring.md) is documented as cloning auto-fix's
-// exact permission set, so this pins that claim against the real taskset.yaml
-// rather than trusting the doc comment.
+// TestTaskCreateEntry_HasExpectedDicodePerms pins task-create's granted
+// capabilities against the real taskset.yaml rather than its doc comment.
+// Every capability listed here becomes a tool the model can call, so the
+// absent ones are as much a part of the contract as the present ones:
+// scaffolding a new task has no prior run to read, pin, unpin or replay.
 func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 	ts, err := taskset.LoadTaskSet("../../tasks/buildin/taskset.yaml")
 	if err != nil {
@@ -31,10 +31,6 @@ func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"RunsReplay":        d.RunsReplay,
-		"RunsGetInput":      d.RunsGetInput,
-		"RunsPinInput":      d.RunsPinInput,
-		"RunsUnpinInput":    d.RunsUnpinInput,
 		"SourcesSetDevMode": d.SourcesSetDevMode,
 		"TasksTest":         d.TasksTest,
 		"GitCommitPush":     d.GitCommitPush,
@@ -47,7 +43,19 @@ func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 		}
 	}
 
-	// Tasks union must include git-pr, same as auto-fix.
+	withheld := map[string]bool{
+		"RunsReplay":     d.RunsReplay,
+		"RunsGetInput":   d.RunsGetInput,
+		"RunsPinInput":   d.RunsPinInput,
+		"RunsUnpinInput": d.RunsUnpinInput,
+	}
+	for name, v := range withheld {
+		if v {
+			t.Errorf("%s must stay false: task-create has no prior run to act on", name)
+		}
+	}
+
+	// Tasks union must include git-pr: the authoring loop lands through it.
 	hasGitPR := false
 	for _, taskID := range d.Tasks {
 		if taskID == "git-pr" {
@@ -58,7 +66,7 @@ func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 		t.Errorf("task-create tasks slice missing git-pr; got %v", d.Tasks)
 	}
 
-	// dev-clones fs grant, copied verbatim from auto-fix.
+	// dev-clones fs grant: the scratch clone the write -> test loop works in.
 	hasDevClonesRW := false
 	for _, fs := range entry.Overrides.Fs {
 		if strings.Contains(fs.Path, "dev-clones") && fs.Permission == "rw" {

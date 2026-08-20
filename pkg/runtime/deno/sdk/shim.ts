@@ -140,6 +140,15 @@ export interface TaskSummary {
   enabled:      boolean;
 }
 
+// SetDevModeResult is what dicode.sources.set_dev_mode() returns. dev_root_path
+// is the root taskset.yaml inside the clone and clone_path its directory — the
+// value git-pr's clone_path expects. Both are absent when dev mode was disabled.
+export interface SetDevModeResult {
+  ok: boolean;
+  dev_root_path?: string;
+  clone_path?: string;
+}
+
 // A JSON Schema (draft 2020-12) object describing the input a suspended task
 // collects before resume (#512). The daemon validates the submission against it
 // server-side. Loosely typed — any valid JSON Schema is accepted.
@@ -178,6 +187,10 @@ export interface Dicode {
   task_id:        string;
   // run_id: the id of the current run (uuid). Same source as task_id.
   run_id:         string;
+  // caps: the capability list the daemon granted this run, from the handshake.
+  // A dicode.* member below is only callable when its capability is present;
+  // calling one that is absent fails with "permission denied".
+  caps:           string[];
   run_task:       (taskID: string, params?: Record<string, string>, opts?: { mcpContext?: boolean })  => Promise<unknown>;
   list_tasks:     (opts?: { mcpContext?: boolean })                     => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })         => Promise<unknown>;
@@ -213,7 +226,7 @@ export interface Dicode {
       branch?: string;
       base?: string;
       run_id?: string;
-    }) => Promise<unknown>;
+    }) => Promise<SetDevModeResult>;
   };
   git: {
     commit_push: (sourceID: string, opts: {
@@ -307,7 +320,7 @@ const __hsResp__ = await __readMsg__() as HandshakeResponse;
 if (__hsResp__.error) {
   throw new Error(`ipc handshake failed: ${__hsResp__.error}`);
 }
-// __hsResp__.caps contains the granted capability list (informational).
+// __hsResp__.caps is surfaced to task code as dicode.caps.
 
 // ── read loop ─────────────────────────────────────────────────────────────────
 
@@ -476,6 +489,7 @@ const mcp: MCP = {
 const dicode: Dicode = {
   task_id:        __hsResp__.task_id ?? "",
   run_id:         __hsResp__.run_id ?? "",
+  caps:           __hsResp__.caps ?? [],
   run_task:       (taskID, params, opts)  => __call__({ method: "dicode.run_task", taskID, params: params ?? {}, mcpContext: opts?.mcpContext ?? false }),
   list_tasks:     (opts)                => __call__({ method: "dicode.list_tasks", mcpContext: opts?.mcpContext ?? false }) as Promise<TaskSummary[]>,
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),
@@ -540,7 +554,7 @@ const dicode: Dicode = {
         branch: opts.branch ?? "",
         base: opts.base ?? "",
         run_id: opts.run_id ?? "",
-      }),
+      }) as Promise<SetDevModeResult>,
   },
   git: {
     commit_push: (sourceID, opts) =>

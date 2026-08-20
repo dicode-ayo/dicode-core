@@ -381,3 +381,259 @@ test("chat turn surfaces not_configured when no provider is set", async () => {
   assert.ok(result.missing.includes("model"));
   assert.equal(calls.length, 0);
 });
+
+// ─── capability-gated built-in tools (#735) ──────────────────────────────
+
+// Collect the tool names the agent offered the model on the last request.
+function offeredTools(): string[] {
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  return (sent.tools ?? []).map((t: { function: { name: string } }) => t.function.name);
+}
+
+// Drive one turn whose first model response calls `name` with `args`, and whose
+// second is a plain reply. Returns the tool result the agent fed back.
+async function runBuiltinCall(name: string, args: Record<string, unknown>) {
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("", [
+      { id: "call_1", type: "function", function: { name, arguments: JSON.stringify(args) } },
+    ]),
+  });
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("done"),
+  });
+  const result = await runTask();
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const toolMsg = (sent.messages ?? []).find(
+    (m: { role: string; tool_call_id?: string }) => m.role === "tool" && m.tool_call_id === "call_1",
+  );
+  return { reply: result.reply, toolResult: JSON.parse(toolMsg.content) };
+}
+
+test("a run with no granted caps is offered no built-in tools", async () => {
+  useLocal();
+  params.set("prompt", "hi");
+  dicode.caps = [];
+  dicode.list_tasks = async () => [{ id: "other/something" }];
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("ok"),
+  });
+  await runTask();
+
+  const names = offeredTools();
+  assert.ok(names.includes("task_other_something"), "task tools must still be offered");
+  assert.ok(
+    !names.some((n) => n.startsWith("dicode_")),
+    `no built-in may be offered without a cap, got ${JSON.stringify(names)}`,
+  );
+});
+
+test("each built-in is offered only when its own cap was granted", async () => {
+  useLocal();
+  params.set("prompt", "hi");
+  dicode.caps = ["tasks.test", "sources.set_dev_mode"];
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("ok"),
+  });
+  await runTask();
+
+  const names = offeredTools();
+  assert.ok(names.includes("dicode_test_task"), "tasks.test was granted");
+  assert.ok(names.includes("dicode_set_dev_mode"), "sources.set_dev_mode was granted");
+  assert.ok(!names.includes("dicode_git_commit_push"), "git.commit_push was not granted");
+  assert.ok(!names.includes("dicode_replay_run"), "runs.replay was not granted");
+});
+
+test("a built-in call reaches the SDK and its result feeds back to the model", async () => {
+  useLocal();
+  params.set("prompt", "test the task");
+  dicode.caps = ["tasks.test"];
+  const tested: string[] = [];
+  dicode.tasks = {
+    test: async (taskID: string) => {
+      tested.push(taskID);
+      return { passed: 2, failed: 0 };
+    },
+  };
+  // run_task must not be reached: built-ins bypass task dispatch entirely.
+  dicode.run_task = async () => {
+    throw new Error("run_task must not be called for a built-in");
+  };
+
+  const { reply, toolResult } = await runBuiltinCall("dicode_test_task", { task_id: "scratch/demo" });
+
+  assert.equal(reply, "done");
+  assert.equal(tested, ["scratch/demo"]);
+  assert.equal(toolResult, { passed: 2, failed: 0 });
+});
+
+test("set_dev_mode pins the clone to this run, ignoring any model-supplied id", async () => {
+  // run_id names the clone directory. Letting the model choose it would let one
+  // session reach another's clone, so the tool has no run_id argument at all.
+  useLocal();
+  params.set("prompt", "enter dev mode");
+  dicode.caps = ["sources.set_dev_mode"];
+  dicode.run_id = "run-abc";
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.sources = {
+    // deno-lint-ignore no-explicit-any
+    set_dev_mode: async (name: string, opts: any) => {
+      calls.push({ name, opts });
+      return { ok: true, clone_path: "/data/dev-clones/scratch/run-abc" };
+    },
+  };
+
+  const { toolResult } = await runBuiltinCall("dicode_set_dev_mode", {
+    source: "scratch",
+    enabled: true,
+    branch: "fix/thing",
+    run_id: "run-somebody-else",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "scratch");
+  assert.equal(calls[0].opts.run_id, "run-abc");
+  assert.equal(calls[0].opts.branch, "fix/thing");
+  assert.equal(toolResult.clone_path, "/data/dev-clones/scratch/run-abc");
+});
+
+test("commit_push defaults the commit author instead of asking the model to invent one", async () => {
+  useLocal();
+  params.set("prompt", "push it");
+  dicode.caps = ["git.commit_push"];
+  dicode.task_id = "buildin/auto-fix";
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.git = {
+    // deno-lint-ignore no-explicit-any
+    commit_push: async (sourceID: string, opts: any) => {
+      calls.push({ sourceID, opts });
+      return { commit: "abc1234" };
+    },
+  };
+
+  await runBuiltinCall("dicode_git_commit_push", {
+    source_id: "scratch",
+    message: "fix it",
+    branch: "fix/thing",
+  });
+
+  assert.equal(calls[0].opts.author_name, "dicode buildin/auto-fix");
+  assert.equal(calls[0].opts.author_email, "noreply@dicode.local");
+});
+
+test("commit_push takes its branch prefix from config, not from the model", async () => {
+  // A prefix the model supplies alongside the branch it bounds constrains
+  // nothing, so the prefix is a task param and never a tool argument.
+  useLocal();
+  params.set("prompt", "push it");
+  params.set("git_branch_prefix", "fix/");
+  dicode.caps = ["git.commit_push"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.git = {
+    // deno-lint-ignore no-explicit-any
+    commit_push: async (_id: string, opts: any) => {
+      calls.push(opts);
+      return { commit: "abc1234" };
+    },
+  };
+
+  await runBuiltinCall("dicode_git_commit_push", {
+    source_id: "scratch",
+    message: "sneak",
+    branch: "release/1.0",
+    branch_prefix: "release/",
+  });
+
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const tool = (sent.tools ?? []).find(
+    (t: { function: { name: string } }) => t.function.name === "dicode_git_commit_push",
+  );
+  assert.equal(tool.function.parameters.properties.branch_prefix, undefined);
+  assert.equal(calls[0].branch_prefix, "fix/");
+});
+
+test("a failing built-in returns an error result rather than killing the turn", async () => {
+  useLocal();
+  params.set("prompt", "test the task");
+  dicode.caps = ["tasks.test"];
+  dicode.tasks = {
+    test: () => Promise.reject(new Error("task pending approval")),
+  };
+
+  const { reply, toolResult } = await runBuiltinCall("dicode_test_task", { task_id: "scratch/demo" });
+
+  assert.equal(reply, "done");
+  assert.equal(toolResult.error, "task pending approval");
+});
+
+test("set_dev_mode withholds local_path: the model cannot redirect taskset resolution", async () => {
+  // local_path points the daemon's taskset resolution at an arbitrary path on
+  // the host. Reachable from a tool argument, it would let a caller choose what
+  // the daemon loads as tasks, so the tool offers clone mode only.
+  useLocal();
+  params.set("prompt", "enter dev mode");
+  dicode.caps = ["sources.set_dev_mode"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.sources = {
+    // deno-lint-ignore no-explicit-any
+    set_dev_mode: async (name: string, opts: any) => {
+      calls.push(opts);
+      return { ok: true };
+    },
+  };
+
+  const sentSchema = () => {
+    const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+    const tool = (sent.tools ?? []).find(
+      (t: { function: { name: string } }) => t.function.name === "dicode_set_dev_mode",
+    );
+    return tool.function.parameters.properties;
+  };
+
+  await runBuiltinCall("dicode_set_dev_mode", {
+    source: "scratch",
+    enabled: true,
+    local_path: "/etc",
+  });
+
+  assert.equal(sentSchema().local_path, undefined);
+  assert.equal(calls[0].local_path, undefined);
+});
+
+test("commit_push withholds allow_main: the model cannot waive branch protection", async () => {
+  useLocal();
+  params.set("prompt", "push it");
+  dicode.caps = ["git.commit_push"];
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  dicode.git = {
+    // deno-lint-ignore no-explicit-any
+    commit_push: async (_id: string, opts: any) => {
+      calls.push(opts);
+      return { commit: "abc1234" };
+    },
+  };
+
+  await runBuiltinCall("dicode_git_commit_push", {
+    source_id: "scratch",
+    message: "sneak",
+    branch: "main",
+    allow_main: true,
+  });
+
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const tool = (sent.tools ?? []).find(
+    (t: { function: { name: string } }) => t.function.name === "dicode_git_commit_push",
+  );
+  assert.equal(tool.function.parameters.properties.allow_main, undefined);
+  assert.equal(calls[0].allow_main, undefined);
+});

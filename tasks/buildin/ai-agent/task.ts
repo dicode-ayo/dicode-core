@@ -122,6 +122,213 @@ function paramsToJsonSchema(
   };
 }
 
+// ── built-in tools ────────────────────────────────────────────────────────────
+//
+// Tools backed by this task's own dicode SDK rather than by firing another
+// dicode task. Each one is gated on the capability its SDK call needs: a
+// built-in is offered only when the run's grant carries `cap`, so a capability
+// the taskset never declared stays invisible instead of surfacing as a
+// permission error the model discovers by calling it.
+//
+// The table covers the authoring operations. Secrets, crypto, audit and the
+// run-input retention sweep (list_expired / delete_input) stay off it: those
+// belong to the task process, not to the model driving it.
+
+// Values a built-in needs that come from the task's own params rather than from
+// the model. A boundary the model can set alongside the value it bounds is not
+// a boundary, so anything of that shape lives here.
+interface BuiltinConfig {
+  gitBranchPrefix: string;
+}
+
+interface BuiltinTool {
+  name: string;
+  cap: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  run(dicode: Dicode, args: Record<string, unknown>, cfg: BuiltinConfig): Promise<unknown>;
+}
+
+type SchemaProps = Record<string, Record<string, unknown>>;
+
+function objectSchema(properties: SchemaProps, required: string[]): Record<string, unknown> {
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
+// Tool arguments arrive as whatever JSON the model emitted, so each accessor
+// coerces rather than trusting the declared schema.
+function argStr(args: Record<string, unknown>, key: string, fallback = ""): string {
+  const v = args[key];
+  if (v === undefined || v === null) return fallback;
+  return typeof v === "string" ? v : String(v);
+}
+
+function argBool(args: Record<string, unknown>, key: string): boolean {
+  const v = args[key];
+  return typeof v === "string" ? v === "true" : Boolean(v);
+}
+
+function argStrList(args: Record<string, unknown>, key: string): string[] {
+  const v = args[key];
+  if (Array.isArray(v)) return v.map((e) => (typeof e === "string" ? e : String(e)));
+  if (typeof v === "string" && v) return v.split(",").map((e) => e.trim()).filter(Boolean);
+  return [];
+}
+
+function argLimit(args: Record<string, unknown>, key: string, fallback: number): number {
+  const n = Number(args[key]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+const BUILTIN_TOOLS: BuiltinTool[] = [
+  {
+    name: "dicode_list_tasks",
+    cap: "tasks.list",
+    description:
+      "List every task registered in this dicode daemon, with each task's id, " +
+      "name, description and parameters. Use it to find an existing task to " +
+      "read as a pattern before writing a new one.",
+    parameters: objectSchema({}, []),
+    run: (dicode) => dicode.list_tasks(),
+  },
+  {
+    name: "dicode_get_runs",
+    cap: "runs.list",
+    description:
+      "Fetch recent runs of a task — status, timing and output — newest first. " +
+      "Use it to see how a task behaved before changing it.",
+    parameters: objectSchema({
+      task_id: { type: "string", description: "Namespaced task id, e.g. 'buildin/git-pr'." },
+      limit: { type: "integer", description: "How many runs to return (default 10)." },
+    }, ["task_id"]),
+    run: (dicode, args) =>
+      dicode.get_runs(argStr(args, "task_id"), { limit: argLimit(args, "limit", 10) }),
+  },
+  {
+    name: "dicode_test_task",
+    cap: "tasks.test",
+    description:
+      "Run a task's sibling test file (task.test.ts / task.test.py) and return " +
+      "the results. Refused for a task the approval gate is still holding " +
+      "pending, because the test file runs with full host permissions.",
+    parameters: objectSchema({
+      task_id: { type: "string", description: "Namespaced task id to test." },
+    }, ["task_id"]),
+    run: (dicode, args) => dicode.tasks.test(argStr(args, "task_id")),
+  },
+  {
+    name: "dicode_set_dev_mode",
+    cap: "sources.set_dev_mode",
+    description:
+      "Enter or leave dev mode on a source. Entering with a branch clones the " +
+      "source repo into a scratch directory and returns clone_path — edit files " +
+      "there, not in the live source. The clone belongs to this session; leave " +
+      "dev mode when done, which removes it locally and keeps the remote branch.",
+    parameters: objectSchema({
+      source: { type: "string", description: "Source name as it appears in dicode.yaml." },
+      enabled: { type: "boolean", description: "true to enter dev mode, false to leave it." },
+      branch: { type: "string", description: "Branch to check out in the clone." },
+      base: { type: "string", description: "Branch to fork from when `branch` does not exist remotely." },
+    }, ["source", "enabled"]),
+    // Clone mode only. run_id names the clone directory and is fixed to this run
+    // so two sessions cannot collide on one clone, and so leaving dev mode
+    // reaches the same one. local_path is withheld: it redirects the daemon's
+    // taskset resolution at an arbitrary path on the host, which would let a
+    // caller decide what the daemon loads as tasks.
+    run: (dicode, args) =>
+      dicode.sources.set_dev_mode(argStr(args, "source"), {
+        enabled: argBool(args, "enabled"),
+        branch: argStr(args, "branch"),
+        base: argStr(args, "base"),
+        run_id: dicode.run_id,
+      }),
+  },
+  {
+    name: "dicode_get_run_input",
+    cap: "runs.get_input",
+    description:
+      "Read the stored trigger payload of a run, plus the names of any fields " +
+      "redaction removed. Reason from the logs alone when a field you need is " +
+      "listed as redacted — the value is gone, not hidden.",
+    parameters: objectSchema({
+      run_id: { type: "string", description: "Id of the run whose input to read." },
+    }, ["run_id"]),
+    run: (dicode, args) => dicode.runs.get_input(argStr(args, "run_id")),
+  },
+  {
+    name: "dicode_pin_run_input",
+    cap: "runs.pin_input",
+    description:
+      "Exempt a run's stored input from retention sweeps so it survives while " +
+      "you work on it. Unpin it when you are done.",
+    parameters: objectSchema({
+      run_id: { type: "string", description: "Id of the run whose input to pin." },
+    }, ["run_id"]),
+    run: (dicode, args) => dicode.runs.pin_input(argStr(args, "run_id")),
+  },
+  {
+    name: "dicode_unpin_run_input",
+    cap: "runs.unpin_input",
+    description: "Return a pinned run input to normal retention.",
+    parameters: objectSchema({
+      run_id: { type: "string", description: "Id of the run whose input to unpin." },
+    }, ["run_id"]),
+    run: (dicode, args) => dicode.runs.unpin_input(argStr(args, "run_id")),
+  },
+  {
+    name: "dicode_replay_run",
+    cap: "runs.replay",
+    description:
+      "Re-fire a past run against its stored input and return the new run id. " +
+      "Use it to check a fix against the payload that originally failed. The " +
+      "replay is a fresh run: poll it with dicode_get_runs for its outcome.",
+    parameters: objectSchema({
+      run_id: { type: "string", description: "Id of the run to replay." },
+      task_id: { type: "string", description: "Retarget the replay at a different task. Omit to replay the run's own task." },
+    }, ["run_id"]),
+    run: (dicode, args) =>
+      dicode.runs.replay(argStr(args, "run_id"), argStr(args, "task_id") || undefined),
+  },
+  {
+    name: "dicode_git_commit_push",
+    cap: "git.commit_push",
+    description:
+      "Commit the working tree of a source's repo and push it to a branch, " +
+      "returning the commit hash. The branch must start with the prefix this " +
+      "agent is configured to push under; main and master cannot be pushed to.",
+    parameters: objectSchema({
+      source_id: { type: "string", description: "Source name as it appears in dicode.yaml." },
+      message: { type: "string", description: "Commit message." },
+      branch: { type: "string", description: "Branch to push to. Must start with the agent's configured branch prefix." },
+      files: { type: "array", items: { type: "string" }, description: "Paths to stage. Omit to stage everything changed." },
+      author_name: { type: "string", description: "Commit author name. Defaults to this agent." },
+      author_email: { type: "string", description: "Commit author email. Defaults to this agent." },
+      auth_token_env: { type: "string", description: "Env var holding the push token. Must be declared in this task's permissions.env." },
+    }, ["source_id", "message", "branch"]),
+    // allow_main is withheld: it is a per-call branch-protection bypass, not a
+    // capability, and the branch to protect is not the caller's decision.
+    // branch_prefix comes from config for the same reason — as an argument it
+    // would be the caller bounding the caller.
+    run: (dicode, args, cfg) =>
+      dicode.git.commit_push(argStr(args, "source_id"), {
+        message: argStr(args, "message"),
+        branch: argStr(args, "branch"),
+        branch_prefix: cfg.gitBranchPrefix,
+        files: argStrList(args, "files"),
+        author_name: argStr(args, "author_name", `dicode ${dicode.task_id}`),
+        author_email: argStr(args, "author_email", "noreply@dicode.local"),
+        auth_token_env: argStr(args, "auth_token_env"),
+      }),
+  },
+];
+
+// grantedBuiltins selects the built-ins this run may actually call. An empty
+// `caps` — a daemon too old to report them — yields none.
+function grantedBuiltins(caps: string[] | undefined): BuiltinTool[] {
+  const granted = new Set(caps ?? []);
+  return BUILTIN_TOOLS.filter((t) => granted.has(t.cap));
+}
+
 interface CompactionConfig {
   maxHistoryTokens: number; // trigger threshold (estimated tokens)
   keepTurns: number;        // last N turns kept verbatim; older turns get summarized
@@ -256,6 +463,8 @@ interface AgentRuntime {
   // deno-lint-ignore no-explicit-any
   tools: any[];
   toolNameToTaskId: Record<string, string>;
+  builtins: Record<string, BuiltinTool>;
+  builtinCfg: BuiltinConfig;
   compactionCfg: CompactionConfig;
   maxToolIterations: number;
   responseMaxTokens: number;
@@ -355,11 +564,7 @@ async function resolveAgentRuntime(
   const skillsDir = (await params.get("skills_dir")) ?? "";
   const skillsBlob = await loadSkills(skillsDir, skillNames);
 
-  console.log(
-    `ai-agent[${new Date().toISOString()}]: task=${dicode.task_id} ` +
-      `run=${dicode.run_id.slice(0, 8)} model=${model} baseURL=${baseURL} ` +
-      `tools=${toolFilter.length || "*"} skills=${skillNames.length}`,
-  );
+  const gitBranchPrefix = (await params.get("git_branch_prefix")) ?? "";
 
   const client = new OpenAI({ apiKey, baseURL });
 
@@ -391,6 +596,26 @@ async function resolveAgentRuntime(
     };
   });
 
+  // Built-ins carry a dicode_ prefix and task tools a task_ one, so the two
+  // families cannot collide however a task id mangles.
+  const builtins: Record<string, BuiltinTool> = {};
+  for (const b of grantedBuiltins(dicode.caps)) {
+    builtins[b.name] = b;
+    tools.push({
+      type: "function" as const,
+      function: { name: b.name, description: b.description, parameters: b.parameters },
+    });
+  }
+
+  // Counts come from the built list, so the line reports what the model was
+  // actually handed.
+  console.log(
+    `ai-agent[${new Date().toISOString()}]: task=${dicode.task_id} ` +
+      `run=${dicode.run_id.slice(0, 8)} model=${model} baseURL=${baseURL} ` +
+      `task_tools=${filtered.length} builtins=${Object.keys(builtins).length} ` +
+      `skills=${skillNames.length}`,
+  );
+
   return {
     ok: true,
     runtime: {
@@ -400,6 +625,8 @@ async function resolveAgentRuntime(
       skillsBlob,
       tools,
       toolNameToTaskId,
+      builtins,
+      builtinCfg: { gitBranchPrefix },
       compactionCfg: {
         maxHistoryTokens,
         keepTurns: compactionKeepTurns,
@@ -422,7 +649,7 @@ async function runAgentTurn(
   rt: AgentRuntime,
   dicode: Dicode,
 ): Promise<string> {
-  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
+  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
 
   // Append user turn
   session.messages.push({ role: "user", content: message });
@@ -517,25 +744,31 @@ async function runAgentTurn(
       // error as a structured result and can recover on the next turn.
       for (const call of choice.tool_calls) {
         if (call.type !== "function") continue;
+        const builtin = builtins[call.function.name];
         const taskId = toolNameToTaskId[call.function.name];
         let result: unknown;
-        if (!taskId) {
+        if (!builtin && !taskId) {
           console.error(`ai-agent: unknown tool '${call.function.name}' requested`);
           result = { error: `unknown tool: ${call.function.name}` };
         } else {
+          const label = builtin ? builtin.name : taskId;
           try {
             const parsed = call.function.arguments
               ? JSON.parse(call.function.arguments)
               : {};
-            // dicode.run_task expects Record<string, string> — stringify non-string values
-            const stringified: Record<string, string> = {};
-            for (const [k, v] of Object.entries(parsed)) {
-              stringified[k] = typeof v === "string" ? v : JSON.stringify(v);
+            if (builtin) {
+              result = await builtin.run(dicode, parsed, builtinCfg);
+            } else {
+              // dicode.run_task expects Record<string, string> — stringify non-string values
+              const stringified: Record<string, string> = {};
+              for (const [k, v] of Object.entries(parsed)) {
+                stringified[k] = typeof v === "string" ? v : JSON.stringify(v);
+              }
+              result = await dicode.run_task(taskId, stringified);
             }
-            result = await dicode.run_task(taskId, stringified);
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            console.error(`ai-agent: tool call failed task=${taskId} call=${call.id}: ${msg}`);
+            console.error(`ai-agent: tool call failed tool=${label} call=${call.id}: ${msg}`);
             result = { error: msg };
           }
         }

@@ -12,43 +12,51 @@ and replay, and either push to main (autonomous) or open a PR (review).
 
 ## Iteration loop (cap: `max_iterations`, default 5)
 
+Everything below is done by calling a tool. Prose in this skill that names a
+tool means *call that tool* — you cannot run code, read a file, or reach the
+dicode SDK any other way.
+
 1. **Read context.**
    - Read `taskID`, `runID`, `status`, `output`, and `mode` from the input map.
-   - Call `dicode.runs.get_input(runID)` — receives `{ input, redacted_fields }`.
+   - `dicode_get_run_input(run_id)` returns `{ input, redacted_fields }`.
      If `auto_fix.include_input: false` was set, you get only the failure logs
      and output; respect that and reason from logs alone.
    - Note the redacted-field names; if the failure depends on a redacted field
      (a signature, a token), say so plainly in the PR body — reviewers need that signal.
 2. **Pin the input.**
-   - Call `dicode.runs.pin_input(runID)` — keeps the blob alive while you work.
-   - Set up `defer cleanup()`: in JavaScript terms, register a try/finally so
-     `dicode.runs.unpin_input(runID)` runs on success, error, or timeout.
+   - `dicode_pin_run_input(run_id)` keeps the blob alive while you work.
+   - Call `dicode_unpin_run_input(run_id)` before you finish, on every path —
+     including the one where you give up.
 3. **Open a fix branch.**
    - In `mode: review`: use `${branch_prefix}${runID}` (default `fix/<runID>`).
    - In `mode: autonomous`: use the source's tracked branch (`base_branch`).
-   - Call `dicode.sources.set_dev_mode(<source>, { enabled: true, branch: <fixBranch>, base: <base>, run_id: <runID> })`.
+   - `dicode_set_dev_mode(source, enabled=true, branch=<fixBranch>, base=<base>)`
+     clones the source and returns `clone_path`. Keep that value: it is the
+     directory every later step refers to, and nothing else tells you where the
+     clone landed.
 4. **Iterate** (cap each iteration at `max_iteration_seconds`, default 300s):
-   - Read failing-task source files via `Deno.readTextFile` from `${DATADIR}/dev-clones/<source>/<runID>/`.
-   - Edit via `Deno.writeTextFile` — **only inside the failing task's directory.**
-     Do NOT write outside the failed task's directory; cross-task edits are out
-     of scope and will land you in trouble.
-   - Validate inline: re-parse `task.yaml`, re-typecheck `task.ts`.
-   - Test: `dicode.tasks.test(<failingTaskID>)`. If no test exists, write one.
-   - Replay: `dicode.runs.replay(<failedRunID>)` with the original failed run
+   - Edit **only inside the failing task's directory** under `clone_path`.
+     Cross-task edits are out of scope and will land you in trouble.
+   - Test: `dicode_test_task(<failingTaskID>)`. If no test exists, write one.
+   - Replay: `dicode_replay_run(<failedRunID>)` with the original failed run
      ID (the engine looks it up by lineage; the replayer accepts because your
-     parent_run_id is that run). Wait for terminal status.
+     parent_run_id is that run). It returns a new run id — poll it with
+     `dicode_get_runs` until that run reaches a terminal status.
    - If both green → exit loop.
 5. **Commit + push.**
-   - `dicode.git.commit_push(<source>, { message, branch: <fixBranch> })`.
+   - `dicode_git_commit_push(source_id, message=…, branch=<fixBranch>)`. The
+     branch prefix is fixed by the agent's configuration, not by you: a push to
+     a branch outside it is refused.
 6. **Open the PR (review mode only).**
-   - `dicode.run_task("git-pr", { source_id, branch: fixBranch, base, title, body, clone_path: <path you cloned into> })`.
+   - `task_buildin_git-pr` with `source_id`, `branch`, `base`, `title`, `body`,
+     and `clone_path` — the value step 3 returned.
    - Pass `clone_path` explicitly — the legacy first-readDir fallback in
      `git-pr` is brittle when prior runs left orphan clone directories.
    - Body must mention any redacted_fields you saw — reviewers need that signal.
 7. **Disable dev mode.**
-   - `dicode.sources.set_dev_mode(<source>, { enabled: false, run_id: <runID> })` — engine
-     removes the local clone; the remote branch is retained.
-8. **Unpin input** (the deferred cleanup also handles the timeout/panic case).
+   - `dicode_set_dev_mode(source, enabled=false)` — the engine removes the local
+     clone; the remote branch is retained.
+8. **Unpin input** (step 2's cleanup, on every exit path).
 
 ## Token / iteration budget
 
@@ -59,6 +67,10 @@ and replay, and either push to main (autonomous) or open a PR (review).
 
 ## Hard rules
 
+- **A tool you were not given does not exist.** Your tool list is the whole of
+  what you can do. If a step here needs something absent from it — reading or
+  writing a file among them — stop and report that plainly. Never describe an
+  edit you did not make.
 - **One task, one fix.** Do not edit dependency tasks, secrets, or anything
   outside the failing task's directory.
 - **No `--force` push.** The engine refuses it; your call will error and you
