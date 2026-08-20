@@ -172,6 +172,16 @@ function argStr(args: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+// Matches argBool in tasks/buildin/ai-agent/task.ts: the same argument reaches
+// set_dev_mode from both surfaces and must mean the same thing on each. A bare
+// Boolean() would read the string "false" as true and enter dev mode for a
+// caller asking to leave it — the schema says boolean, but nothing between an
+// MCP client and here enforces that.
+function argBool(args: Record<string, unknown>, key: string): boolean {
+  const v = args[key];
+  return typeof v === "string" ? v === "true" : Boolean(v);
+}
+
 function stringifyParams(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (raw && typeof raw === "object") {
@@ -220,7 +230,7 @@ async function dispatchTool(
       // what the daemon loads as tasks. Operators reach that mode through
       // PATCH /api/sources/{name}/dev.
       const result = await dicode.sources.set_dev_mode(src, {
-        enabled: Boolean(args.enabled),
+        enabled: argBool(args, "enabled"),
         branch: argStr(args, "branch"),
         base: argStr(args, "base"),
         run_id: argStr(args, "run_id"),

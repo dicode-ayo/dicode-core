@@ -72,6 +72,15 @@ test("switch_dev_mode dispatcher forwards branch/base/run_id to the SDK", async 
   assert.ok(text.includes('"ok"'), `set_dev_mode result missing from reply: ${text}`);
 });
 
+// An MCP client's arguments are not validated against the tool schema before
+// they reach here, and a model asking to leave dev mode may well send the
+// string "false". Reading that as true would enter dev mode instead.
+test("switch_dev_mode reads a stringified boolean the way the caller meant it", async () => {
+  call("switch_dev_mode", { source: "demo", enabled: "false" });
+  await textOf();
+  assert.equal(dicode._setDevModeCalls[0].enabled, false);
+});
+
 test("switch_dev_mode requires a source", async () => {
   call("switch_dev_mode", { enabled: true });
   const result = (await runTask()) as ToolCall;
