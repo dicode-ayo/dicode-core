@@ -125,14 +125,14 @@ func TestExecutorSnapshotsDeps(t *testing.T) {
 
 	for _, rt := range []struct {
 		name       string
-		newExecFn  func() pkgruntime.Executor
+		newExecFn  func(binaryPath string) pkgruntime.Executor
 		binaryPath string
 	}{
-		{"deno", func() pkgruntime.Executor { return denoRT.NewExecutor("/nonexistent/deno") }, "/nonexistent/deno"},
-		{"python", func() pkgruntime.Executor { return pythonRT.NewExecutor("/nonexistent/uv") }, "/nonexistent/uv"},
+		{"deno", func(p string) pkgruntime.Executor { return denoRT.NewExecutor(p) }, "/nonexistent/deno"},
+		{"python", func(p string) pkgruntime.Executor { return pythonRT.NewExecutor(p) }, "/nonexistent/uv"},
 	} {
 		t.Run(rt.name, func(t *testing.T) {
-			deps := reflect.ValueOf(rt.newExecFn()).Elem().FieldByName("BridgeDeps")
+			deps := reflect.ValueOf(rt.newExecFn(rt.binaryPath)).Elem().FieldByName("BridgeDeps")
 			for _, name := range snapshotDeps {
 				f := deps.FieldByName(name)
 				if !f.IsValid() {
