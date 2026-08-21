@@ -1,6 +1,6 @@
 # AI Agent
 
-The **ai-agent** built-in task gives dicode a full chat interface backed by any OpenAI-compatible model. The agent can call your other dicode tasks as tools, persist conversations across turns, and load markdown "skills" into its system prompt for domain context.
+The **ai-agent** built-in task gives dicode a full chat interface backed by any OpenAI-compatible model. The agent can call your other dicode tasks as tools, persist conversations across turns, and look up markdown "skills" for domain context.
 
 Unlike the existing "AI generates code" feature (see [docs/concepts/ai-generation.md](ai-generation.md)), which uses an AI model to *write* tasks, ai-agent uses an AI model to *orchestrate* tasks you already have. The two features complement each other: one is about authoring, one is about operation.
 
@@ -10,7 +10,7 @@ Unlike the existing "AI generates code" feature (see [docs/concepts/ai-generatio
 
 - **A chat page** at `/hooks/ai` (plus per-provider presets at `/hooks/ai/ollama`, `/hooks/ai/openai`, `/hooks/ai/groq`). Send a message, get a reply. Sessions persist across turns.
 - **Tool use** — the model sees every registered task as a callable tool. Ask "check my weekly-report runs from last month" and the agent calls `dicode.get_runs("weekly-report")` via the corresponding task and answers based on the actual data, not a hallucination.
-- **Skills** — drop markdown files into `tasks/skills/` and pass their names via the `skills` param to inject them into the system prompt. Use them to give the agent durable context it should know about every time (domain glossary, team conventions, current priorities).
+- **Skills** — drop markdown files into `tasks/skills/` and pass their names via the `skills` param. The agent is told each skill's name and description and reads the ones it needs through the `dicode_read_skill` tool. Use them to give the agent durable context it should know about every time (domain glossary, team conventions, current priorities).
 - **Session persistence** — each conversation is keyed by `session_id` and stored in the task's KV store. Hybrid id model: pass your own, or omit it to have the task generate and return one.
 - **Lazy compaction** — when the conversation exceeds `max_history_tokens`, older turns are replaced by a running summary generated via a second model call. Controlled by the `compaction_model` param (defaults to the main model).
 - **Provider-agnostic** — works with OpenAI, Anthropic (via openai-compat), Ollama, LM Studio, Groq, OpenRouter, Together, DeepSeek, and any other endpoint that speaks the OpenAI chat completions API. Pick your provider via taskset overrides.
@@ -79,7 +79,7 @@ These are two different concepts that dicode uses with specific meanings:
 | ------- | ---------- | -------------- | --------------------- |
 | **Tool** | A dicode task the agent can execute | `tasks/**/task.yaml` | As an OpenAI tool schema built from the task's params; invoked via `dicode.run_task()` |
 | **Built-in tool** | A dicode SDK operation the agent can perform directly | `permissions.dicode` in the agent's own `task.yaml` | As an OpenAI tool schema, offered only when the matching capability was granted |
-| **Skill** | A markdown file with domain context | `tasks/skills/*.md` | Concatenated into the system prompt at the start of every turn |
+| **Skill** | A markdown file with domain context | `tasks/skills/*.md` | Advertised by name and description in the system prompt; the body is fetched on demand via `dicode_read_skill` |
 
 This mirrors the convention used by Claude Code and the broader agent ecosystem. Think of tools as *capabilities* and skills as *knowledge*.
 
@@ -150,7 +150,18 @@ curl -X POST http://localhost:8080/hooks/ai \
   }'
 ```
 
-Skills are loaded eagerly — every name you pass is read and concatenated into the system prompt for the entire turn. Missing or unreadable skills produce a placeholder in the prompt instead of failing the request.
+Every name you pass is read at the start of the run. What reaches the model is decided by `skills_mode`:
+
+| `skills_mode` | What the system prompt carries | Lookup tool |
+| ------------- | ------------------------------ | ----------- |
+| `index` (default) | One line per skill: its name and its frontmatter `description` | `dicode_read_skill` returns a skill's full body |
+| `eager` | Every skill's full body, on every turn | not offered |
+
+Prefer `index`. A skill's full text is many times the size of the agent's own `system_prompt`, and a model reading both tends to imitate the skill's examples rather than follow its instructions — measured on an 8B local model, eager-loading 22 KB of skill took a correct task manifest from 8/8 to 0/8 while leaving the tool-call protocol untouched. The cost is also paid on every iteration of the tool loop, since the system prompt is rebuilt each time. Reach for `eager` only when the model cannot be relied on to call a tool before it acts.
+
+Under `index`, write your `system_prompt` so it names the skill to read and when — the description alone does not tell the model what the skill will say.
+
+Missing or unreadable skills still appear in the index, carrying their load error, and `dicode_read_skill` returns that same error. A skill the model is told exists must not silently vanish.
 
 The shared skills directory is configured through the `skills_dir` param, whose default is `${TASK_SET_DIR}/../skills` — expanded at task-load time to a sibling `skills/` directory next to the taskset that loaded the ai-agent. Override per-run to point at a different pool. See [../task-template-vars.md](../task-template-vars.md) for the full list of template variables available in task.yaml.
 

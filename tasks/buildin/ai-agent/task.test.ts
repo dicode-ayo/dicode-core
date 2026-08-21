@@ -689,3 +689,178 @@ test("commit_push withholds allow_main: the model cannot waive branch protection
   assert.equal(tool.function.parameters.properties.allow_main, undefined);
   assert.equal(calls[0].allow_main, undefined);
 });
+
+// ─── skills: index + lookup vs eager (#757) ──────────────────────────────
+
+// Write a throwaway skills directory and point the agent's params at it.
+// Returns the directory so a test can add files the loader must fail on.
+async function useSkills(files: Record<string, string>): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "ai-agent-skills-" });
+  for (const [name, body] of Object.entries(files)) {
+    await Deno.writeTextFile(`${dir}/${name}.md`, body);
+  }
+  params.set("skills_dir", dir);
+  params.set("skills", Object.keys(files).join(","));
+  return dir;
+}
+
+const TASK_DEV_SKILL = `---
+name: task-dev
+description: Mandatory workflow for writing a dicode task.
+---
+
+# task dev
+
+UNIQUE_BODY_MARKER — every task.yaml starts with apiVersion: dicode/v1.
+`;
+
+// The system prompt the agent sent on its last request.
+function lastSystemPrompt(): string {
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  return (sent.messages ?? []).find((m: { role: string }) => m.role === "system").content;
+}
+
+// Drive one plain turn so the request body carries the assembled prompt.
+async function runPlainTurn() {
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("ok"),
+  });
+  await runTask();
+}
+
+test("index mode advertises a skill by description and keeps its body out of the prompt", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  await runPlainTurn();
+
+  const prompt = lastSystemPrompt();
+  assert.ok(prompt.includes("- task-dev — Mandatory workflow for writing a dicode task."),
+    `index line missing from prompt: ${prompt}`);
+  assert.ok(!prompt.includes("UNIQUE_BODY_MARKER"),
+    "index mode must not splice the skill body into the system prompt");
+  assert.ok(offeredTools().includes("dicode_read_skill"),
+    "the index is only actionable with the lookup tool alongside it");
+});
+
+test("dicode_read_skill hands back the full body", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  const { toolResult } = await runBuiltinCall("dicode_read_skill", { name: "task-dev" });
+
+  assert.equal(toolResult.name, "task-dev");
+  assert.equal(toolResult.description, "Mandatory workflow for writing a dicode task.");
+  assert.ok(toolResult.body.includes("UNIQUE_BODY_MARKER"));
+  // Frontmatter is index material; re-sending it wastes the turn's budget.
+  assert.ok(!toolResult.body.includes("description:"));
+});
+
+test("eager mode splices every body in and offers no lookup tool", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  params.set("skills_mode", "eager");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  await runPlainTurn();
+
+  assert.ok(lastSystemPrompt().includes("UNIQUE_BODY_MARKER"));
+  assert.ok(!offeredTools().includes("dicode_read_skill"),
+    "eager mode already carries the bodies; the tool would only re-send them");
+});
+
+test("no skills configured means no lookup tool", async () => {
+  useLocal();
+  params.set("prompt", "hi");
+
+  await runPlainTurn();
+
+  assert.ok(!offeredTools().includes("dicode_read_skill"));
+});
+
+test("read_skill on an unknown name names the ones that exist", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  const { toolResult } = await runBuiltinCall("dicode_read_skill", { name: "not-a-skill" });
+
+  assert.equal(toolResult.error, "unknown skill: not-a-skill");
+  assert.equal(JSON.stringify(toolResult.available), JSON.stringify(["task-dev"]));
+});
+
+test("a skill that will not load says so in the index and again on lookup", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({});
+  params.set("skills", "missing");
+
+  const { toolResult } = await runBuiltinCall("dicode_read_skill", { name: "missing" });
+
+  assert.ok(lastSystemPrompt().includes("- missing — (not loaded:"),
+    "a skill the model is told exists must not vanish from the index when it fails to load");
+  assert.ok(String(toolResult.error).startsWith("skill missing not loaded:"));
+});
+
+test("a traversing skill name is rejected before it reaches the filesystem", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({});
+  params.set("skills", "../../etc/passwd");
+
+  const { toolResult } = await runBuiltinCall("dicode_read_skill", { name: "../../etc/passwd" });
+
+  assert.equal(toolResult.error, "skill ../../etc/passwd not loaded: invalid skill name");
+});
+
+test("a skill with no frontmatter is indexed by its first line of prose", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  await useSkills({ "bare": "# Bare skill\n\nSome guidance here.\n" });
+
+  await runPlainTurn();
+
+  assert.ok(lastSystemPrompt().includes("- bare — Bare skill"),
+    `expected a prose fallback description: ${lastSystemPrompt()}`);
+});
+
+test("an unrecognised skills_mode fails loud instead of picking one", async () => {
+  useLocal();
+  params.set("prompt", "hi");
+  params.set("skills_mode", "lazy");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  await assert.throws(() => runTask(), /skills_mode must be "index" or "eager"/);
+});
+
+test("the index precedes the operator's own system prompt", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  params.set("system_prompt", "OPERATOR_PROMPT_MARKER");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  await runPlainTurn();
+
+  const prompt = lastSystemPrompt();
+  assert.ok(prompt.indexOf("# Skills") < prompt.indexOf("OPERATOR_PROMPT_MARKER"),
+    "the operator's instructions must be the last thing the model reads before the request");
+});
+
+test("eager keeps the skill bodies after the operator's system prompt", async () => {
+  useLocal();
+  params.set("prompt", "write me a task");
+  params.set("skills_mode", "eager");
+  params.set("system_prompt", "OPERATOR_PROMPT_MARKER");
+  await useSkills({ "task-dev": TASK_DEV_SKILL });
+
+  await runPlainTurn();
+
+  // Opting back into eager has to reproduce the prompt it produced before,
+  // ordering included, or it is not an opt-out.
+  const prompt = lastSystemPrompt();
+  assert.ok(prompt.indexOf("OPERATOR_PROMPT_MARKER") < prompt.indexOf("UNIQUE_BODY_MARKER"),
+    "eager mode must leave the bodies where they were");
+});
