@@ -130,21 +130,17 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
   -d '{"prompt":"In one sentence, what is dicode?"}'
 ```
 
-The response includes a `session_id` you can pass back on the next call:
-
-```sh
-curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
-  -b cookies.txt \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"And how does it work?","session_id":"sess-..."}'
-```
+Each such call is a **fresh Claude session** — the `session_id` in the response
+is a handle, not a continuation token, and posting it back does not resume
+anything. Multi-turn conversation lives on the chat loop: POST with no `prompt`
+to open it, and drive the turns with `dicode resume`.
 
 ## Params
 
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `prompt` | string | required | User message. |
-| `session_id` | string | `""` | Continue an earlier conversation. Empty = new. |
+| `session_id` | string | `""` | Accepted but unused — one-shot calls are stateless. |
 | `model` | string | `""` | E.g. `sonnet`, `opus`. Empty = CLI default. |
 | `system_prompt` | string | `""` | Appended via `--append-system-prompt`. |
 | `cli_path` | string | `""` | Override binary path. Empty = `CLAUDE_CLI_PATH` env, then `PATH` lookup. |
@@ -182,7 +178,7 @@ startup; the agent task picks up the secret without further setup.
 {
   "ok": true,
   "reply": "...",                    // model's text
-  "session_id": "<uuid>",            // dicode-side id, pass back for continuation
+  "session_id": "<uuid>",            // dicode-side handle for this call; does not resume
   "model": "claude-sonnet-4",
   "total_cost_usd": 0.0023,          // cumulative across the conversation; subscription users get 0
   "usage": { /* raw CLI usage object */ }

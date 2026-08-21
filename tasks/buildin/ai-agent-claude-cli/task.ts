@@ -489,7 +489,10 @@ async function runClaudeAndDecode(
     }
 
     if (parsed.is_error) {
-        return fail(output, parsed.result ?? "claude reported an error");
+        // The CLI's own error text: redacted like every other stream we
+        // surface, since an auth or MCP-connection failure can quote the
+        // credential that failed.
+        return fail(output, redact(parsed.result ?? "claude reported an error"));
     }
 
     console.log(`ai-agent-claude-cli: ok (model=${parsed.model ?? "?"}, cost=$${parsed.total_cost_usd ?? 0})`);

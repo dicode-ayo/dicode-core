@@ -269,6 +269,32 @@ exit 1`,
     }
 });
 
+Deno.test("redacts token in an is_error response too", async () => {
+    // The CLI reports auth failures through its own JSON envelope, not stderr —
+    // a path that reaches the caller and the run log the same way.
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
+    const result: any = await withStubClaude(
+        `cat <<'JSON'
+{"type":"result","is_error":true,"result":"auth failed for token supersecret-token-xyz"}
+JSON`,
+        () =>
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
+    );
+    assertEquals(result.ok, false);
+    if (String(result.error ?? "").includes("supersecret-token-xyz")) {
+        throw new Error(`OAuth token leaked via the is_error envelope: ${result.error}`);
+    }
+    if (!String(result.error ?? "").includes("<redacted>")) {
+        throw new Error(`expected <redacted> placeholder, got ${result.error}`);
+    }
+});
+
 Deno.test("redacts token in JSON-parse-failure path too", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
     const result: any = await withStubClaude(

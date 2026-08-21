@@ -42,7 +42,7 @@ params:
   session_id:
     type: string
     default: ""
-    description: "Conversation id from a prior turn. Empty = new conversation; the new id is returned."
+    description: "Accepted but unused: a one-shot call is a fresh Claude session and mints its own id."
   model:
     type: string
     default: ""
