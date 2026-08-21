@@ -547,18 +547,31 @@ func resolveYAMLPath(path string) string {
 
 // repoCloneDir returns the deterministic on-disk directory for (url, branch)
 // under the given trust tier. allowAuth=true reuses the same hash dicode has
-// always used (no on-disk migration for operator-configured sources); an
-// untrusted (allowAuth=false) resolution gets a distinct, separately-hashed
-// directory so it can never share a physical clone — and therefore never
-// share credentialed content — with a trusted one, regardless of what
-// cloneOrPull/go-git would or wouldn't do if the two were pointed at the
-// same path (#740).
+// always used (no on-disk migration for operator-configured sources).
+//
+// allowAuth=false hashes url and branch INDEPENDENTLY first, then combines
+// the two digests under a fixed domain-separation prefix, rather than
+// concatenating url+branch with an "@untrusted" suffix the way an earlier
+// version of this function did. Plain suffixing was not injective: an
+// attacker fully controls both fields of their own untrusted ref, so they
+// could choose an (url, branch) pair whose "url@branch@untrusted" string
+// reproduced an operator's real trusted "url@branch" seed byte-for-byte
+// whenever the operator's own branch name happened to end in "@untrusted"
+// (or, via a chosen url, in fewer contrived cases still) — landing both
+// tiers' clones in the SAME directory despite the different repoKey. Hashing
+// url and branch separately before combining removes that structural
+// overlap entirely: reproducing a trusted seed from the untrusted branch
+// would require a SHA-256 preimage, not a string-concatenation trick (#740
+// review).
 func repoCloneDir(dataDir, url, branch string, allowAuth bool) string {
-	seed := url + "@" + branch
-	if !allowAuth {
-		seed += "@untrusted"
+	var h [32]byte
+	if allowAuth {
+		h = sha256.Sum256([]byte(url + "@" + branch))
+	} else {
+		hu := sha256.Sum256([]byte(url))
+		hb := sha256.Sum256([]byte(branch))
+		h = sha256.Sum256([]byte(fmt.Sprintf("dicode-untrusted-clone-v1:%x:%x", hu, hb)))
 	}
-	h := sha256.Sum256([]byte(seed))
 	return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
 }
 

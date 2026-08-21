@@ -122,6 +122,55 @@ func TestResolve_NestedTaskSetGitRefAuth_Blocked(t *testing.T) {
 	}
 }
 
+// TestRepoCloneDir_TrustTiersNeverShareADirectory is a direct unit test of
+// the partitioning repoCloneDir provides: the same (url, branch) resolved
+// under both trust tiers must land in two different directories.
+func TestRepoCloneDir_TrustTiersNeverShareADirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	url := "https://example.com/private-repo.git"
+	branch := "main"
+
+	trusted := repoCloneDir(dataDir, url, branch, true)
+	untrusted := repoCloneDir(dataDir, url, branch, false)
+	if trusted == untrusted {
+		t.Fatalf("trusted and untrusted dirs for the same (url, branch) must differ, both got %q", trusted)
+	}
+}
+
+// TestRepoCloneDir_NoCrossTierCollision is the regression test for a
+// collision a security review found in this fix's second attempt: hashing
+// `url + "@" + branch` (+ "@untrusted" for the low-trust tier) is not
+// injective. An attacker who fully controls their own untrusted ref's
+// (url, branch) could choose values whose concatenated-plus-suffix string
+// reproduced an operator's real trusted "url@branch" seed byte-for-byte —
+// landing both tiers' clones in the physically SAME directory despite the
+// repoKey map correctly treating them as different cache entries, and (per
+// the review) opening a path to either read the operator's authenticated
+// clone or redirect the operator's next credentialed pull at an
+// attacker-controlled "origin" already present in that shared directory.
+//
+// This reproduces the exact shape flagged: trusted (url, "@untrusted") used
+// to hash identically to untrusted (url, "") under the old scheme — for the
+// same url, seed_trusted = url+"@"+"@untrusted" and seed_untrusted =
+// url+"@"+""+"@untrusted", both equal to url+"@@untrusted" byte-for-byte.
+// (A branch literally containing "@" is unusual but not rejected anywhere on
+// this path — ValidateBranchName is wired to the separate dev-mode clone
+// path only, not general resolution — so it was a real, reachable
+// collision, not merely a hypothetical one.) repoCloneDir now hashes url and
+// branch independently before combining, so reconstructing one tier's
+// directory from the other requires a SHA-256 preimage, not a
+// string-concatenation trick.
+func TestRepoCloneDir_NoCrossTierCollision(t *testing.T) {
+	dataDir := t.TempDir()
+	url := "https://example.com/private-repo.git"
+
+	trusted := repoCloneDir(dataDir, url, "@untrusted", true)
+	untrusted := repoCloneDir(dataDir, url, "", false)
+	if trusted == untrusted {
+		t.Fatalf("trusted dir for branch %q collided with untrusted dir for empty branch: %q", "@untrusted", trusted)
+	}
+}
+
 // TestEnsureClone_UntrustedCannotReuseAuthenticatedCache is the regression
 // test for a cache bypass found reviewing #740's first fix attempt: the
 // clone-dedup cache was keyed only by (URL, Branch), so once an
