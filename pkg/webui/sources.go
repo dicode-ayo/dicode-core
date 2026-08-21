@@ -278,9 +278,13 @@ func (m *SourceManager) Sources() []ipc.SourceSummary {
 	out := make([]ipc.SourceSummary, 0, len(infos))
 	for _, info := range infos {
 		out = append(out, ipc.SourceSummary{
-			Name:    info.Name,
-			Type:    info.Type,
-			URL:     info.URL,
+			Name: info.Name,
+			Type: info.Type,
+			// A configured source URL may carry a PAT as userinfo
+			// (`https://oauth2:ghp_...@github.com/...`), which is a shape
+			// operators use routinely. The listing names the repo; it does
+			// not hand over the credential reaching it.
+			URL:     taskset.SanitizeURL(info.URL),
 			Branch:  info.Branch,
 			DevMode: info.DevMode,
 		})

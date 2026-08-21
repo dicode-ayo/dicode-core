@@ -138,7 +138,7 @@ Returns the configured sources, sorted by name.
 ]
 ```
 
-Host paths are withheld. `permissions.dicode.sources_list` is grantable on its own, and a caller holding only it must not learn the daemon's filesystem layout — `switch_dev_mode` is what hands back a path, and only for the clone it just created. `GET /api/sources` still carries the full record for the dashboard.
+Host paths are withheld, and any userinfo in a source URL is stripped — operators routinely embed a PAT there, and the listing names the repo without handing over the credential that reaches it. `permissions.dicode.sources_list` is grantable on its own, and a caller holding only it must not learn the daemon's filesystem layout — `switch_dev_mode` is what hands back a path, and only for the clone it just created. `GET /api/sources` still carries the full record for the dashboard.
 
 ### `switch_dev_mode(source, enabled, branch?, base?, run_id?)`
 

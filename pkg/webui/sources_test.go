@@ -1091,3 +1091,31 @@ func TestApiAddSource_ABA_ReAddDuringSlowAddSource_NoStaleClobber(t *testing.T) 
 		t.Fatalf("bsA.Start was never observed to run")
 	}
 }
+
+// TestSourceManager_Sources_StripsURLCredentials pins the one field in the
+// listing that can carry a secret. permissions.dicode.sources_list is granted
+// to agent tasks, so a PAT embedded in a configured source URL — the shape
+// pkg/taskset/sanitize.go documents as routine — would otherwise be readable
+// by a language model through the MCP list_sources tool.
+func TestSourceManager_Sources_StripsURLCredentials(t *testing.T) {
+	const secret = "ghp_supersecrettoken"
+	mgr := &SourceManager{
+		cfg: &config.Config{Spec: taskset.TaskSetBody{Entries: map[string]*taskset.Entry{
+			"private": {Ref: &taskset.Ref{
+				URL:    "https://oauth2:" + secret + "@github.com/org/repo.git",
+				Branch: "main",
+			}},
+		}}},
+	}
+
+	got := mgr.Sources()
+	if len(got) != 1 {
+		t.Fatalf("expected one summary, got %+v", got)
+	}
+	if strings.Contains(got[0].URL, secret) {
+		t.Errorf("source listing leaks the URL credential: %q", got[0].URL)
+	}
+	if got[0].URL != "https://github.com/org/repo.git" {
+		t.Errorf("URL = %q, want the repo without userinfo", got[0].URL)
+	}
+}

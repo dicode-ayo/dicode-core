@@ -14,5 +14,15 @@ var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+@`)
 // full URL, which would otherwise reach every authenticated web-UI
 // viewer via /api/sources.last_pull_error.
 func sanitizeErrorString(s string) string {
+	return SanitizeURL(s)
+}
+
+// SanitizeURL strips user:password userinfo from any URL in s, leaving the
+// scheme and everything from the host onward intact. Callers hand out the
+// result in place of a configured source URL: the same PATs the error path
+// above guards against are readable from ref.url itself, and a source URL
+// reaches further than an error message does — any task granted
+// permissions.dicode.sources_list receives one.
+func SanitizeURL(s string) string {
 	return urlUserinfoRe.ReplaceAllString(s, "$1")
 }

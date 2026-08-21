@@ -376,6 +376,9 @@ func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 // it must not learn the daemon's filesystem layout. A task that needs the
 // path asks for it through sources.set_dev_mode, which returns the clone it
 // just created.
+//
+// URL is the configured source URL with any userinfo stripped by the caller
+// building this value; a PAT embedded there is a credential, not an address.
 type SourceSummary struct {
 	Name    string `json:"name"`
 	Type    string `json:"type,omitempty"`
