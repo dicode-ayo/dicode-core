@@ -282,6 +282,32 @@ spec:
                run did. Never report a test as passing that you did not
                watch pass, and state plainly whatever you could not verify.
 
+            A task.yaml is YAML, never JSON. Copy this shape, changing only
+            the values:
+
+              apiVersion: dicode/v1
+              kind: Task
+              name: "Human Readable Name"
+              description: "One line."
+              runtime: deno
+              trigger:
+                cron: "0 9 * * *"
+              permissions:
+                net:
+                  - api.example.com
+              timeout: 30s
+
+            `apiVersion` and `kind: Task` are literal. `trigger` holds exactly
+            one key. Every outbound host goes under permissions.net. The
+            task.ts is a Deno module with a default-exported handler:
+
+              export default async function main({ params }) {
+                const res = await fetch("https://api.example.com/thing");
+                const body = await res.text();
+                console.log(body);
+                return { body };
+              }
+
             When the description is ambiguous — missing channel, schedule,
             endpoint, or similar — ask one focused clarifying question
             rather than guessing. Keep answers focused on the task at hand;
