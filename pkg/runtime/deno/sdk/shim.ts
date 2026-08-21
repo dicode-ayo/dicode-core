@@ -64,6 +64,7 @@ export interface SecretOutputOptions {
 export interface Output {
   html:  (content: string, opts?: OutputOptions) => Promise<void>;
   text:  (content: string)                        => Promise<void>;
+  json:  (value: unknown)                         => Promise<void>;
   image: (mime: string | null, content: string)   => Promise<void>;
   file:  (name: string, content: string, mime?: string) => Promise<void>;
   // Provider-task entry point (issue #119). Throws synchronously if
@@ -475,6 +476,7 @@ function __outputCallable__(value: Record<string, string>, _opts: SecretOutputOp
 const __outputObj__ = {
   html:  (content: string, opts?: OutputOptions) => __fire__({ method: "output", contentType: "text/html",                     content, data: opts?.data ?? null }),
   text:  (content: string)                       => __fire__({ method: "output", contentType: "text/plain",                    content }),
+  json:  (value: unknown)                        => __fire__({ method: "output", contentType: "application/json",              content: JSON.stringify(value), data: value }),
   image: (mime: string | null, content: string)  => __fire__({ method: "output", contentType: mime ?? "image/png",             content }),
   file:  (name: string, content: string, mime?: string) => __fire__({ method: "output", contentType: mime ?? "application/octet-stream", content, data: { filename: name } }),
 };

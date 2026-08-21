@@ -45,6 +45,33 @@ function makeParams(entries: Array<[string, string]>) {
     };
 }
 
+// noopOutput stands in for the SDK's output surface on paths that never
+// publish. Failure paths do publish — use runFailing for those.
+const noopOutput = { json: () => Promise.resolve() } as any;
+
+// runFailing invokes a task entry expecting the terminal-failure path: a turn
+// that cannot run publishes the { ok: false, error } envelope a webhook caller
+// reads and then throws, which is what makes the engine record a failed run.
+// Returns the published envelope; asserts both halves happened and agree.
+async function runFailing(fn: (output: any) => Promise<unknown>): Promise<any> {
+    const published: any[] = [];
+    const output = { json: (v: unknown) => { published.push(v); return Promise.resolve(); } };
+    let thrown: unknown;
+    let returned = false;
+    try {
+        await fn(output);
+        returned = true;
+    } catch (e) {
+        thrown = e;
+    }
+    if (returned) {
+        throw new Error("expected the failed turn to throw — a returned error envelope settles the run as a success");
+    }
+    assertEquals(published.length, 1);
+    assertEquals((thrown as Error).message, published[0].error);
+    return published[0];
+}
+
 async function withStubClaude<T>(
     stubBody: string,
     fn: () => Promise<T>,
@@ -81,7 +108,7 @@ Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", asy
     const { calls, dicode } = makeSuspendDicode();
     let signalled = false;
     try {
-        await main({ params: makeParams([]), dicode });
+        await main({ params: makeParams([]), dicode, output: noopOutput });
     } catch (e) {
         if (e instanceof SuspendSignal) signalled = true;
         else throw e;
@@ -105,7 +132,7 @@ Deno.test("no token: falls back to logged-in credentials (does not hard-fail)", 
         `cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
     );
     assertEquals(result.ok, true);
 });
@@ -121,7 +148,7 @@ Deno.test("no token: does not inject an empty CLAUDE_CODE_OAUTH_TOKEN into claud
 cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
     );
     assertEquals((await Deno.readTextFile(sentinel)).trim(), "[UNSET]");
 });
@@ -136,6 +163,7 @@ JSON`,
             main({
                 params: makeParams([["prompt", "say hello"]]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -155,10 +183,13 @@ Deno.test("surfaces is_error: true responses", async () => {
 {"type":"result","is_error":true,"result":"rate limited"}
 JSON`,
         () =>
-            main({
-                params: makeParams([["prompt", "anything"]]),
-                dicode: fakeDicode,
-            }),
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
     );
     assertEquals(result.ok, false);
     if (!String(result.error ?? "").includes("rate limited")) {
@@ -172,10 +203,13 @@ Deno.test("surfaces non-zero exit code with stderr", async () => {
         `echo "auth failed: bad token" >&2
 exit 2`,
         () =>
-            main({
-                params: makeParams([["prompt", "anything"]]),
-                dicode: fakeDicode,
-            }),
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
     );
     assertEquals(result.ok, false);
     if (!String(result.error ?? "").includes("auth failed")) {
@@ -189,10 +223,13 @@ Deno.test("redacts OAuth token if it leaks into stderr", async () => {
         `echo "diagnostic: token=supersecret-token-xyz failed" >&2
 exit 1`,
         () =>
-            main({
-                params: makeParams([["prompt", "anything"]]),
-                dicode: fakeDicode,
-            }),
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
     );
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
@@ -212,10 +249,13 @@ Deno.test("redacts every occurrence of the token, not just the first", async () 
         `echo "first: supersecret-token-xyz; second: supersecret-token-xyz" >&2
 exit 1`,
         () =>
-            main({
-                params: makeParams([["prompt", "anything"]]),
-                dicode: fakeDicode,
-            }),
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
     );
     assertEquals(result.ok, false);
     const err = String(result.error ?? "");
@@ -234,10 +274,13 @@ Deno.test("redacts token in JSON-parse-failure path too", async () => {
     const result: any = await withStubClaude(
         `echo "non-JSON output mentioning supersecret-token-xyz somehow"`,
         () =>
-            main({
-                params: makeParams([["prompt", "anything"]]),
-                dicode: fakeDicode,
-            }),
+            runFailing((output) =>
+                main({
+                    params: makeParams([["prompt", "anything"]]),
+                    dicode: fakeDicode,
+                    output,
+                })
+            ),
     );
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
@@ -262,6 +305,7 @@ JSON`,
             main({
                 params: makeParams([["prompt", "hi"]]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -287,6 +331,7 @@ JSON`,
             main({
                 params: makeParams([["prompt", "hi"]]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -312,6 +357,7 @@ JSON`,
                     ["skills_dir", skillsDir],
                 ]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -404,7 +450,7 @@ Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired",
 cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
     );
     assertEquals(result.ok, true);
     const recorded = await Deno.readTextFile(sentinel);
@@ -509,6 +555,34 @@ JSON`,
     // The reply becomes the next prompt's banner — on the schema and the field.
     assertEquals(calls[0].schema.description, "pong");
     assertEquals(calls[0].schema.properties.message.description, "pong");
+});
+
+Deno.test("steps.turn: a failed turn throws instead of suspending onward", async () => {
+    // The chat loop's failure seam: chatTurn returns a provider's error
+    // envelope verbatim, which would end the run — as a success — carrying
+    // prose instead of a reply.
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { calls, dicode } = makeSuspendDicode();
+    const envelope: any = await withStubClaude(
+        `echo "auth failed: bad token" >&2
+exit 2`,
+        () =>
+            runFailing((output) =>
+                steps.turn({
+                    params: makeParams([]),
+                    input: { message: "ping" },
+                    state: { claudeSessionId: "", chatId: VALID_CHAT_ID },
+                    dicode,
+                    output,
+                    mcp: {} as any,
+                } as any)
+            ),
+    );
+    assertEquals(envelope.ok, false);
+    if (!String(envelope.error ?? "").includes("auth failed")) {
+        throw new Error(`expected stderr propagation, got ${envelope.error}`);
+    }
+    assertEquals(calls.length, 0); // never suspended onward
 });
 
 Deno.test("steps.turn: resumes Claude's prior session via --resume, and chatId stays stable", async () => {
@@ -680,6 +754,7 @@ JSON`,
                     ["skills_dir", skillsDir],
                 ]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -708,6 +783,7 @@ JSON`,
                     ["skills_dir", skillsDir],
                 ]),
                 dicode: fakeDicode,
+                output: noopOutput,
             }),
     );
     assertEquals(result.ok, true);
@@ -786,6 +862,7 @@ JSON`,
                         ["skills_dir", skillsDir],
                     ]),
                     dicode: fakeDicode,
+                    output: noopOutput,
                 }),
         );
     } finally {

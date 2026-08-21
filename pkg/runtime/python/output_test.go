@@ -97,3 +97,45 @@ async def main():
 		t.Fatalf("OutputContent = %q, want %q", res.OutputContent, "<h1>hi</h1>")
 	}
 }
+
+// TestExecute_OutputJSONPersisted holds the Python SDK to the Deno shim's
+// output surface: output.json must reach RunResult as an application/json
+// body, or a task written against the documented parity table (see
+// docs/python-runtime.md) silently answers its webhook caller with nothing.
+func TestExecute_OutputJSONPersisted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/output-json", `
+async def main():
+    output.json({"ok": False, "error": "boom"})
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Error != nil {
+		dumpRunLogs(t, reg, runID)
+		t.Fatalf("run failed: %v", res.Error)
+	}
+
+	if res.OutputContentType != "application/json" {
+		t.Fatalf("OutputContentType = %q, want %q", res.OutputContentType, "application/json")
+	}
+	if res.OutputContent != `{"ok": false, "error": "boom"}` {
+		t.Fatalf("OutputContent = %q", res.OutputContent)
+	}
+}

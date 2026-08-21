@@ -1250,6 +1250,10 @@ return output.html(`<h1>Daily Report</h1><table>...</table>`)
 // Plain text (monospace block)
 return output.text("Done: processed 42 items\n3 errors")
 
+// JSON body — survives a throw, so a task can fail the run and still answer
+// a webhook caller with a structured body
+await output.json({ ok: false, error: "rate limited" })
+
 // Image
 return output.image("image/png", base64PngData)
 

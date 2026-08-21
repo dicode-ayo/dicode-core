@@ -189,23 +189,26 @@ startup; the agent task picks up the secret without further setup.
 }
 ```
 
-On failure (`ok: false`) the `error` field carries the reason. The OAuth token
-is redacted before being included in any error string, even if the underlying
-CLI ever logs it.
+A turn that cannot run is a **failed run**, not a green one carrying an error
+string: the task publishes `{ "ok": false, "error": "..." }` as the run's output
+— so a webhook caller still reads the envelope, over HTTP 500 — and then throws.
+The OAuth token is redacted before being included in any error string, even if
+the underlying CLI ever logs it.
 
 ### Session-id mapping
 
 The `session_id` in the response is a **dicode-side UUID**, not the Claude CLI's
-internal id. The task stores `kv["claude:<dicode_uuid>"] = <claude_cli_session_id>`
-and resolves it via `--resume` on subsequent calls. Mirrors `buildin/ai-agent`'s
-session shape so the same chat UI shape works for both presets, and decouples
-the wire format from any future change in Claude's session-id format.
+internal id. One-shot calls are stateless — the id keys that call's workdir and
+is echoed back as a handle. The chat loop carries the CLI's own id in its
+suspend state and hands it to `--resume`. Mirrors `buildin/ai-agent`'s session
+shape so the same chat UI works for both presets, and decouples the wire format
+from any future change in Claude's session-id format.
 
 ## Rate limits
 
 Calls count against the same 5-hour rate windows as interactive Claude Code
 use. There's no per-token charge but exceeding the subscription quota returns
-an error you'll see propagated back as `ok: false`.
+an error you'll see as a failed run whose output is the `ok: false` envelope.
 
 ## Using with the auto-fix loop
 
