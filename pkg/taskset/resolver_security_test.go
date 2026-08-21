@@ -122,6 +122,41 @@ func TestResolve_NestedTaskSetGitRefAuth_Blocked(t *testing.T) {
 	}
 }
 
+// TestEnsureClone_UntrustedCannotReuseAuthenticatedCache is the regression
+// test for a cache bypass found reviewing #740's first fix attempt: the
+// clone-dedup cache was keyed only by (URL, Branch), so once an
+// allowAuth=true resolution had cloned a repo (e.g. the operator's private
+// root repo — routinely warmed by Resolve()/Pull() before any entry
+// resolves), an allowAuth=false entry naming that SAME (url, branch) — no
+// auth.token_env of its own required — would be handed that
+// already-authenticated directory straight out of the cache. gatedTokenEnv
+// stripping the token on the way in never mattered, because ensureClone
+// returned the cached dir before tokenEnv was even consulted. ensureClone
+// must never let a lower-trust call reuse a higher-trust call's clone.
+func TestEnsureClone_UntrustedCannotReuseAuthenticatedCache(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commit(t, "secret.txt", "operator-private content", "seed")
+
+	r := newResolver(t)
+
+	trustedDir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "GH_TOKEN", true)
+	if err != nil {
+		t.Fatalf("trusted ensureClone: %v", err)
+	}
+
+	untrustedDir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "", false)
+	if err != nil {
+		t.Fatalf("untrusted ensureClone: %v", err)
+	}
+
+	if untrustedDir == trustedDir {
+		t.Fatalf("untrusted resolution reused the trusted clone's directory (%q) — the cache bypass is not fixed", trustedDir)
+	}
+	if _, err := os.Stat(filepath.Join(untrustedDir, "secret.txt")); err != nil {
+		t.Errorf("untrusted clone should still succeed on its own against a repo with no real auth requirement: %v", err)
+	}
+}
+
 // TestResolve_TaskRefResolvingAsTaskSet_Rejected is the second #740
 // regression test: a ref whose configured path explicitly names "task.yaml"
 // — the exact shape taskset.AddTaskEntry writes for every scaffolded task —
