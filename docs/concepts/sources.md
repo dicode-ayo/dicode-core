@@ -44,6 +44,8 @@ spec:
 | `watch` | `true` | Enable fsnotify live reload (local refs) |
 | `dev_ref` | | Substitute ref when dev mode is active |
 
+`auth.token_env` is only honoured on a ref declared directly in `dicode.yaml` or in a source's root `taskset.yaml` — never on a `ref` discovered while resolving an already-resolved `TaskSet` entry further down the tree. A dropped `token_env` on a nested ref is logged as a warning rather than failing the resolve. This keeps a source that only grants write access to its own task tree (e.g. an AI authoring session) from being able to name an arbitrary daemon env var as a git credential and hand it to a host of its choosing on the next reconcile — see [#740](https://github.com/dicode-ayo/dicode-core/issues/740).
+
 ---
 
 ## Source types

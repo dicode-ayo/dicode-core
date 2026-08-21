@@ -1112,7 +1112,7 @@ func TestResolveRef_LocalEscapeRejectedInsideClone(t *testing.T) {
 	}
 
 	ref := &Ref{Path: "../../etc/passwd"}
-	_, err := r.resolveRef(context.Background(), ref, parent, nil, cloneRoot)
+	_, _, err := r.resolveRef(context.Background(), ref, parent, nil, cloneRoot, true)
 	if err == nil {
 		t.Fatal("expected error for path escaping clone root, got nil")
 	}
@@ -1129,7 +1129,7 @@ func TestResolveRef_LocalContainedPathAllowed(t *testing.T) {
 
 	// A relative path that stays inside cloneDir is allowed.
 	ref := &Ref{Path: "sibling/taskset.yaml"}
-	got, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir)
+	got, _, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestResolveRef_SymlinkEscapeRejected(t *testing.T) {
 	tsFile := filepath.Join(cloneDir, "taskset.yaml")
 
 	ref := &Ref{Path: "evil/taskset.yaml"}
-	if _, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir); err == nil {
+	if _, _, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir, true); err == nil {
 		t.Fatal("expected error for ref traversing a symlink out of the clone, got nil")
 	}
 }
