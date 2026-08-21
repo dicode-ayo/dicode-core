@@ -467,12 +467,11 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		}
 	} else {
 		branch := ref.effectiveBranch()
-		tokenEnv, blocked := gatedTokenEnv(allowAuth, ref.Auth.TokenEnv)
-		if blocked {
-			r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
-				zap.String("url", ref.URL))
-		}
-		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), tokenEnv, allowAuth)
+		// ensureClone re-derives the effective token itself from (allowAuth,
+		// ref.Auth.TokenEnv) — it does not trust this call to have already
+		// gated it — so passing the raw TokenEnv here is safe regardless of
+		// what any other caller does. See ensureClone's doc comment.
+		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv, allowAuth)
 		if err != nil {
 			return "", false, err
 		}
@@ -595,9 +594,11 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 //
 // allowAuth also selects which trust-tier cache partition (and physical
 // directory, via repoCloneDir) this call reads and writes — see repoKey's
-// doc comment. A caller must pass the SAME allowAuth it used to gate
-// tokenEnv (via gatedTokenEnv) so the two can never disagree about which
-// clone this resolution is entitled to reuse.
+// doc comment. ensureClone re-derives the effective token itself via
+// gatedTokenEnv rather than trusting the caller to have already gated
+// tokenEnv against the same allowAuth: passing the ref's raw, ungated
+// auth.token_env alongside allowAuth=false is always safe, by construction,
+// regardless of what any other call site does or how it evolves (#740).
 func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string, allowAuth bool) (string, error) {
 	key := repoKey{URL: url, Branch: branch, AllowAuth: allowAuth}
 
@@ -608,9 +609,15 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	}
 	r.mu.Unlock()
 
+	effectiveTokenEnv, blocked := gatedTokenEnv(allowAuth, tokenEnv)
+	if blocked {
+		r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
+			zap.String("url", url))
+	}
+
 	dir := repoCloneDir(r.dataDir, url, branch, allowAuth)
 
-	if err := cloneOrPull(ctx, dir, url, branch, tokenEnv); err != nil {
+	if err := cloneOrPull(ctx, dir, url, branch, effectiveTokenEnv); err != nil {
 		return "", fmt.Errorf("clone %s@%s: %w", url, branch, err)
 	}
 
