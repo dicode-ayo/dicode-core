@@ -795,14 +795,18 @@ test("read_skill on an unknown name names the ones that exist", async () => {
 test("a skill that will not load says so in the index and again on lookup", async () => {
   useLocal();
   params.set("prompt", "write me a task");
-  await useSkills({});
+  const dir = await useSkills({});
   params.set("skills", "missing");
 
   const { toolResult } = await runBuiltinCall("dicode_read_skill", { name: "missing" });
 
-  assert.ok(lastSystemPrompt().includes("- missing — (not loaded:"),
+  assert.ok(lastSystemPrompt().includes("- missing — (not loaded: no such skill file)"),
     "a skill the model is told exists must not vanish from the index when it fails to load");
-  assert.ok(String(toolResult.error).startsWith("skill missing not loaded:"));
+  assert.equal(toolResult.error, "skill missing not loaded: no such skill file");
+  // The raw Deno read error names the absolute path it tried. Host paths are
+  // not the model's to see; the operator gets them from the run log.
+  assert.ok(!lastSystemPrompt().includes(dir), "the skills directory must not reach the prompt");
+  assert.ok(!String(toolResult.error).includes(dir), "the skills directory must not reach the model");
 });
 
 test("a traversing skill name is rejected before it reaches the filesystem", async () => {

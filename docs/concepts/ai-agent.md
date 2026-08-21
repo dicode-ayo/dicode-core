@@ -161,7 +161,9 @@ Prefer `index`. A skill's full text is many times the size of the agent's own `s
 
 Under `index`, write your `system_prompt` so it names the skill to read and when — the description alone does not tell the model what the skill will say.
 
-Missing or unreadable skills still appear in the index, carrying their load error, and `dicode_read_skill` returns that same error. A skill the model is told exists must not silently vanish.
+The two modes also differ in where the block sits. The index goes **before** your `system_prompt`, so your instructions are the last thing the model reads before the request; the same index placed after it took structured tool calls from 6/6 to 0/6 on an 8B model, which narrated the plan it had just been told to follow instead of executing it. Eager bodies stay **after** your `system_prompt`, where they have always been, so opting back into `eager` reproduces the prompt it produced before.
+
+Missing or unreadable skills still appear in the index, carrying `(not loaded: …)`, and `dicode_read_skill` returns the same. The reason is deliberately coarse — `no such skill file` or `unreadable` — because it reaches the model; the full error and the path it tried go to the run log.
 
 The shared skills directory is configured through the `skills_dir` param, whose default is `${TASK_SET_DIR}/../skills` — expanded at task-load time to a sibling `skills/` directory next to the taskset that loaded the ai-agent. Override per-run to point at a different pool. See [../task-template-vars.md](../task-template-vars.md) for the full list of template variables available in task.yaml.
 

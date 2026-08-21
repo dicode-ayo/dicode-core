@@ -90,7 +90,7 @@ params:
       You are a helpful assistant embedded in dicode. You can call other
       dicode tasks as tools. Prefer tools when the user asks for data or
       actions; answer directly when they ask a general question.
-    description: "System prompt prepended to every conversation. The skill index (or, under skills_mode eager, the skill bodies) is appended after this."
+    description: "Operator system prompt, in every conversation. Under skills_mode index the skill index precedes it, so these instructions are the last thing the model reads before the request; under eager the skill bodies follow it."
   max_history_tokens:
     type: number
     default: "80000"

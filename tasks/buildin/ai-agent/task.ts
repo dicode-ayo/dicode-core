@@ -535,7 +535,12 @@ async function loadSkills(skillsDir: string, names: string[]): Promise<Skill[]> 
       // (wrong name) from a permissions/path misconfig (wrong skills_dir).
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`ai-agent: failed to load skill ${name} from ${path}: ${msg}`);
-      skills.push({ name, description: "", body: "", error: msg });
+      // The reason reaches the model, so it says which of the two it was
+      // without the host path the raw error carries. Host paths are not the
+      // model's to see — the same reason sources.list strips them and
+      // set_dev_mode withholds local_path.
+      const reason = e instanceof Deno.errors.NotFound ? "no such skill file" : "unreadable";
+      skills.push({ name, description: "", body: "", error: reason });
     }
   }
   return skills;
