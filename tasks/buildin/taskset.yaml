@@ -197,6 +197,7 @@ spec:
           runs_get_input:        true
           runs_pin_input:        true
           runs_unpin_input:      true
+          sources_list:          true
           sources_set_dev_mode:  true
           tasks_test:            true
           git_commit_push:       true
@@ -295,6 +296,7 @@ spec:
         # run-input capabilities auto-fix needs are not granted here. Every
         # capability listed becomes a tool the model can call.
         dicode:
+          sources_list:          true
           sources_set_dev_mode:  true
           tasks_test:            true
           git_commit_push:       true

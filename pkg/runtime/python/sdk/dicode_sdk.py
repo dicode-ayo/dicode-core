@@ -475,6 +475,12 @@ class _Tasks:
 
 
 class _Sources:
+    def list(self):
+        return _call({"method": "dicode.sources.list"})
+
+    async def list_async(self):
+        return await _call_async({"method": "dicode.sources.list"})
+
     def set_dev_mode(self, name, enabled, *, local_path="", branch="",
                      base="", run_id=""):
         return _call({"method": "dicode.sources.set_dev_mode",

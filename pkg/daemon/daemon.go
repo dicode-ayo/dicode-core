@@ -380,7 +380,7 @@ func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, den
 	if err != nil {
 		return nil, nil, fmt.Errorf("build sources: %w", err)
 	}
-	// *webui.SourceManager satisfies both SourceDevModeSetter (Task 6) and
+	// *webui.SourceManager satisfies both SourceController (Task 6) and
 	// RepoPathResolver (Task 8); wire both interfaces into both runtimes so
 	// per-run IPC servers can serve set_dev_mode and git.commit_push.
 	denoRT.SetSourceManager(sourceMgr)

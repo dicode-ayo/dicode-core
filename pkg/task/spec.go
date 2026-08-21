@@ -465,6 +465,10 @@ type DicodePermissions struct {
 	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
 	// via pkg/tasktest.
 	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`
+	// SourcesList enables dicode.sources.list() — names, types, and dev-mode
+	// state of the configured taskset sources. Host paths are withheld from
+	// the listing, so this grants no filesystem visibility on its own.
+	SourcesList bool `yaml:"sources_list,omitempty" json:"sources_list,omitempty"`
 	// SourcesSetDevMode enables dicode.sources.set_dev_mode() — toggles dev
 	// mode (incl. clone-mode) on a configured taskset source.
 	SourcesSetDevMode bool `yaml:"sources_set_dev_mode,omitempty" json:"sources_set_dev_mode,omitempty"`

@@ -109,6 +109,7 @@ model can act on dicode itself rather than only on tasks:
 | `dicode_list_tasks` | `list_tasks` |
 | `dicode_get_runs` | `get_runs` |
 | `dicode_test_task` | `tasks_test` |
+| `dicode_list_sources` | `sources_list` |
 | `dicode_set_dev_mode` | `sources_set_dev_mode` |
 | `dicode_get_run_input` | `runs_get_input` |
 | `dicode_pin_run_input` / `dicode_unpin_run_input` | `runs_pin_input` / `runs_unpin_input` |
@@ -128,6 +129,10 @@ Some arguments behind these tools are withheld from the model on purpose:
   run, so two sessions cannot reach into each other's working copy — and no
   `local_path`, which would let the caller choose what the daemon loads as
   tasks. It returns `clone_path`, which is what `git-pr` expects.
+- `dicode_list_sources` returns no host paths. Finding a source to work in and
+  learning the daemon's filesystem layout are different needs, and only the
+  first one is served here; `dicode_set_dev_mode` hands back the path to the
+  clone it just made.
 - `dicode_git_commit_push` takes no `allow_main`, and reads its branch prefix
   from the `git_branch_prefix` param. A prefix the model picked alongside the
   branch would bound nothing.

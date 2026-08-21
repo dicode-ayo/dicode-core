@@ -183,3 +183,23 @@ func TestRevokeByNamePrefix_RefusesOtherPrefixes(t *testing.T) {
 		t.Fatal("expected revokeByNamePrefix to refuse an empty prefix")
 	}
 }
+
+// TestMint_StampsRunIDIntoScope pins the binding switch_dev_mode rests on:
+// the run a token was minted for must be readable from the token's own scope,
+// because that is the only identity the /mcp forwarder has for the caller.
+func TestMint_StampsRunIDIntoScope(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestAPIKeyStore(t)
+
+	raw, err := newMCPTokenMinter(keys).Mint(ctx, "run-42", pkgruntime.MCPScope{SetDevMode: true})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	scope, found := keys.scopeFor(ctx, raw)
+	if !found || scope == nil {
+		t.Fatal("scopeFor: minted token has no scope")
+	}
+	if scope.RunID != "run-42" {
+		t.Errorf("scope.RunID = %q, want %q", scope.RunID, "run-42")
+	}
+}

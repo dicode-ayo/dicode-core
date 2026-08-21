@@ -91,6 +91,19 @@ Then point `on_failure_chain` at `buildin/auto-fix-claude` instead of
 
 ## Limitations (current)
 
+- **The preset is chat-only.** `buildin/ai-agent-claude-cli` declares no
+  `permissions.dicode`, and an ephemeral per-run MCP token authorizes exactly
+  what its minting task declared — so the token this preset receives
+  authorizes no dicode MCP tool, and every `tools/call` comes back
+  `-32001 capability not granted`. That is the honest answer for a preset that
+  asked for nothing; it is not a bug to work around.
+
+  To use the CLI backend for authoring rather than chat, declare a taskset
+  override that swaps the agent *and* names the capabilities the loop needs —
+  `sources_list`, `sources_set_dev_mode`, `tasks_test`, `list_tasks`, and the
+  `tasks` it must call. `task-create` and `auto-fix` in
+  `tasks/buildin/taskset.yaml` are the worked examples; copy their `dicode:`
+  block. Without it the MCP wiring is present and every tool is denied.
 - **No tool-use beyond `claude -p` defaults.** Print mode disables
   Claude's filesystem / bash tools. For deeper agentic loops, drive the
   CLI's session machinery from outside dicode.

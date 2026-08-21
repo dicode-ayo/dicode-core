@@ -20,6 +20,11 @@ trigger:
   # require a dicode session, which MCP clients don't have.
   auth: true
 
+# The tools this task serves are gated per-caller in pkg/webui's /mcp
+# forwarder against the scope of the caller's ephemeral token, not here: a
+# capability withheld from this task is a tool that cannot work for anyone,
+# including the operator. Anything added here must gain a matching case in
+# mcpScopeCheck, which denies unrecognized tool names by default.
 permissions:
   env: []
   net: []
@@ -28,5 +33,8 @@ permissions:
     list_tasks: true
     tasks:
       - "*"
+    tasks_test: true
+    sources_list: true
+    sources_set_dev_mode: true
 
 timeout: 60s

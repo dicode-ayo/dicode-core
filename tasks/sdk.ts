@@ -173,7 +173,18 @@ export interface SetDevModeResult {
   clone_path?: string;
 }
 
+// One entry of dicode.sources.list(). Host paths are withheld from the
+// listing; set_dev_mode is what returns a path, for the clone it just made.
+export interface SourceSummary {
+  name: string;
+  type?: string;
+  url?: string;
+  branch?: string;
+  dev_mode: boolean;
+}
+
 export interface DicodeSources {
+  list(): Promise<SourceSummary[]>;
   set_dev_mode(name: string, opts: {
     enabled: boolean;
     // local_path and branch are mutually exclusive: local_path points dev-ref

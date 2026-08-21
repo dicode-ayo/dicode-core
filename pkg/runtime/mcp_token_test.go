@@ -84,6 +84,29 @@ func TestMCPScopeFor(t *testing.T) {
 			}},
 			want: MCPScope{ListTasks: true, RunTaskIDs: []string{"a"}, TestTasks: true},
 		},
+		{
+			name: "SourcesList true is carried through",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{SourcesList: true},
+			}},
+			want: MCPScope{ListSources: true},
+		},
+		{
+			name: "SourcesSetDevMode true is carried through",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{SourcesSetDevMode: true},
+			}},
+			want: MCPScope{SetDevMode: true},
+		},
+		{
+			// The spec has no run to name, so RunID stays empty here — the
+			// minter is what stamps it.
+			name: "RunID is not derived from the spec",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{SourcesSetDevMode: true},
+			}},
+			want: MCPScope{SetDevMode: true, RunID: ""},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

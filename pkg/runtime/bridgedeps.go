@@ -60,9 +60,9 @@ type BridgeDeps struct {
 	SharedResolver *envresolve.Resolver
 	// Replayer, SourceMgr, RepoResolver are wired after buildRuntimes
 	// returns (same late-wiring pattern as InputStore).
-	Replayer     *registry.Replayer      // optional; enables dicode.runs.replay
-	SourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
-	RepoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
+	Replayer     *registry.Replayer   // optional; enables dicode.runs.replay
+	SourceMgr    ipc.SourceController // optional; enables dicode.sources.set_dev_mode
+	RepoResolver ipc.RepoPathResolver // optional; enables dicode.git.commit_push
 	// TestGuard is the approval gate's veto for dicode.tasks.test, forwarded
 	// to every per-run IPC server. Nil means allow.
 	TestGuard func(taskID string) error
@@ -158,7 +158,7 @@ func (d *BridgeDeps) SetReplayer(r *registry.Replayer) { d.Replayer = r }
 
 // SetSourceManager wires the source manager so the per-run IPC server can
 // serve dicode.sources.set_dev_mode calls.
-func (d *BridgeDeps) SetSourceManager(m ipc.SourceDevModeSetter) { d.SourceMgr = m }
+func (d *BridgeDeps) SetSourceManager(m ipc.SourceController) { d.SourceMgr = m }
 
 // SetRepoResolver wires the repo-path resolver so the per-run IPC server
 // can serve dicode.git.commit_push calls.

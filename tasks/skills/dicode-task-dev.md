@@ -9,18 +9,22 @@ You are an AI agent developing automation tasks for a dicode instance.
 
 ## The tools you actually have
 
-The dicode MCP server exposes exactly six tools. Three do the work; three
-return a *hint* — a short string telling you to make one REST call yourself with
-the API key you already hold to reach `/mcp`.
+The dicode MCP server exposes exactly six tools. Each one acts — none of them
+hand back an instruction to make the call yourself.
 
-| Tool | Kind | What it does |
-|---|---|---|
-| `list_tasks` | full | Lists every registered task with IDs, names, descriptions, and declared params. |
-| `get_task(id)` | full | Returns one task's spec (id, name, description, params) by namespaced ID. |
-| `run_task(id, params?)` | full | Triggers a task, blocks until it finishes, returns its run result. `params` is a string-valued object. |
-| `list_sources` | hint | Returns text telling you to call `GET /api/sources` directly to enumerate sources. |
-| `switch_dev_mode(source, enabled, …)` | hint | Returns text telling you to call `PATCH /api/sources/{name}/dev` directly to toggle dev mode. |
-| `test_task(id)` | hint | Returns text telling you to call `POST /api/tasks/{id}/test` directly to run a task's sibling test file. |
+| Tool | What it does |
+|---|---|
+| `list_tasks` | Lists the registered tasks that opted in with `mcp_exposed: true`, with IDs, names, descriptions, and declared params. |
+| `get_task(id)` | Returns one task's spec (id, name, description, params) by namespaced ID. |
+| `run_task(id, params?)` | Triggers a task, blocks until it finishes, returns its run result. `params` is a string-valued object. |
+| `list_sources` | Lists the configured sources: name, type, git URL, branch, dev-mode state. No host paths. |
+| `switch_dev_mode(source, enabled, branch?, base?, run_id?)` | Enters or leaves dev mode. Entering with a branch clones the source and returns `clone_path` — edit there, not in the live source. `run_id` names the clone; omit it, the daemon binds it to your run. |
+| `test_task(id)` | Runs a task's sibling test file and returns the results. Refused while the approval gate holds the task pending. |
+
+A call you are not entitled to make comes back as a JSON-RPC error naming the
+capability, not as a hint. That is a real answer: the token you hold was minted
+from a task's declared `permissions.dicode`, and no phrasing of the call will
+widen it.
 
 There is no MCP tool that lists secrets, dumps the JS API, fetches example
 tasks, writes files, validates, dry-runs, or commits. Discover credentials with
@@ -36,16 +40,17 @@ Follow this order every time — no exceptions:
    `get_task("<id>")` to read a close analog's spec and copy its patterns.
 2. Know what credentials exist — `dicode secrets list` on the CLI. Never invent
    secret names; declare only what exists under `permissions.env`.
-3. Enter dev mode on the target source — `switch_dev_mode` returns a hint;
-   follow it with the `PATCH /api/sources/{name}/dev` call it describes so your
-   edits land in a writable clone.
+3. Enter dev mode on the target source — `list_sources` to find its name, then
+   `switch_dev_mode("<source>", true, { branch: "<branch>" })`. Edit inside the
+   `clone_path` it returns, never in the live source.
 4. Write the three files (via the editor / dev-mode clone):
    - `<task-id>/task.yaml` — trigger, params, env declarations
    - `<task-id>/task.ts`   — task logic (TypeScript for `runtime: deno`; use `task.py` for `runtime: python`)
    - `<task-id>/task.test.ts` (or `task.test.py` for `runtime: python`) — unit tests (required, no exceptions)
-5. Test — ALL tests must pass before proceeding. `test_task("<task-id>")`
-   returns a hint pointing at `POST /api/tasks/{id}/test`; make that call. On the
-   CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep).
+5. Test — ALL tests must pass before proceeding. `test_task("<task-id>")` runs
+   them. A task the approval gate still holds pending is refused: approve it
+   first (`dicode task approve <task-id>`). On the CLI: `dicode task test
+   <task-id>` (or `make test-tasks` for the full sweep).
    Deno and Python are supported; Docker/Podman parity tracked in
    [#159](https://github.com/dicode-ayo/dicode-core/issues/159) Phase 3.
 6. Exercise it — `run_task("<task-id>", { key: "value" })` triggers a real run

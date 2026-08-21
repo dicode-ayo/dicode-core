@@ -512,7 +512,7 @@ interface ToolsCallResult {
   content: Array<{ type: 'text'; text: string }>;
 }
 
-test.describe('Group 6: MCP switch_dev_mode advertises new args', () => {
+test.describe('Group 6: MCP switch_dev_mode', () => {
   test('tools/list: switch_dev_mode schema includes branch, base, run_id', async ({ request }) => {
     const res = await request.post(MCP_URL, {
       headers: { 'Content-Type': 'application/json' },
@@ -529,14 +529,18 @@ test.describe('Group 6: MCP switch_dev_mode advertises new args', () => {
     expect(props['branch']).toBeDefined();
     expect(props['base']).toBeDefined();
     expect(props['run_id']).toBeDefined();
+    // local_path redirects taskset resolution at any host path, so it is not
+    // the caller's to set — it is absent from the schema and dropped by the
+    // dispatcher.
+    expect(props['local_path']).toBeUndefined();
   });
 
-  test('tools/call switch_dev_mode round-trips branch/base/run_id in hint text', async ({ request }) => {
-    const sourceName = 'e2e-tests'; // known to exist from fixtures
-    const branchVal = 'fix/mcp-test';
-    const baseVal = 'main';
-    const runIdVal = 'mcp-test-run-1';
-
+  test('tools/call switch_dev_mode acts on the daemon rather than describing a call', async ({ request }) => {
+    // The e2e-tests fixture source is a local path, not a git remote, so
+    // clone mode cannot apply to it. That makes it a clean probe: the reply
+    // must be the daemon's own refusal, which only a tool that actually
+    // reached SetDevMode can produce. A tool that merely echoed its arguments
+    // would answer with text and no error.
     const res = await request.post(MCP_URL, {
       headers: { 'Content-Type': 'application/json' },
       data: {
@@ -546,30 +550,19 @@ test.describe('Group 6: MCP switch_dev_mode advertises new args', () => {
         params: {
           name: 'switch_dev_mode',
           arguments: {
-            source: sourceName,
+            source: 'e2e-tests',
             enabled: true,
-            branch: branchVal,
-            base: baseVal,
-            run_id: runIdVal,
+            branch: 'fix/mcp-test',
+            base: 'main',
+            run_id: 'mcp-test-run-1',
           },
         },
       },
     });
     expect(res.ok()).toBe(true);
     const body = (await res.json()) as JsonRpcResponse<ToolsCallResult>;
-    // The tool must not return a JSON-RPC error.
-    expect(body.error).toBeUndefined();
-    expect(body.result?.content[0].type).toBe('text');
-
-    const text = body.result!.content[0].text;
-    // The hint body includes the JSON payload that was assembled from the args.
-    // Verify the round-tripped values appear in the text.
-    expect(text).toContain(branchVal);
-    expect(text).toContain(baseVal);
-    expect(text).toContain(runIdVal);
-    // The source name and endpoint path should appear too.
-    expect(text).toContain(sourceName);
-    expect(text).toContain('/dev');
+    expect(body.error).toBeDefined();
+    expect(body.error!.message).toContain('clone-mode requires a git source');
   });
 });
 

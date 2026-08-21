@@ -70,6 +70,7 @@ const (
 	CapRunsGetInput      = "runs.get_input"
 	CapRunsReplay        = "runs.replay"          // dicode.runs.replay — re-fire a persisted run
 	CapTasksTest         = "tasks.test"           // dicode.tasks.test — run a task's sibling test file
+	CapSourcesList       = "sources.list"         // dicode.sources.list
 	CapSourcesSetDevMode = "sources.set_dev_mode" // dicode.sources.set_dev_mode
 	CapGitCommitPush     = "git.commit_push"      // dicode.git.commit_push (#234)
 

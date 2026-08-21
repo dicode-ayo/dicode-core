@@ -383,7 +383,7 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 // and revoke API keys on behalf of CLI clients. Implemented by
 // webui.Server (which owns the apiKeyStore). Defined here so pkg/ipc
 // doesn't need to import pkg/webui — same pattern as
-// SourceDevModeSetter / RepoPathResolver in the per-task IPC server.
+// SourceController / RepoPathResolver in the per-task IPC server.
 type APIKeyMinter interface {
 	MintAPIKey(ctx context.Context, name string) (APIKeyMintResult, error)
 	RevokeAPIKeyByName(ctx context.Context, name string) error

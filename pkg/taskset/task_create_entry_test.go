@@ -31,6 +31,7 @@ func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 	}
 
 	want := map[string]bool{
+		"SourcesList":       d.SourcesList,
 		"SourcesSetDevMode": d.SourcesSetDevMode,
 		"TasksTest":         d.TasksTest,
 		"GitCommitPush":     d.GitCommitPush,

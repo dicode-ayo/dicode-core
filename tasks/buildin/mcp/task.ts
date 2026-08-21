@@ -11,16 +11,14 @@
 //   list_tasks       → dicode.list_tasks()
 //   get_task         → list_tasks() filtered by id (one round-trip)
 //   run_task         → dicode.run_task() (blocking; returns the run result)
-//   list_sources     → hint pointing at GET /api/sources
-//   switch_dev_mode  → hint pointing at PATCH /api/sources/{name}/dev
-//   test_task        → hint pointing at POST /api/tasks/{id}/test
+//   list_sources     → dicode.sources.list()
+//   switch_dev_mode  → dicode.sources.set_dev_mode()
+//   test_task        → dicode.tasks.test()
 //
-// The three "hint" tools used to be implemented in Go against private
-// internals. As a task we don't have direct access to the SourceManager
-// or tasktest — but every MCP client already has the dicode API base URL
-// and an API key (that's how it reaches /mcp), so handing back a
-// structured hint is enough for the client to complete the operation
-// itself in one extra call.
+// Who may call each tool is decided in pkg/webui's /mcp forwarder against
+// the caller's token scope, before the request arrives here. This task
+// holds every capability its tools need, so a check written here would
+// only be a second opinion on a decision already made.
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "dicode";
@@ -114,25 +112,24 @@ const TOOLS: ToolDef[] = [
   {
     name: "list_sources",
     description:
-      "Return a hint for listing sources. The MCP client should call GET /api/sources directly with its API key.",
+      "List the configured taskset sources: name, type, git URL, tracked " +
+      "branch, and whether the source is currently in dev mode.",
     inputSchema: schema({}),
   },
   {
     name: "switch_dev_mode",
     description:
-      "Return a hint for toggling dev mode on a taskset source. The MCP client should call PATCH /api/sources/{name}/dev directly.",
+      "Enter or leave dev mode on a taskset source. Entering with a branch " +
+      "clones the source repo into a scratch directory and returns " +
+      "clone_path — edit files there, not in the live source. Leave dev mode " +
+      "when done, which removes the clone locally and keeps the remote branch.",
     inputSchema: schema(
       {
         source: { type: "string", description: "Source name" },
         enabled: { type: "boolean", description: "true to enable" },
-        local_path: {
-          type: "string",
-          description: "Absolute path to a local taskset.yaml (when enabling local-path mode)",
-        },
         branch: {
           type: "string",
-          description:
-            "Branch name to clone-and-checkout (when enabling clone-mode). Mutually exclusive with local_path.",
+          description: "Branch name to clone and check out (clone mode).",
         },
         base: {
           type: "string",
@@ -142,7 +139,9 @@ const TOOLS: ToolDef[] = [
         run_id: {
           type: "string",
           description:
-            "Identifier for the per-fix clone directory; required with branch.",
+            "Names the per-session clone directory; required with branch. " +
+            "Ignored for callers holding a per-run token — the daemon binds " +
+            "it to the minting run.",
         },
       },
       ["source", "enabled"],
@@ -151,7 +150,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "test_task",
     description:
-      "Return a hint for running a task's sibling test file. The MCP client should call POST /api/tasks/{id}/test directly.",
+      "Run a task's sibling test file (task.test.ts / task.test.py) and " +
+      "return the results. Refused for a task the approval gate is still " +
+      "holding pending, because the test file runs with full host permissions.",
     inputSchema: schema(
       { id: { type: "string", description: "Namespaced task ID" } },
       ["id"],
@@ -164,6 +165,21 @@ async function listTasks(dicode: Dicode): Promise<TaskSummary[]> {
   // mcp_exposed: true — so only explicitly opted-in tasks are discoverable
   // via the MCP endpoint.
   return ((await dicode.list_tasks({ mcpContext: true })) as TaskSummary[]) ?? [];
+}
+
+function argStr(args: Record<string, unknown>, key: string): string {
+  const v = args[key];
+  return typeof v === "string" ? v : "";
+}
+
+// Matches argBool in tasks/buildin/ai-agent/task.ts: the same argument reaches
+// set_dev_mode from both surfaces and must mean the same thing on each. A bare
+// Boolean() would read the string "false" as true and enter dev mode for a
+// caller asking to leave it — the schema says boolean, but nothing between an
+// MCP client and here enforces that.
+function argBool(args: Record<string, unknown>, key: string): boolean {
+  const v = args[key];
+  return typeof v === "string" ? v === "true" : Boolean(v);
 }
 
 function stringifyParams(raw: unknown): Record<string, string> {
@@ -203,31 +219,29 @@ async function dispatchTool(
       return textContent(JSON.stringify(result ?? null, null, 2));
     }
     case "list_sources": {
-      return textContent(
-        "Sources are not exposed via the dicode task SDK. Call `GET /api/sources` directly with your API key.",
-      );
+      const sources = await dicode.sources.list();
+      return textContent(JSON.stringify(sources, null, 2));
     }
     case "switch_dev_mode": {
       const src = String(args.source ?? "");
       if (!src) throw new Error("source is required");
-      const body: Record<string, unknown> = { enabled: Boolean(args.enabled) };
-      for (const k of ["local_path", "branch", "base", "run_id"]) {
-        const v = args[k];
-        if (typeof v === "string" && v) body[k] = v;
-      }
-      return textContent(
-        `Dev-mode switching is not exposed via the dicode task SDK. ` +
-          `Call \`PATCH /api/sources/${src}/dev\` with body ` +
-          `${JSON.stringify(body)} directly.`,
-      );
+      // local_path is not a tool argument: it redirects the daemon's taskset
+      // resolution at an arbitrary host path, which would let a caller decide
+      // what the daemon loads as tasks. Operators reach that mode through
+      // PATCH /api/sources/{name}/dev.
+      const result = await dicode.sources.set_dev_mode(src, {
+        enabled: argBool(args, "enabled"),
+        branch: argStr(args, "branch"),
+        base: argStr(args, "base"),
+        run_id: argStr(args, "run_id"),
+      });
+      return textContent(JSON.stringify(result, null, 2));
     }
     case "test_task": {
       const id = String(args.id ?? "");
       if (!id) throw new Error("id is required");
-      return textContent(
-        `Task tests are not exposed via the dicode task SDK. ` +
-          `Call \`POST /api/tasks/${id}/test\` directly with your API key.`,
-      );
+      const result = await dicode.tasks.test(id);
+      return textContent(JSON.stringify(result ?? null, null, 2));
     }
     default:
       throw new Error(`unknown tool: ${name}`);
