@@ -505,6 +505,31 @@ func TestRuntime_Output_JSON_SurvivesThrow(t *testing.T) {
 	}
 }
 
+// JSON.stringify(undefined) is undefined, which would reach the daemon as an
+// application/json output carrying no body — indistinguishable downstream from
+// a task that published nothing. The SDK rejects at the call site instead.
+func TestRuntime_Output_JSON_RejectsUnserializable(t *testing.T) {
+	e := newTestEnv(t)
+	r := e.run(t, `await output.json(undefined)`)
+	if r.Error == nil {
+		t.Fatal("expected output.json(undefined) to reject rather than publish an empty body")
+	}
+	if r.Output != nil && r.Output.Content != "" {
+		t.Errorf("expected no output to be published, got %+v", r.Output)
+	}
+	logs, err := e.reg.GetRunLogs(context.Background(), r.RunID)
+	if err != nil {
+		t.Fatalf("get run logs: %v", err)
+	}
+	var joined string
+	for _, l := range logs {
+		joined += l.Message + "\n"
+	}
+	if !strings.Contains(joined, "output.json") {
+		t.Errorf("expected the rejection to name output.json in the run log, got:\n%s", joined)
+	}
+}
+
 func TestRuntime_RunRecord(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `return "ok"`)

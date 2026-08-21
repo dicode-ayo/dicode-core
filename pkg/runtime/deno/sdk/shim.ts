@@ -473,10 +473,24 @@ function __outputCallable__(value: Record<string, string>, _opts: SecretOutputOp
   return __fire__({ method: "output", secret: true, secretMap: value });
 }
 
+// JSON.stringify(undefined) is undefined — and a frame with no `content` key
+// reaches the daemon as an application/json output with an empty body, which
+// every reader downstream (the webhook responder included) treats as "the task
+// produced no output". Reject at the call site instead, like the secret-map
+// validation above.
+function __outputJson__(value: unknown): Promise<void> {
+  const content = JSON.stringify(value);
+  if (content === undefined) {
+    return Promise.reject(new Error(
+      `output.json(value): a value of type ${typeof value} has no JSON representation`));
+  }
+  return __fire__({ method: "output", contentType: "application/json", content, data: value });
+}
+
 const __outputObj__ = {
   html:  (content: string, opts?: OutputOptions) => __fire__({ method: "output", contentType: "text/html",                     content, data: opts?.data ?? null }),
   text:  (content: string)                       => __fire__({ method: "output", contentType: "text/plain",                    content }),
-  json:  (value: unknown)                        => __fire__({ method: "output", contentType: "application/json",              content: JSON.stringify(value), data: value }),
+  json:  (value: unknown)                        => __outputJson__(value),
   image: (mime: string | null, content: string)  => __fire__({ method: "output", contentType: mime ?? "image/png",             content }),
   file:  (name: string, content: string, mime?: string) => __fire__({ method: "output", contentType: mime ?? "application/octet-stream", content, data: { filename: name } }),
 };
