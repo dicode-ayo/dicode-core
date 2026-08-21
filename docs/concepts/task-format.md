@@ -1200,6 +1200,16 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
 | `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
 | `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. Sub-keys are derived via HKDF-SHA256 (encrypt always uses this; decrypt falls back to the legacy Argon2id derivation so blobs sealed before this change keep working — see #607). **Daemon-private contexts (currently `dicode/run-inputs/v1` and `dicode/approval-lock/v1`) are always denied even when `["*"]` is granted.** |
+| `runs_list_expired: true` | `dicode.runs.list_expired()` — run IDs whose stored input has passed its retention window |
+| `runs_delete_input: true` | `dicode.runs.delete_input(runID)` — drop a run's stored trigger payload |
+| `runs_pin_input: true` / `runs_unpin_input: true` | `dicode.runs.pin_input(runID)` / `unpin_input(runID)` — exempt a run's input from retention cleanup, or release it |
+| `runs_replay: true` | `dicode.runs.replay(runID)` — re-fire a persisted run with its stored input |
+| `runs_get_input: true` | `dicode.runs.get_input(runID)` — read another run's stored input. **Sensitive:** grants cross-task input access, bounded only by write-time redaction |
+| `tasks_test: true` | `dicode.tasks.test(taskID)` — run a task's sibling test file. Also gates the MCP `test_task` tool and `POST /api/tasks/{id}/test`. Refused for a task the approval gate holds pending, since the test file runs with full host permissions |
+| `sources_list: true` | `dicode.sources.list()` — configured sources with name, type, git URL/branch and dev-mode state. Host paths are withheld. Also gates the MCP `list_sources` tool |
+| `sources_set_dev_mode: true` | `dicode.sources.set_dev_mode(name, opts)` — enter or leave dev mode, cloning the source when a branch is given. Also gates the MCP `switch_dev_mode` tool. **Sensitive:** dev mode decides which files the daemon loads as tasks for that source |
+| `git_commit_push: true` | `dicode.git.commit_push(sourceID, opts)` — add, commit and push inside a source's repo |
+| `audit_query: true` | `dicode.audit.query()` — read the security audit trail. **Sensitive:** the log enumerates every actor, target and denial across the system |
 
 ```yaml
 # An agent task that can call other tasks:
