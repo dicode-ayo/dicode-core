@@ -77,6 +77,20 @@ function parsePositiveInt(raw: string | null, name: string): number {
   return n;
 }
 
+// Temperature admits 0 (the default, and the value that keeps a small model
+// emitting structured tool calls rather than prose), so it cannot go through
+// parsePositiveInt.
+function parseTemperature(raw: string | null): number {
+  // An absent param is the declared default, not a coercion of null.
+  const n = raw === null || raw === "" ? 0 : Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 2) {
+    throw new Error(
+      `ai-agent: param temperature must be a number between 0 and 2, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
 // Map a dicode param type to a JSON Schema type. Unknown types fall back
 // to "string" so the tool schema is always valid even for param types we
 // don't explicitly recognise.
@@ -345,6 +359,7 @@ interface CompactionConfig {
   keepTurns: number;        // last N turns kept verbatim; older turns get summarized
   summaryMaxTokens: number; // max_tokens budget for the summary call
   model: string;            // model used to generate the summary
+  temperature: number;      // sampling temperature for the summary call
 }
 
 // Strip summarized turns and replace with a single system "summary" entry.
@@ -378,6 +393,7 @@ async function compactIfNeeded(
   const previousSummary = session.summary ?? "";
   const summaryResp = await client.chat.completions.create({
     model: cfg.model,
+    temperature: cfg.temperature,
     messages: [
       {
         role: "system",
@@ -479,6 +495,7 @@ interface AgentRuntime {
   compactionCfg: CompactionConfig;
   maxToolIterations: number;
   responseMaxTokens: number;
+  temperature: number;
 }
 
 type ResolveResult =
@@ -528,6 +545,7 @@ async function resolveAgentRuntime(
   const maxToolIterations = parsePositiveInt(await params.get("max_tool_iterations"), "max_tool_iterations");
   const responseMaxTokens = parsePositiveInt(await params.get("response_max_tokens"), "response_max_tokens");
   const compactionMaxTokens = parsePositiveInt(await params.get("compaction_max_tokens"), "compaction_max_tokens");
+  const temperature = parseTemperature(await params.get("temperature"));
   const compactionKeepTurns = parsePositiveInt(await params.get("compaction_keep_turns"), "compaction_keep_turns");
 
   const missing: string[] = [];
@@ -643,9 +661,11 @@ async function resolveAgentRuntime(
         keepTurns: compactionKeepTurns,
         summaryMaxTokens: compactionMaxTokens,
         model: compactionModel,
+        temperature,
       },
       maxToolIterations,
       responseMaxTokens,
+      temperature,
     },
   };
 }
@@ -660,7 +680,7 @@ async function runAgentTurn(
   rt: AgentRuntime,
   dicode: Dicode,
 ): Promise<string> {
-  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
+  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens, temperature } = rt;
 
   // Append user turn
   session.messages.push({ role: "user", content: message });
@@ -707,6 +727,7 @@ async function runAgentTurn(
           messages: apiMessages,
           tools: tools.length ? tools : undefined,
           max_tokens: responseMaxTokens,
+          temperature,
         });
       } catch (e) {
         // OpenAI SDK APIError carries the parsed response body and rate-limit

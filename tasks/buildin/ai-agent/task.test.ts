@@ -285,6 +285,45 @@ test("self-id filter excludes only the exact task_id, not prefix matches", async
   assert.ok(toolNames.includes("task_other_something"), "unrelated task must remain");
 });
 
+test("temperature reaches the model: the tool loop is not left at the provider's chat default", async () => {
+  // At a provider's chat default a model emits its tool call as prose in
+  // `content`, which the loop cannot see — the turn then settles as a final
+  // answer having called nothing (#756). The value has to be on the request:
+  // a provider-side model default (e.g. an ollama Modelfile) does not apply
+  // to requests arriving over the API.
+  useLocal();
+  params.set("prompt", "hello");
+  params.set("temperature", "0");
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("hi"),
+  });
+
+  await runTask();
+
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  assert.equal(sent.temperature, 0);
+});
+
+test("a temperature outside 0-2 is refused rather than silently clamped", async () => {
+  useLocal();
+  params.set("prompt", "hello");
+  params.set("temperature", "7");
+
+  let threw = false;
+  try {
+    await runTask();
+  } catch (e) {
+    threw = true;
+    assert.ok(
+      String(e).includes("temperature"),
+      `error should name the offending param, got: ${e}`,
+    );
+  }
+  assert.ok(threw, "an out-of-range temperature must fail the run, not reach the provider");
+});
+
 test("refuses to run when dicode.task_id is empty", async () => {
   // A handshake regression that wipes task_id must not silently disable the
   // self-recursion guard above. The task throws a descriptive error so

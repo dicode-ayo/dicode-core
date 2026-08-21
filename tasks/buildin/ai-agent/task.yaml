@@ -106,6 +106,15 @@ params:
     type: number
     default: "4096"
     description: "max_tokens budget for each chat-completion call."
+  temperature:
+    type: number
+    default: "0"
+    description: >
+      Sampling temperature (0-2) for every chat-completion call, including
+      compaction summaries. Defaults to 0: this task's contract is a tool-use
+      loop, and at a provider's chat default a model emits the call as prose
+      the loop cannot see. Raise it for conversational overrides that want
+      range.
   git_branch_prefix:
     type: string
     default: "fix/"
