@@ -28,9 +28,19 @@ const (
 )
 
 // repoKey is the deduplication key for a git repository clone.
+//
+// AllowAuth partitions the cache by trust tier, not just (URL, Branch): an
+// allowAuth=false resolution (a ref discovered inside an already-resolved
+// sub-tree, #740) must never be served the directory an allowAuth=true
+// resolution populated with credentials. Without this, a nested, untrusted
+// entry could name the SAME (url, branch) as an operator-configured root ref
+// and read the daemon's already-authenticated clone straight out of the
+// cache — no token_env of its own required, defeating the auth gate in
+// resolveRef/gatedTokenEnv entirely. See TestEnsureClone_UntrustedCannotReuseAuthenticatedCache.
 type repoKey struct {
-	URL    string
-	Branch string
+	URL       string
+	Branch    string
+	AllowAuth bool
 }
 
 // ResolveFailure describes one taskset entry that failed to resolve, load, or
@@ -113,7 +123,13 @@ func (r *Resolver) DevMode() bool {
 // (can't even start resolving); per-entry failures always come back via the
 // []ResolveFailure slice with a nil error.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, []ResolveFailure, error) {
-	tsPath, err := r.resolveRef(ctx, tsRef, "", nil, "")
+	// tsRef is always operator-configured (dicode.yaml's source entry, or a
+	// sibling root ref a caller constructed directly) — never a ref discovered
+	// while resolving a tree — so it always honours ref.auth. The mustBeTask
+	// signal is irrelevant here: LoadTaskSet below already requires kind:
+	// TaskSet unconditionally, so a task.yaml misconfigured as the root ref
+	// fails there regardless.
+	tsPath, _, err := r.resolveRef(ctx, tsRef, "", nil, "", true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
 	}
@@ -148,7 +164,13 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	// ${TASK_SET_DIR} in task.yaml paths.
 	rootVars := withTaskSetDir(extraVars, tsPath)
 
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir, cloneRoot)
+	// allowAuth=true: entries declared directly in this call's taskset.yaml are
+	// the source's ROOT taskset — the file the operator pointed dicode.yaml (or
+	// a sibling root ref) at. That is operator-owned config, so a git entry's
+	// ref.auth.token_env is honoured. Anything resolveBody recurses into via a
+	// KindTaskSet entry is a resolved sub-tree, not operator-owned config, and
+	// resolveNestedRef always resolves it with allowAuth=false (#740).
+	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir, cloneRoot, true)
 }
 
 // withTaskSetDir returns a copy of base with VarTaskSetDir set to
@@ -175,6 +197,7 @@ func (r *Resolver) resolveBody(
 	extraVars map[string]string,
 	repoDir string,
 	cloneRoot string,
+	allowAuth bool,
 ) ([]*ResolvedTask, []ResolveFailure, error) {
 	// Deprecation warnings for removed precedence levels.
 	if defaultsNonEmpty(configDefaults) {
@@ -251,7 +274,7 @@ func (r *Resolver) resolveBody(
 			VarTaskSetRefDir: filepath.Dir(tsPath),
 		}
 
-		localPath, err := r.resolveRef(ctx, ref, tsPath, refVars, cloneRoot)
+		localPath, mustBeTask, err := r.resolveRef(ctx, ref, tsPath, refVars, cloneRoot, allowAuth)
 		if err != nil {
 			r.log.Warn("taskset: failed to resolve ref",
 				zap.String("entry", fullID), zap.Error(err))
@@ -263,6 +286,22 @@ func (r *Resolver) resolveBody(
 		if err != nil {
 			r.log.Warn("taskset: failed to detect kind",
 				zap.String("path", localPath), zap.Error(err))
+			failures = append(failures, ResolveFailure{ID: fullID, Error: err})
+			continue
+		}
+
+		// A ref whose configured path explicitly names "task.yaml" (as every
+		// entry taskset.AddTaskEntry writes does — see taskEntryRefPath) can
+		// legitimately be kind: Task or kind: PipelineTask, but never kind:
+		// TaskSet. Letting it resolve as a TaskSet would route an
+		// attacker-editable task.yaml into the KindTaskSet branch below —
+		// recursing into it with full ref-auth/entry-merge machinery instead of
+		// loading it as the leaf task its path declares it to be (#740). Treat
+		// that mismatch as a load failure, not a routing choice.
+		if mustBeTask && kind == KindTaskSet {
+			err := fmt.Errorf("ref path %q names task.yaml but %s declares kind TaskSet — a task ref must not resolve as a TaskSet", ref.Path, localPath)
+			r.log.Warn("taskset: task ref resolved to kind TaskSet; refusing",
+				zap.String("entry", fullID), zap.Error(err))
 			failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 			continue
 		}
@@ -347,6 +386,10 @@ func (r *Resolver) resolveBody(
 			if ref.IsGit() {
 				nestedCloneRoot = filepath.Dir(localPath)
 			}
+			// resolveNestedRef always resolves the sub-tree with allowAuth=false:
+			// this is a resolved TaskSet, not operator-owned config, regardless of
+			// whether the CURRENT level (this KindTaskSet entry's own ref, fetched
+			// above via r.resolveRef with the caller's allowAuth) was trusted.
 			nested, nestedFailures, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, nestedCloneRoot)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
@@ -381,10 +424,15 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 	}
 	// Pass nil for configDefaults: deprecation warnings are emitted once at the
 	// public Resolve entry point; nested sets do not re-emit them.
-	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars, repoDir, cloneRoot)
+	// allowAuth=false: a nested taskset is a resolved sub-tree, never
+	// operator-owned config, so its entries' git refs never carry auth (#740).
+	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars, repoDir, cloneRoot, false)
 }
 
-// resolveRef returns the absolute local path to the yaml file pointed to by ref.
+// resolveRef returns the absolute local path to the yaml file pointed to by ref,
+// and reports whether that path declares itself a task ref (its configured
+// path names "task.yaml" explicitly, so the resolved file must not be kind:
+// TaskSet — see the mustBeTask check in resolveBody, #740).
 // For git refs this may trigger a clone or pull.
 // parentTSPath is the absolute path of the parent taskset.yaml — used to resolve
 // relative paths in local refs against the parent's directory.
@@ -393,8 +441,16 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 // (e.g. the root Resolve call before repoDir is known).
 // cloneRoot, when non-empty, constrains local (non-git) refs: the resolved path
 // must remain within cloneRoot. Pass "" to skip the containment check.
-func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string, cloneRoot string) (string, error) {
+// allowAuth gates whether a git ref's ref.auth.token_env is honoured: only
+// true for refs declared in operator-owned config (dicode.yaml's source ref,
+// or an entry in a source's root taskset.yaml) — never for a ref discovered
+// while resolving an already-resolved sub-tree, where a writable source could
+// otherwise name any daemon env var as a credential to hand to a host of its
+// choosing (#740). When false, a git ref's token_env is ignored (logged, not
+// silently dropped) and the clone proceeds unauthenticated.
+func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string, cloneRoot string, allowAuth bool) (string, bool, error) {
 	path := expandRefPath(ref.Path, refVars)
+	mustBeTask := filepath.Base(path) == "task.yaml"
 
 	var resolved string
 	if !ref.IsGit() {
@@ -406,21 +462,38 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		// When inside a git-cloned source, local refs must stay within the clone root.
 		if cloneRoot != "" {
 			if err := containedPath(cloneRoot, resolved); err != nil {
-				return "", fmt.Errorf("ref path %q: %w", ref.Path, err)
+				return "", false, fmt.Errorf("ref path %q: %w", ref.Path, err)
 			}
 		}
 	} else {
 		branch := ref.effectiveBranch()
-		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv)
+		// ensureClone re-derives the effective token itself from (allowAuth,
+		// ref.Auth.TokenEnv) — it does not trust this call to have already
+		// gated it — so passing the raw TokenEnv here is safe regardless of
+		// what any other caller does. See ensureClone's doc comment.
+		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv, allowAuth)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		resolved = filepath.Clean(filepath.Join(localDir, path))
 		if err := containedPath(localDir, resolved); err != nil {
-			return "", fmt.Errorf("ref path %q: %w", ref.Path, err)
+			return "", false, fmt.Errorf("ref path %q: %w", ref.Path, err)
 		}
 	}
-	return resolveYAMLPath(resolved), nil
+	return resolveYAMLPath(resolved), mustBeTask, nil
+}
+
+// gatedTokenEnv decides whether a git ref's ref.auth.token_env is honoured.
+// tokenEnv is returned unchanged when allowAuth is true or the ref carries no
+// auth to begin with; otherwise it is stripped to "" and blocked reports true
+// so the caller can log what it dropped. Split out from resolveRef as a pure
+// function so the trust decision itself — not the clone it gates — is unit
+// testable (#740).
+func gatedTokenEnv(allowAuth bool, tokenEnv string) (effective string, blocked bool) {
+	if allowAuth || tokenEnv == "" {
+		return tokenEnv, false
+	}
+	return "", true
 }
 
 // containedPath reports whether target stays within root, rejecting both
@@ -472,21 +545,62 @@ func resolveYAMLPath(path string) string {
 	return path
 }
 
+// repoCloneDir returns the deterministic on-disk directory for (url, branch)
+// under the given trust tier. allowAuth=true reuses the same hash dicode has
+// always used (no on-disk migration for operator-configured sources).
+//
+// allowAuth=false hashes url and branch INDEPENDENTLY first, then combines
+// the two digests under a fixed domain-separation prefix, rather than
+// concatenating url+branch with an "@untrusted" suffix the way an earlier
+// version of this function did. Plain suffixing was not injective: an
+// attacker fully controls both fields of their own untrusted ref, so they
+// could choose an (url, branch) pair whose "url@branch@untrusted" string
+// reproduced an operator's real trusted "url@branch" seed byte-for-byte
+// whenever the operator's own branch name happened to end in "@untrusted"
+// (or, via a chosen url, in fewer contrived cases still) — landing both
+// tiers' clones in the SAME directory despite the different repoKey. Hashing
+// url and branch separately before combining removes that structural
+// overlap entirely: reproducing a trusted seed from the untrusted branch
+// would require a SHA-256 preimage, not a string-concatenation trick (#740
+// review).
+//
+// Note: the directory name below keeps only the first 8 bytes of the final
+// digest (h[:8], unchanged from the pre-#740 scheme), so the residual
+// cross-tier bound is actually a 64-bit truncated-digest collision rather
+// than a full SHA-256 preimage — infeasible for an attacker targeting one
+// specific operator directory, but worth stating precisely rather than
+// overclaiming full preimage resistance.
+func repoCloneDir(dataDir, url, branch string, allowAuth bool) string {
+	var h [32]byte
+	if allowAuth {
+		h = sha256.Sum256([]byte(url + "@" + branch))
+	} else {
+		hu := sha256.Sum256([]byte(url))
+		hb := sha256.Sum256([]byte(branch))
+		h = sha256.Sum256([]byte(fmt.Sprintf("dicode-untrusted-clone-v1:%x:%x", hu, hb)))
+	}
+	return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+}
+
 // Pull clones or fetches the latest commits for the given git ref and returns
 // the local directory. It also updates the clone cache so subsequent Resolve
 // calls can find the directory without re-cloning.
 // For local refs it is a no-op and returns filepath.Dir(ref.Path).
+//
+// Pull is only ever called by callers holding an operator-configured ref
+// (the source's own root ref — see pkg/taskset/source.go), so it always
+// populates the allowAuth=true (trusted) cache partition, matching what a
+// root-level resolveRef call for the same (url, branch) would use.
 func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	if !ref.IsGit() {
 		return filepath.Dir(ref.Path), nil
 	}
 	branch := ref.effectiveBranch()
-	h := sha256.Sum256([]byte(ref.URL + "@" + branch))
-	dir := filepath.Join(r.dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+	dir := repoCloneDir(r.dataDir, ref.URL, branch, true)
 	if err := cloneOrPull(ctx, dir, ref.URL, branch, ref.Auth.TokenEnv); err != nil {
 		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, branch, err)
 	}
-	key := repoKey{URL: ref.URL, Branch: branch}
+	key := repoKey{URL: ref.URL, Branch: branch, AllowAuth: true}
 	r.mu.Lock()
 	r.clones[key] = dir
 	r.mu.Unlock()
@@ -497,8 +611,16 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 // Within a single resolution pass it deduplicates: once a repo is cloned the
 // cached path is returned without a second network round-trip.
 // Use Pull to force a fetch from the remote.
-func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string) (string, error) {
-	key := repoKey{URL: url, Branch: branch}
+//
+// allowAuth also selects which trust-tier cache partition (and physical
+// directory, via repoCloneDir) this call reads and writes — see repoKey's
+// doc comment. ensureClone re-derives the effective token itself via
+// gatedTokenEnv rather than trusting the caller to have already gated
+// tokenEnv against the same allowAuth: passing the ref's raw, ungated
+// auth.token_env alongside allowAuth=false is always safe, by construction,
+// regardless of what any other call site does or how it evolves (#740).
+func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string, allowAuth bool) (string, error) {
+	key := repoKey{URL: url, Branch: branch, AllowAuth: allowAuth}
 
 	r.mu.Lock()
 	if dir, ok := r.clones[key]; ok {
@@ -507,12 +629,15 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	}
 	r.mu.Unlock()
 
-	// Deterministic directory name from url+branch so re-adding the same pair
-	// reuses the existing clone on disk.
-	h := sha256.Sum256([]byte(url + "@" + branch))
-	dir := filepath.Join(r.dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+	effectiveTokenEnv, blocked := gatedTokenEnv(allowAuth, tokenEnv)
+	if blocked {
+		r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
+			zap.String("url", url))
+	}
 
-	if err := cloneOrPull(ctx, dir, url, branch, tokenEnv); err != nil {
+	dir := repoCloneDir(r.dataDir, url, branch, allowAuth)
+
+	if err := cloneOrPull(ctx, dir, url, branch, effectiveTokenEnv); err != nil {
 		return "", fmt.Errorf("clone %s@%s: %w", url, branch, err)
 	}
 
@@ -524,13 +649,25 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 }
 
 // ClonedRepos returns a snapshot of all (url, branch) → localDir mappings.
-// Used by tests and diagnostics.
+// Used by tests and diagnostics. A (url, branch) pair resolved under both
+// trust tiers appears twice, prefixed "untrusted:" for the allowAuth=false
+// entry, since the two never share a directory. The marker is prefixed, not
+// suffixed, so it can never be produced by a url/branch value itself — a
+// suffix (e.g. "@untrusted") is a url/branch-shaped string an operator's own
+// branch name could coincidentally end in, which would silently collide two
+// distinct entries into one map key here (a diagnostics-only misreporting,
+// since ClonedRepos has no production caller — not the trust-boundary break
+// repoCloneDir's own hashing was fixed against for the same reason).
 func (r *Resolver) ClonedRepos() map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make(map[string]string, len(r.clones))
 	for k, v := range r.clones {
-		out[k.URL+"@"+k.Branch] = v
+		name := k.URL + "@" + k.Branch
+		if !k.AllowAuth {
+			name = "untrusted:" + name
+		}
+		out[name] = v
 	}
 	return out
 }
