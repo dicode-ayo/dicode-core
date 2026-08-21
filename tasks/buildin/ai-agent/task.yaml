@@ -4,8 +4,8 @@ name: "AI Agent"
 description: >
   Generic AI chat agent. Talks to any OpenAI-compatible chat completions
   endpoint (OpenAI, Anthropic, Ollama, LM Studio, Groq, OpenRouter, Together,
-  …), lets the model call other dicode tasks as TOOLS, and loads markdown
-  SKILLS into the system prompt for domain context.
+  …), lets the model call other dicode tasks as TOOLS, and gives it markdown
+  SKILLS to look up for domain context.
 
   This buildin ships locked down: no network, no provider defaults, no
   provider API keys in env. Everything must be provided by the caller or
@@ -38,14 +38,25 @@ params:
     description: "Comma-separated dicode task ids the agent may call as tools. Empty = all permitted tasks except the ai-agent family."
 
   # ─── Skills ────────────────────────────────────────────────────────────────
-  # Skills are markdown files providing domain context or instructions that
-  # get eager-loaded into the system prompt. Names match filenames under the
-  # skills directory without .md. E.g. skills="dicode-basics,github" loads
-  # dicode-basics.md and github.md.
+  # Skills are markdown files providing domain context or instructions. Names
+  # match filenames under the skills directory without .md. E.g.
+  # skills="dicode-basics,github" makes dicode-basics.md and github.md
+  # available. How they reach the model is skills_mode's job.
   skills:
     type: string
     default: ""
-    description: "Comma-separated skill md file names (without .md) to concatenate into the system prompt."
+    description: "Comma-separated skill md file names (without .md) to make available to the model."
+  skills_mode:
+    type: string
+    default: "index"
+    description: >
+      How loaded skills reach the model. "index" (the default) puts each
+      skill's name and frontmatter description in the system prompt and hands
+      the bodies out through the dicode_read_skill tool. "eager" concatenates
+      every body into the system prompt on every turn — a skill's full text
+      outweighs this task's own system_prompt, and a model that reads it
+      imitates its examples rather than following its instructions, so prefer
+      "index" unless the model cannot be relied on to call a tool first.
 
   # Directory the `skills` param resolves against. The default is populated
   # at task-load time via template expansion: ${TASK_SET_DIR} is the dir of
@@ -79,7 +90,7 @@ params:
       You are a helpful assistant embedded in dicode. You can call other
       dicode tasks as tools. Prefer tools when the user asks for data or
       actions; answer directly when they ask a general question.
-    description: "System prompt prepended to every conversation. Loaded skills are appended after this."
+    description: "Operator system prompt, in every conversation. Under skills_mode index the skill index precedes it, so these instructions are the last thing the model reads before the request; under eager the skill bodies follow it."
   max_history_tokens:
     type: number
     default: "80000"

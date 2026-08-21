@@ -91,6 +91,21 @@ function parseTemperature(raw: string | null): number {
   return n;
 }
 
+type SkillsMode = "index" | "eager";
+
+// An unrecognised skills_mode throws rather than falling back to a default: the
+// two modes differ in what the model is told, and silently picking one would
+// surface as bad output rather than as a configuration error.
+function parseSkillsMode(raw: string | null): SkillsMode {
+  const v = (raw ?? "").trim().toLowerCase() || "index";
+  if (v !== "index" && v !== "eager") {
+    throw new Error(
+      `ai-agent: param skills_mode must be "index" or "eager", got ${JSON.stringify(raw)}`,
+    );
+  }
+  return v;
+}
+
 // Map a dicode param type to a JSON Schema type. Unknown types fall back
 // to "string" so the tool schema is always valid even for param types we
 // don't explicitly recognise.
@@ -153,14 +168,21 @@ function paramsToJsonSchema(
 // a boundary, so anything of that shape lives here.
 interface BuiltinConfig {
   gitBranchPrefix: string;
+  skills: Record<string, Skill>;
 }
 
 interface BuiltinTool {
   name: string;
-  cap: string;
   description: string;
   parameters: Record<string, unknown>;
   run(dicode: Dicode, args: Record<string, unknown>, cfg: BuiltinConfig): Promise<unknown>;
+}
+
+// A built-in offered only when the run's grant carries `cap`. Built-ins whose
+// gate is something other than a dicode capability are plain BuiltinTools
+// registered on their own terms.
+interface CapBuiltinTool extends BuiltinTool {
+  cap: string;
 }
 
 type SchemaProps = Record<string, Record<string, unknown>>;
@@ -194,7 +216,7 @@ function argLimit(args: Record<string, unknown>, key: string, fallback: number):
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-const BUILTIN_TOOLS: BuiltinTool[] = [
+const BUILTIN_TOOLS: CapBuiltinTool[] = [
   {
     name: "dicode_list_tasks",
     cap: "tasks.list",
@@ -349,7 +371,7 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
 
 // grantedBuiltins selects the built-ins this run may actually call. An empty
 // `caps` — a daemon too old to report them — yields none.
-function grantedBuiltins(caps: string[] | undefined): BuiltinTool[] {
+function grantedBuiltins(caps: string[] | undefined): CapBuiltinTool[] {
   const granted = new Set(caps ?? []);
   return BUILTIN_TOOLS.filter((t) => granted.has(t.cap));
 }
@@ -415,49 +437,172 @@ async function compactIfNeeded(
   session.messages = recent;
 }
 
+// ── skills ────────────────────────────────────────────────────────────────────
+//
+// A skill is a markdown file under skills_dir, named by the `skills` param.
+// Its YAML frontmatter carries the one-line description the index advertises;
+// the body is what dicode_read_skill hands back.
+
 // Whitelist for skill file basenames: alphanumerics, dash, underscore, dot
 // (for sub-extensions like "github.push"). No slashes, no leading dot, no
 // empty string, no path traversal sequences.
 const SKILL_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.\-]*$/;
 
-async function loadSkills(skillsDir: string, names: string[]): Promise<string> {
-  if (names.length === 0) return "";
+// The index carries one line per skill, so a description long enough to wrap
+// defeats the point of indexing at all.
+const SKILL_DESCRIPTION_MAX = 300;
+
+interface Skill {
+  name: string;
+  description: string;
+  body: string;
+  // Set when the file could not be read. The skill still appears in the index
+  // and still answers dicode_read_skill — a model told a skill exists and then
+  // silently denied it burns a turn guessing at what it said.
+  error?: string;
+}
+
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---[^\S\r\n]*(?:\r?\n|$)/;
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1).trimEnd() + "…";
+}
+
+// Read one top-level key out of a skill's YAML frontmatter. The frontmatter is
+// a flat key/value block and this needs exactly two of its keys, so it reads
+// them directly rather than pulling in a YAML parser. A folded or literal block
+// scalar continues onto the following lines, which are joined back into one.
+function frontmatterValue(block: string, key: string): string {
+  const lines = block.split(/\r?\n/);
+  const head = new RegExp(`^${key}:[^\\S\\r\\n]*(.*)$`);
+  for (let i = 0; i < lines.length; i++) {
+    const m = head.exec(lines[i]);
+    if (!m) continue;
+    // A lone block indicator ("|", ">-", …) means the value starts on the next
+    // line; anything else on that line is the value itself.
+    const parts = [/^[>|][-+0-9]*$/.test(m[1].trim()) ? "" : m[1]];
+    for (let j = i + 1; j < lines.length && !/^[A-Za-z_][\w.\-]*[^\S\r\n]*:/.test(lines[j]); j++) {
+      parts.push(lines[j].trim());
+    }
+    return parts.join(" ").trim();
+  }
+  return "";
+}
+
+// Fallback description for a skill with no frontmatter: its first line of prose,
+// heading markers stripped.
+function firstProse(body: string): string {
+  for (const line of body.split(/\r?\n/)) {
+    const t = line.replace(/^#+\s*/, "").trim();
+    if (t) return t;
+  }
+  return "";
+}
+
+function parseSkill(name: string, text: string): Skill {
+  const m = FRONTMATTER_RE.exec(text);
+  const body = (m ? text.slice(m[0].length) : text).trim();
+  const description = (m ? frontmatterValue(m[1], "description") : "") || firstProse(body);
+  return { name, description, body };
+}
+
+async function loadSkills(skillsDir: string, names: string[]): Promise<Skill[]> {
+  if (names.length === 0) return [];
   if (!skillsDir) {
     // Loud: a request for skills with no directory configured is almost
-    // certainly a misconfiguration, not a user expectation. The model
-    // also sees a clear marker so it doesn't hallucinate around it.
+    // certainly a misconfiguration, not a user expectation.
     console.error(
       `ai-agent: skills requested but skills_dir is empty; nothing loaded: ${names.join(", ")}`,
     );
-    return `# skills\n(skills_dir is empty; nothing loaded: ${names.join(", ")})`;
+    return names.map((name) => ({ name, description: "", body: "", error: "skills_dir is empty" }));
   }
   const base = skillsDir.endsWith("/") ? skillsDir : skillsDir + "/";
-  const chunks: string[] = [];
+  const skills: Skill[] = [];
   for (const name of names) {
     // Defensive: skill names must be plain filenames. Reject path separators,
     // traversal sequences, empty strings, and anything starting with '.'
     // (blocks `.env`-style probes).
     if (!SKILL_NAME_RE.test(name) || name.includes("..")) {
       console.error(`ai-agent: rejected invalid skill name ${JSON.stringify(name)}`);
-      chunks.push(`# skill:${name}\n(rejected: invalid skill name)\n`);
+      skills.push({ name, description: "", body: "", error: "invalid skill name" });
       continue;
     }
     const path = `${base}${name}.md`;
     try {
-      const body = await Deno.readTextFile(path);
-      chunks.push(`# skill:${name}\n${body.trim()}`);
+      skills.push(parseSkill(name, await Deno.readTextFile(path)));
     } catch (e) {
       // Log the full path so operators can distinguish a user typo
       // (wrong name) from a permissions/path misconfig (wrong skills_dir).
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`ai-agent: failed to load skill ${name} from ${path}: ${msg}`);
-      chunks.push(
-        `# skill:${name}\n(not loaded: ${msg})`,
-      );
+      // The reason reaches the model, so it says which of the two it was
+      // without the host path the raw error carries. Host paths are not the
+      // model's to see — the same reason sources.list strips them and
+      // set_dev_mode withholds local_path.
+      const reason = e instanceof Deno.errors.NotFound ? "no such skill file" : "unreadable";
+      skills.push({ name, description: "", body: "", error: reason });
     }
   }
-  return chunks.join("\n\n");
+  return skills;
 }
+
+// Every body inline, the shape skills_mode "eager" keeps.
+function skillsEagerBlob(skills: Skill[]): string {
+  return skills
+    .map((s) => `# skill:${s.name}\n${s.error ? `(not loaded: ${s.error})` : s.body}`)
+    .join("\n\n");
+}
+
+const READ_SKILL_TOOL_NAME = "dicode_read_skill";
+
+// Name and description per skill, bodies behind dicode_read_skill.
+function skillsIndexBlob(skills: Skill[]): string {
+  const lines = skills.map((s) =>
+    `- ${s.name} — ${
+      s.error ? `(not loaded: ${s.error})` : clip(s.description || "(no description)", SKILL_DESCRIPTION_MAX)
+    }`
+  );
+  return [
+    "# Skills",
+    "",
+    `These skills carry the rules, schemas and workflows this daemon expects you to`,
+    `follow. Call ${READ_SKILL_TOOL_NAME} for every skill whose subject touches the`,
+    `request and read what it returns before you write a file or call another tool.`,
+    `Their contents are not guessable from these descriptions.`,
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+// Skills are advertised and fetched on demand rather than spliced into every
+// request. A skill's full text outweighs the operator's own system prompt —
+// measured on an 8B model, eager-loading 22 KB of skill took a correct task
+// manifest from 8/8 to 0/8 while leaving the tool-call protocol untouched: the
+// model imitates the skill's examples instead of following its instructions
+// (#757). The cost is also per-turn, since the system prompt is rebuilt on
+// every iteration of the tool loop.
+//
+// Unlike BUILTIN_TOOLS this one is not gated on a dicode capability: it hands
+// back files the operator's own `skills` param already named, which eager mode
+// puts in the prompt unconditionally.
+const READ_SKILL_TOOL: BuiltinTool = {
+  name: READ_SKILL_TOOL_NAME,
+  description:
+    "Read the full text of one of the skills listed under '# Skills' in the " +
+    "system prompt. Skills carry the schemas and mandatory workflows for this " +
+    "daemon; read the relevant one before writing files or calling other tools.",
+  parameters: objectSchema({
+    name: { type: "string", description: "Skill name exactly as listed under '# Skills'." },
+  }, ["name"]),
+  // deno-lint-ignore require-await
+  run: async (_dicode, args, cfg) => {
+    const name = argStr(args, "name");
+    const skill = cfg.skills[name];
+    if (!skill) return { error: `unknown skill: ${name}`, available: Object.keys(cfg.skills) };
+    if (skill.error) return { error: `skill ${name} not loaded: ${skill.error}` };
+    return { name: skill.name, description: skill.description, body: skill.body };
+  },
+};
 
 interface NotConfiguredResponse {
   session_id: string;
@@ -496,6 +641,7 @@ interface AgentRuntime {
   maxToolIterations: number;
   responseMaxTokens: number;
   temperature: number;
+  skillsMode: SkillsMode;
 }
 
 type ResolveResult =
@@ -586,12 +732,19 @@ async function resolveAgentRuntime(
     apiKey = fromEnv;
   }
 
-  // Load skills eagerly and splice them into the system prompt. The
-  // directory comes from the skills_dir param, whose default is populated
-  // by template expansion at task-load time (${TASK_SET_DIR}/../skills by
-  // default; see docs/task-template-vars.md).
+  // Load the skills named by the `skills` param. The directory comes from the
+  // skills_dir param, whose default is populated by template expansion at
+  // task-load time (${TASK_SET_DIR}/../skills by default; see
+  // docs/task-template-vars.md). What reaches the system prompt is either the
+  // index or every body, per skills_mode.
   const skillsDir = (await params.get("skills_dir")) ?? "";
-  const skillsBlob = await loadSkills(skillsDir, skillNames);
+  const skillsMode = parseSkillsMode(await params.get("skills_mode"));
+  const skills = await loadSkills(skillsDir, skillNames);
+  const skillsBlob = skills.length === 0
+    ? ""
+    : skillsMode === "eager"
+    ? skillsEagerBlob(skills)
+    : skillsIndexBlob(skills);
 
   const gitBranchPrefix = (await params.get("git_branch_prefix")) ?? "";
 
@@ -636,13 +789,29 @@ async function resolveAgentRuntime(
     });
   }
 
+  // The index is only actionable with the lookup tool alongside it, so the two
+  // are registered together. Eager mode already carries every body in the
+  // prompt and offering the tool there would just re-send them.
+  if (skillsMode === "index" && skills.length > 0) {
+    builtins[READ_SKILL_TOOL.name] = READ_SKILL_TOOL;
+    tools.push({
+      type: "function" as const,
+      function: {
+        name: READ_SKILL_TOOL.name,
+        description: READ_SKILL_TOOL.description,
+        parameters: READ_SKILL_TOOL.parameters,
+      },
+    });
+  }
+
   // Counts come from the built list, so the line reports what the model was
   // actually handed.
   console.log(
     `ai-agent[${new Date().toISOString()}]: task=${dicode.task_id} ` +
       `run=${dicode.run_id.slice(0, 8)} model=${model} baseURL=${baseURL} ` +
       `task_tools=${filtered.length} builtins=${Object.keys(builtins).length} ` +
-      `skills=${skillNames.length}`,
+      `skills=${skills.length} skills_mode=${skillsMode} ` +
+      `skills_chars=${skillsBlob.length}`,
   );
 
   return {
@@ -655,7 +824,10 @@ async function resolveAgentRuntime(
       tools,
       toolNameToTaskId,
       builtins,
-      builtinCfg: { gitBranchPrefix },
+      builtinCfg: {
+        gitBranchPrefix,
+        skills: Object.fromEntries(skills.map((s) => [s.name, s])),
+      },
       compactionCfg: {
         maxHistoryTokens,
         keepTurns: compactionKeepTurns,
@@ -666,6 +838,7 @@ async function resolveAgentRuntime(
       maxToolIterations,
       responseMaxTokens,
       temperature,
+      skillsMode,
     },
   };
 }
@@ -680,7 +853,7 @@ async function runAgentTurn(
   rt: AgentRuntime,
   dicode: Dicode,
 ): Promise<string> {
-  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens, temperature } = rt;
+  const { client, model, systemPromptBase, skillsBlob, skillsMode, tools, toolNameToTaskId, builtins, builtinCfg, compactionCfg, maxToolIterations, responseMaxTokens, temperature } = rt;
 
   // Append user turn
   session.messages.push({ role: "user", content: message });
@@ -702,8 +875,16 @@ async function runAgentTurn(
         );
       }
 
-      const parts: string[] = [systemPromptBase];
-      if (skillsBlob) parts.push(skillsBlob);
+      // The index goes before the operator's own prompt, so the operator's
+      // instructions are the last thing the model reads before the request.
+      // Measured on an 8B model, n=6, everything else held fixed: the same
+      // index placed after took structured tool calls from 6/6 to 0/6 — the
+      // model narrated the plan it had just been told to follow instead of
+      // executing it. Eager bodies keep their position, so opting back into
+      // eager reproduces the prompt it produced before.
+      const parts: string[] = skillsMode === "index"
+        ? [skillsBlob, systemPromptBase]
+        : [systemPromptBase, skillsBlob];
       if (session.summary) parts.push(`Prior conversation summary:\n${session.summary}`);
       const systemPrompt = parts.filter(Boolean).join("\n\n");
 

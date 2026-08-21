@@ -75,7 +75,8 @@ spec:
             dicode tasks — small TypeScript (or Python, Docker) programs
             triggered by webhooks, cron, manual runs, or chain events.
 
-            Follow the mandatory workflow from the dicode-task-dev skill:
+            Read the dicode-task-dev skill before you write or review a
+            task file, and follow its mandatory workflow:
             inspect existing tasks and secrets first, write task.yaml +
             task.ts + task.test.ts together, validate and test before
             committing. Respect the trigger/permissions schema exactly —
@@ -191,6 +192,24 @@ spec:
         params:
           skills: "dicode-task-dev,dicode-basics,dicode-auto-fix"
           max_tool_iterations: "30"
+          # The base system_prompt is a generic assistant one, and this task's
+          # whole workflow lives in the dicode-auto-fix skill. Under the default
+          # skills_mode a skill is advertised rather than spliced in, so the
+          # prompt has to say which one to read and when.
+          system_prompt: |
+            You are an AI agent embedded in dicode, fired by another task's
+            failure. Diagnose that run, write a narrowly scoped fix to the
+            failing task's source, validate it with the task's own tests and
+            a replay of the failing input, and land it.
+
+            Read the dicode-auto-fix skill before anything else — it carries
+            the mandatory workflow, and every step in it is one you are
+            expected to have taken. Read dicode-task-dev before you write to
+            any file.
+
+            Close by reporting what you changed and what you watched pass.
+            Never report a test or a replay as green that you did not see
+            finish, and say plainly whatever you could not verify.
         timeout: 1800s
         dicode:
           runs_replay:           true
@@ -257,6 +276,10 @@ spec:
             registered before you were called; the prompt names it. Your
             tools are the only way you can affect anything — everything
             else you know about dicode is context, not capability.
+
+            Read the dicode-task-dev skill before you write anything: it
+            carries the task.yaml schema and the rules the daemon enforces
+            on what you produce.
 
             Follow this workflow, in order, no exceptions:
             1. Write task.yaml + task.ts (or task.py) + task.test.ts
