@@ -643,8 +643,14 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 
 // ClonedRepos returns a snapshot of all (url, branch) → localDir mappings.
 // Used by tests and diagnostics. A (url, branch) pair resolved under both
-// trust tiers appears twice, suffixed "@untrusted" for the allowAuth=false
-// entry, since the two never share a directory.
+// trust tiers appears twice, prefixed "untrusted:" for the allowAuth=false
+// entry, since the two never share a directory. The marker is prefixed, not
+// suffixed, so it can never be produced by a url/branch value itself — a
+// suffix (e.g. "@untrusted") is a url/branch-shaped string an operator's own
+// branch name could coincidentally end in, which would silently collide two
+// distinct entries into one map key here (a diagnostics-only misreporting,
+// since ClonedRepos has no production caller — not the trust-boundary break
+// repoCloneDir's own hashing was fixed against for the same reason).
 func (r *Resolver) ClonedRepos() map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -652,7 +658,7 @@ func (r *Resolver) ClonedRepos() map[string]string {
 	for k, v := range r.clones {
 		name := k.URL + "@" + k.Branch
 		if !k.AllowAuth {
-			name += "@untrusted"
+			name = "untrusted:" + name
 		}
 		out[name] = v
 	}
