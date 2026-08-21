@@ -563,6 +563,13 @@ func resolveYAMLPath(path string) string {
 // overlap entirely: reproducing a trusted seed from the untrusted branch
 // would require a SHA-256 preimage, not a string-concatenation trick (#740
 // review).
+//
+// Note: the directory name below keeps only the first 8 bytes of the final
+// digest (h[:8], unchanged from the pre-#740 scheme), so the residual
+// cross-tier bound is actually a 64-bit truncated-digest collision rather
+// than a full SHA-256 preimage — infeasible for an attacker targeting one
+// specific operator directory, but worth stating precisely rather than
+// overclaiming full preimage resistance.
 func repoCloneDir(dataDir, url, branch string, allowAuth bool) string {
 	var h [32]byte
 	if allowAuth {
