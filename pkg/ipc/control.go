@@ -504,6 +504,8 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	out.Reply = edit.Reply
 	out.RunID = edit.RunID
 	out.Suspended = edit.Suspended
+	out.FilesChanged = edit.FilesChanged
+	out.WroteNothing = edit.WroteNothing
 	return out, nil
 }
 
@@ -591,6 +593,20 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		params["session_id"] = res.AgentSessionID
 	}
 
+	// The agent's reply is its own account of its work, and nothing else in
+	// the chain compares that account against disk — a turn that never called
+	// the write tool settles exactly like one that did the work (#755).
+	// Snapshotting the target directory around the turn is the one check that
+	// holds regardless of which agent backend cfg.AI.CreateTask points at. A
+	// snapshot that cannot be taken leaves the post-condition unevaluated
+	// rather than condemning an otherwise good turn.
+	before, snapErr := snapshotTaskDir(res.TaskDir)
+	if snapErr != nil {
+		cs.log.Warn("cannot snapshot task directory; the turn's disk post-condition will not be evaluated",
+			zap.String("session", res.SessionID), zap.String("task", res.TaskID),
+			zap.String("dir", res.TaskDir), zap.Error(snapErr))
+	}
+
 	runID, err := cs.engine.FireManual(ctx, cs.defaultCreateTask, params)
 	if err != nil {
 		return out, err
@@ -643,6 +659,23 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 			// handleTaskEdit doc comment above).
 			cs.log.Warn("failed to persist agent session id for authoring session",
 				zap.String("session", res.SessionID), zap.Error(uerr))
+		}
+	}
+
+	if snapErr == nil {
+		after, aerr := snapshotTaskDir(res.TaskDir)
+		if aerr != nil {
+			cs.log.Warn("cannot re-snapshot task directory; the turn's disk post-condition was not evaluated",
+				zap.String("session", res.SessionID), zap.String("task", res.TaskID),
+				zap.String("dir", res.TaskDir), zap.Error(aerr))
+		} else {
+			out.FilesChanged = changedTaskFiles(before, after)
+			out.WroteNothing = len(out.FilesChanged) == 0
+			if out.WroteNothing {
+				cs.log.Warn("authoring turn wrote no files",
+					zap.String("session", res.SessionID), zap.String("task", res.TaskID),
+					zap.String("dir", res.TaskDir), zap.String("run", run.RunID))
+			}
 		}
 	}
 	return out, nil
