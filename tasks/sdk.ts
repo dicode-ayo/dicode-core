@@ -26,6 +26,7 @@ export interface Output {
   (value: Record<string, string>, opts: SecretOutputOptions): Promise<void>;
   html(content: string, opts?: { data?: unknown }): Promise<void>;
   text(content: string): Promise<void>;
+  json(value: unknown): Promise<void>;
   image(mime: string, content: string): Promise<void>;
   file(name: string, content: string, mime?: string): Promise<void>;
 }

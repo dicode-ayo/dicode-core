@@ -130,21 +130,17 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
   -d '{"prompt":"In one sentence, what is dicode?"}'
 ```
 
-The response includes a `session_id` you can pass back on the next call:
-
-```sh
-curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
-  -b cookies.txt \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"And how does it work?","session_id":"sess-..."}'
-```
+Each such call is a **fresh Claude session** — the `session_id` in the response
+is a handle, not a continuation token, and posting it back does not resume
+anything. Multi-turn conversation lives on the chat loop: POST with no `prompt`
+to open it, and drive the turns with `dicode resume`.
 
 ## Params
 
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `prompt` | string | required | User message. |
-| `session_id` | string | `""` | Continue an earlier conversation. Empty = new. |
+| `session_id` | string | `""` | Accepted but unused — one-shot calls are stateless. |
 | `model` | string | `""` | E.g. `sonnet`, `opus`. Empty = CLI default. |
 | `system_prompt` | string | `""` | Appended via `--append-system-prompt`. |
 | `cli_path` | string | `""` | Override binary path. Empty = `CLAUDE_CLI_PATH` env, then `PATH` lookup. |
@@ -182,30 +178,33 @@ startup; the agent task picks up the secret without further setup.
 {
   "ok": true,
   "reply": "...",                    // model's text
-  "session_id": "<uuid>",            // dicode-side id, pass back for continuation
+  "session_id": "<uuid>",            // dicode-side handle for this call; does not resume
   "model": "claude-sonnet-4",
   "total_cost_usd": 0.0023,          // cumulative across the conversation; subscription users get 0
   "usage": { /* raw CLI usage object */ }
 }
 ```
 
-On failure (`ok: false`) the `error` field carries the reason. The OAuth token
-is redacted before being included in any error string, even if the underlying
-CLI ever logs it.
+A turn that cannot run is a **failed run**, not a green one carrying an error
+string: the task publishes `{ "ok": false, "error": "..." }` as the run's output
+— so a webhook caller still reads the envelope, over HTTP 500 — and then throws.
+The OAuth token is redacted before being included in any error string, even if
+the underlying CLI ever logs it.
 
 ### Session-id mapping
 
 The `session_id` in the response is a **dicode-side UUID**, not the Claude CLI's
-internal id. The task stores `kv["claude:<dicode_uuid>"] = <claude_cli_session_id>`
-and resolves it via `--resume` on subsequent calls. Mirrors `buildin/ai-agent`'s
-session shape so the same chat UI shape works for both presets, and decouples
-the wire format from any future change in Claude's session-id format.
+internal id. One-shot calls are stateless — the id keys that call's workdir and
+is echoed back as a handle. The chat loop carries the CLI's own id in its
+suspend state and hands it to `--resume`. Mirrors `buildin/ai-agent`'s session
+shape so the same chat UI works for both presets, and decouples the wire format
+from any future change in Claude's session-id format.
 
 ## Rate limits
 
 Calls count against the same 5-hour rate windows as interactive Claude Code
 use. There's no per-token charge but exceeding the subscription quota returns
-an error you'll see propagated back as `ok: false`.
+an error you'll see as a failed run whose output is the `ok: false` envelope.
 
 ## Using with the auto-fix loop
 

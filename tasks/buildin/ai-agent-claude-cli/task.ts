@@ -16,11 +16,12 @@
 //     A blank message ends it.
 //
 // Logging: console.error / console.log are captured by the runtime as
-// the run's stderr/stdout log entries. Error returns log to console.error
-// so operators can see what went wrong even when the run exits 0 (returns
-// a value, not throws).
+// the run's stderr/stdout log entries.
+//
+// Failure: a turn that cannot run publishes { ok: false, error } as the run's
+// output and throws — see fail().
 
-import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import type { Dicode, DicodeSdk, Output } from "../../sdk.ts";
 import { parse as parseYaml } from "jsr:@std/yaml@1";
 import { chatStart, chatTurn, decideEntryMode, isChatEnd, isValidSessionId, resolveSessionId, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
 
@@ -48,21 +49,29 @@ interface ClaudeResponse {
 interface SDK {
     params: Params;
     dicode: Dicode;
+    output: Output;
 }
 
-// The outcome of one Claude turn. Success carries the reply and the CLI's new
-// session id (the caller decides where to persist it); failure carries a
-// redacted error already logged via fail().
-type TurnResult =
-    | { ok: true; reply: string; claudeSessionId: string; model: string; total_cost_usd: number; usage: unknown }
-    | { ok: false; error: string };
+// The outcome of one Claude turn: the reply plus the CLI's new session id (the
+// caller decides where to persist it). Only a successful turn returns — a
+// failed one throws out of fail() — so there is no failure variant to check.
+interface TurnResult {
+    reply: string;
+    claudeSessionId: string;
+    model: string;
+    total_cost_usd: number;
+    usage: unknown;
+}
 
-function fail(error: string): { ok: false; error: string } {
-    // Surface in the run log as well — return-value-only errors are
-    // invisible in the dashboard otherwise (the run exits 0 because we
-    // returned a value rather than throwing).
+// fail ends the run. A turn that could not run is terminal: no caller continues
+// without a reply. The { ok: false, error } envelope still reaches a webhook
+// caller — the daemon captures output.json before the non-zero exit — while the
+// throw is what makes the engine record a failed run rather than a successful
+// one carrying an error string. `error` is already redacted by the caller.
+async function fail(output: Output, error: string): Promise<never> {
     console.error("ai-agent-claude-cli: " + error);
-    return { ok: false, error };
+    await output.json({ ok: false, error });
+    throw new Error(error);
 }
 
 // Claude's built-in filesystem/exec/network/agent tools — never dicode's
@@ -118,7 +127,7 @@ export function buildClaudeArgs(opts: {
     return args;
 }
 
-export default async function main({ params, dicode }: SDK) {
+export default async function main({ params, dicode, output }: SDK) {
     const prompt = (await params.get("prompt")) ?? "";
 
     if (decideEntryMode(prompt) === "chat-start") {
@@ -131,7 +140,7 @@ export default async function main({ params, dicode }: SDK) {
         return; // unreachable — suspend() never returns
     }
 
-    return await oneShotTurn({ prompt, params });
+    return await oneShotTurn({ prompt, params, output });
 }
 
 // The Claude-side state carried across chat turns: the CLI session id (drives
@@ -146,7 +155,7 @@ export const steps = {
     // suspend/resume loop; runTurn here is just the Claude invocation, and onEnd
     // reports the CLI session id carried in state when a blank message ends it.
     turn(ctx: DicodeSdk) {
-        const { params } = ctx;
+        const { params, output } = ctx;
         return chatTurn(
             ctx,
             async ({ message, state }) => {
@@ -179,8 +188,8 @@ export const steps = {
                     priorClaudeSessionId,
                     workdirKey: chatId,
                     params,
+                    output,
                 });
-                if (!turn.ok) return turn;
                 return { ok: true, reply: turn.reply, state: { claudeSessionId: turn.claudeSessionId, chatId } };
             },
             (state) => ({
@@ -200,7 +209,7 @@ export const steps = {
 // --resume); multi-turn conversation lives on the chat loop. The Claude
 // invocation itself is delegated to runClaudeTurn, shared with the chat loop.
 async function oneShotTurn(
-    { prompt, params }: { prompt: string; params: Params },
+    { prompt, params, output }: { prompt: string; params: Params; output: Output },
 ): Promise<unknown> {
     // A fresh id keys the per-invocation workdir and is echoed back as the
     // handle; it threads no state, so a new one per call is correct.
@@ -211,8 +220,8 @@ async function oneShotTurn(
         priorClaudeSessionId: "",
         workdirKey: sessionId,
         params,
+        output,
     });
-    if (!turn.ok) return turn;
 
     return {
         ok:             true,
@@ -265,8 +274,9 @@ async function runClaudeTurn(opts: {
     priorClaudeSessionId: string;
     workdirKey: string;
     params: Params;
+    output: Output;
 }): Promise<TurnResult> {
-    const { message, priorClaudeSessionId, workdirKey, params } = opts;
+    const { message, priorClaudeSessionId, workdirKey, params, output } = opts;
 
     // Defense-in-depth: workdirKey becomes Deno.Command's cwd and
     // priorClaudeSessionId (when non-empty) becomes the `--resume` argument.
@@ -275,10 +285,10 @@ async function runClaudeTurn(opts: {
     // is the function that actually owns the sink, so it shouldn't rely
     // entirely on caller discipline to keep an off-shape id from reaching it.
     if (!isValidSessionId(workdirKey)) {
-        return fail(`internal error: workdirKey is not a valid session id — refusing to build a workdir path from it`);
+        return fail(output, `internal error: workdirKey is not a valid session id — refusing to build a workdir path from it`);
     }
     if (priorClaudeSessionId && !isValidSessionId(priorClaudeSessionId)) {
-        return fail(`internal error: priorClaudeSessionId is not a valid session id — refusing to pass it to --resume`);
+        return fail(output, `internal error: priorClaudeSessionId is not a valid session id — refusing to pass it to --resume`);
     }
 
     const model         = (await params.get("model"))         ?? "";
@@ -302,7 +312,7 @@ async function runClaudeTurn(opts: {
 
     const cliPath = resolveCliPath(cliPathParam);
     if (!cliPath) {
-        return fail("claude binary not found. Set the cli_path param, or install via one of the paths in tasks/buildin/ai-agent-claude-cli/README.md.");
+        return fail(output, "claude binary not found. Set the cli_path param, or install via one of the paths in tasks/buildin/ai-agent-claude-cli/README.md.");
     }
 
     // Per-invocation working directory. Claude CLI honors a project-local
@@ -326,16 +336,15 @@ async function runClaudeTurn(opts: {
     // + skills on every turn) so they're never preempted; idle sessions are
     // reaped after the TTL.
     if (!workdirBase) {
-        return fail("workdir_base param is empty; expected the default ${DATADIR}/tmp/claude-cli to resolve at spec-load time");
+        return fail(output, "workdir_base param is empty; expected the default ${DATADIR}/tmp/claude-cli to resolve at spec-load time");
     }
     const workdir = `${workdirBase}/${workdirKey}`;
     const claudeDir = `${workdir}/.claude`;
 
     // Wrap setup in a try/catch so any unexpected error (NotCapable when
-    // permissions.fs is mis-scoped, ENOSPC, an immutable mount, …) comes back to
-    // the caller as a structured { ok: false, error } via fail() rather than as
-    // an uncaught Deno promise rejection that the runtime surfaces only in the
-    // run log.
+    // permissions.fs is mis-scoped, ENOSPC, an immutable mount, …) leaves
+    // through fail() — which names the workdir and hands the caller the
+    // { ok: false, error } envelope — rather than as a bare Deno rejection.
     let mcpWired = false;
     let skillsWired = 0;
     const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
@@ -396,7 +405,7 @@ async function runClaudeTurn(opts: {
             }
         }
     } catch (e) {
-        return fail(`workdir setup failed at ${workdir}: ${e instanceof Error ? e.message : String(e)}`);
+        return fail(output, `workdir setup failed at ${workdir}: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${priorClaudeSessionId ? priorClaudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, workdir=${workdirKey.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
@@ -428,7 +437,7 @@ async function runClaudeTurn(opts: {
         stderr: "piped",
     });
 
-    return await runClaudeAndDecode(cmd, oauthToken, mcpKey, model);
+    return await runClaudeAndDecode(cmd, output, oauthToken, mcpKey, model);
 }
 
 // runClaudeAndDecode is the post-setup half of runClaudeTurn: spawn claude,
@@ -436,6 +445,7 @@ async function runClaudeTurn(opts: {
 // the surrounding setup logic in runClaudeTurn stays readable.
 async function runClaudeAndDecode(
     cmd: Deno.Command,
+    output: Output,
     oauthToken: string,
     mcpKey: string,
     fallbackModel: string,
@@ -444,7 +454,7 @@ async function runClaudeAndDecode(
     try {
         out = await cmd.output();
     } catch (e) {
-        return fail(`claude CLI invocation failed: ${e instanceof Error ? e.message : String(e)}`);
+        return fail(output, `claude CLI invocation failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     const stdout = new TextDecoder().decode(out.stdout).trim();
@@ -465,7 +475,7 @@ async function runClaudeAndDecode(
     if (!out.success) {
         // Surface stderr for operator debugging; don't leak the OAuth token even
         // if the CLI ever logs it (it shouldn't, but defense in depth).
-        return fail(`claude exited ${out.code}: ${redact(stderr) || "(no stderr)"}`);
+        return fail(output, `claude exited ${out.code}: ${redact(stderr) || "(no stderr)"}`);
     }
 
     let parsed: ClaudeResponse;
@@ -475,17 +485,19 @@ async function runClaudeAndDecode(
         // stdout is normally JSON; if Claude ever logs an OAuth-token-bearing
         // diagnostic to stdout instead, the redact() guard keeps it out of the
         // run log.
-        return fail(`claude returned non-JSON output: ${redact(stdout.slice(0, 500))}`);
+        return fail(output, `claude returned non-JSON output: ${redact(stdout.slice(0, 500))}`);
     }
 
     if (parsed.is_error) {
-        return fail(parsed.result ?? "claude reported an error");
+        // The CLI's own error text: redacted like every other stream we
+        // surface, since an auth or MCP-connection failure can quote the
+        // credential that failed.
+        return fail(output, redact(parsed.result ?? "claude reported an error"));
     }
 
     console.log(`ai-agent-claude-cli: ok (model=${parsed.model ?? "?"}, cost=$${parsed.total_cost_usd ?? 0})`);
 
     return {
-        ok:              true,
         reply:           parsed.result ?? "",
         claudeSessionId: parsed.session_id ?? "",
         model:           parsed.model ?? fallbackModel,

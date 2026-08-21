@@ -354,7 +354,7 @@ async function runTask(): Promise<any> {
     params,
     kv,
     input: liveInput ?? state.input,
-    output: { html: async () => {}, text: async () => {}, image: async () => {}, file: async () => {} },
+    output: { html: async () => {}, text: async () => {}, json: async () => {}, image: async () => {}, file: async () => {} },
     mcp: { list_tools: async () => [], call: async () => ({}) },
     dicode: state.dicode,
   };

@@ -484,6 +484,52 @@ func TestRuntime_Output_Text(t *testing.T) {
 	}
 }
 
+// A task that publishes a JSON body and then throws must yield both halves:
+// the failure, so the run is not recorded green, and the captured body, so a
+// webhook caller still receives the structured envelope. buildin/ai-agent-claude-cli's
+// failure path (#736) rests on that pairing.
+func TestRuntime_Output_JSON_SurvivesThrow(t *testing.T) {
+	e := newTestEnv(t)
+	r := e.run(t, `
+		await output.json({ ok: false, error: "boom" })
+		throw new Error("boom")
+	`)
+	if r.Error == nil {
+		t.Fatal("expected the throw to fail the run")
+	}
+	if r.Output == nil || r.Output.ContentType != "application/json" {
+		t.Fatalf("expected application/json output, got %+v", r.Output)
+	}
+	if r.Output.Content != `{"ok":false,"error":"boom"}` {
+		t.Errorf("unexpected content: %s", r.Output.Content)
+	}
+}
+
+// JSON.stringify(undefined) is undefined, which would reach the daemon as an
+// application/json output carrying no body — indistinguishable downstream from
+// a task that published nothing. The SDK rejects at the call site instead.
+func TestRuntime_Output_JSON_RejectsUnserializable(t *testing.T) {
+	e := newTestEnv(t)
+	r := e.run(t, `await output.json(undefined)`)
+	if r.Error == nil {
+		t.Fatal("expected output.json(undefined) to reject rather than publish an empty body")
+	}
+	if r.Output != nil && r.Output.Content != "" {
+		t.Errorf("expected no output to be published, got %+v", r.Output)
+	}
+	logs, err := e.reg.GetRunLogs(context.Background(), r.RunID)
+	if err != nil {
+		t.Fatalf("get run logs: %v", err)
+	}
+	var joined string
+	for _, l := range logs {
+		joined += l.Message + "\n"
+	}
+	if !strings.Contains(joined, "output.json") {
+		t.Errorf("expected the rejection to name output.json in the run log, got:\n%s", joined)
+	}
+}
+
 func TestRuntime_RunRecord(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `return "ok"`)

@@ -128,6 +128,7 @@ Rich output types rendered in the Web UI.
 ```python
 output.html("<h1>Report</h1><table>...</table>")
 output.text("plain text result")
+output.json({"ok": False, "error": "rate limited"})
 output.image("image/png", base64_data)
 output.file("report.csv", csv_content, "text/csv")
 

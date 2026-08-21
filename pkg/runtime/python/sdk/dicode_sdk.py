@@ -435,6 +435,12 @@ class _Output:
         _fire({"method": "output", "contentType": "text/plain",
                "content": content})
 
+    def json(self, value):
+        # The method name shadows the module in the class body only; inside a
+        # method body `json` still resolves to the imported module.
+        _fire({"method": "output", "contentType": "application/json",
+               "content": json.dumps(value), "data": value})
+
     def image(self, mime, content):
         _fire({"method": "output", "contentType": mime or "image/png",
                "content": content})
@@ -447,6 +453,7 @@ class _Output:
     # Async variants — _fire is non-blocking, no executor needed.
     async def html_async(self, content, data=None):  self.html(content, data)
     async def text_async(self, content):              self.text(content)
+    async def json_async(self, value):                self.json(value)
     async def image_async(self, mime, content):       self.image(mime, content)
     async def file_async(self, name, content, mime=None): self.file(name, content, mime)
 

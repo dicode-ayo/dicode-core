@@ -125,6 +125,7 @@ Rich output types rendered in the Web UI.
 ```typescript
 output.html("<h1>Report</h1><table>...</table>")
 output.text("plain text result")
+output.json({ ok: false, error: "rate limited" })
 
 // HTML with structured data for chain triggers
 output.html(html, { data: { count: 5 } })  // chained tasks receive { count: 5 }
