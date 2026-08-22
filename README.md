@@ -540,30 +540,34 @@ return { count: lines.length }
 ## Configuration Reference
 
 ```yaml
-# sources: one or more task sources (git repos and/or local directories)
-sources:
-  # Remote git repo — pulled every poll_interval or on push webhook
-  - type: git
-    url: https://github.com/you/my-tasks   # required
-    branch: main                            # default: main
-    poll_interval: 30s                      # default: 30s
-    auth:
-      type: token                           # "token" or "ssh"
-      token_env: GITHUB_TOKEN               # env var holding the token
-      ssh_key: ~/.ssh/id_ed25519            # path to SSH key (if type: ssh)
+# spec.entries: one or more named task sources (git repos and/or local
+# directories), each pointing at a root taskset.yaml (git) or a task.yaml/
+# taskset.yaml directly (local) — see "TaskSet sources" above.
+spec:
+  entries:
+    # Remote git repo — pulled every poll_interval or on push webhook
+    my-tasks:
+      ref:
+        url: https://github.com/you/my-tasks   # required
+        branch: main                            # default: main
+        poll_interval: 30s                      # default: 30s
+        auth:
+          token_env: GITHUB_TOKEN               # env var holding the token
+          # ssh_key: ~/.ssh/id_ed25519           # for an ssh:// url instead
 
-  # Second git repo — multiple sources are merged into one registry
-  - type: git
-    url: https://github.com/team/shared-tasks
-    branch: main
-    auth:
-      type: token
-      token_env: GITHUB_TOKEN
+    # Second git repo — multiple entries are merged into one registry
+    shared-tasks:
+      ref:
+        url: https://github.com/team/shared-tasks
+        branch: main
+        auth:
+          token_env: GITHUB_TOKEN
 
-  # Local directory — watched via fsnotify for instant reloads (dev workflow)
-  - type: local
-    path: ~/tasks-dev                       # required
-    watch: true                             # default: true
+    # Local directory — watched via fsnotify for instant reloads (dev workflow)
+    dev-tasks:
+      ref:
+        path: ~/tasks-dev                       # required
+        watch: true                             # default: true
 
 secrets:
   providers:
@@ -572,12 +576,6 @@ secrets:
     # - type: vault
     #   address: https://vault.example.com
     #   token_env: VAULT_TOKEN
-
-defaults:
-  on_failure_chain: buildin/alert         # fire any task on failure — point at
-                                          # buildin/alert (desktop), buildin/notifications,
-                                          # or any task you write yourself for
-                                          # ntfy / Slack / Discord / email / etc.
 
 server:
   port: 8080                              # web UI + API port (default: 8080)

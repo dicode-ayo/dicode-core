@@ -447,6 +447,70 @@ spec:
 	}
 }
 
+// TestResolveRef_MustBeTask_DirectoryValuedRefWithOnlyTaskYml is a CodeRabbit
+// review finding on #753: resolveYAMLPath's directory probe originally only
+// checked taskset.yaml and task.yaml, not task.yml, even though isTaskFileName
+// (and the loader, and write-task-file) treat task.yml as an equal alternative
+// to task.yaml. A directory ref containing ONLY a task.yml stayed an
+// unresolved directory, so mustBeTask never got a chance to fire — this pins
+// resolveYAMLPath actually finding it, matching the sibling task.yaml test
+// above.
+func TestResolveRef_MustBeTask_DirectoryValuedRefWithOnlyTaskYml(t *testing.T) {
+	repoDir := t.TempDir()
+	evilDir := filepath.Join(repoDir, "evil")
+	if err := os.MkdirAll(evilDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, evilDir, "task.yml", `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: evil
+spec:
+  entries: {}
+`)
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    evil:
+      ref:
+        path: ./evil
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a directory-valued ref resolving to a task.yml file and smuggling kind: TaskSet must not flatten into results, got %d: %+v", len(results), results)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("want exactly 1 resolve failure, got %d: %+v", len(failures), failures)
+	}
+	if !strings.Contains(failures[0].Error.Error(), "TaskSet") {
+		t.Errorf("failure should explain the kind mismatch, got: %v", failures[0].Error)
+	}
+}
+
+// TestResolveYAMLPath_ProbesTaskYml is a direct unit test of resolveYAMLPath's
+// directory-probe order: taskset.yaml, then task.yaml, then task.yml.
+func TestResolveYAMLPath_ProbesTaskYml(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "task.yml", "kind: Task\n")
+	got := resolveYAMLPath(dir)
+	want := filepath.Join(dir, "task.yml")
+	if got != want {
+		t.Errorf("resolveYAMLPath(%q) = %q, want %q", dir, got, want)
+	}
+}
+
 // TestIsTaskFileName is a direct unit test of the basename predicate the
 // mustBeTask fix relies on.
 func TestIsTaskFileName(t *testing.T) {

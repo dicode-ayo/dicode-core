@@ -615,13 +615,17 @@ func expandRefPath(path string, vars map[string]string) string {
 }
 
 // resolveYAMLPath returns path unchanged if it is already a file.
-// If path is a directory it probes for taskset.yaml then task.yaml inside it.
+// If path is a directory it probes, in order, for taskset.yaml, task.yaml,
+// then task.yml inside it — the same pair isTaskFileName recognizes, so a
+// directory-valued ref containing only a task.yml (CodeRabbit review of
+// #753) resolves onto it instead of silently staying an unresolved
+// directory that DetectKind then fails to load.
 func resolveYAMLPath(path string) string {
 	fi, err := os.Stat(path)
 	if err != nil || !fi.IsDir() {
 		return path
 	}
-	for _, candidate := range []string{"taskset.yaml", "task.yaml"} {
+	for _, candidate := range []string{"taskset.yaml", "task.yaml", "task.yml"} {
 		p := filepath.Join(path, candidate)
 		if fsutil.Exists(p) {
 			return p
