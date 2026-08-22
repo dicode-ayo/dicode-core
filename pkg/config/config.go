@@ -340,6 +340,9 @@ type Config struct {
 //	  allow_internal_hosts:
 //	    - git.corp.internal   # authorises ssh/SCP-shorthand to this host
 //	    - 10.0.0.0/8          # also required for http/https to resolved 10.x IPs
+//	  allowed_token_envs:
+//	    - GITHUB_TOKEN
+//	    - GIT_DEPLOY_TOKEN
 //
 // A hostname entry authorises the literal-host check that ssh and SCP-shorthand
 // remotes get. http/https remotes are additionally re-checked at dial time
@@ -348,6 +351,23 @@ type Config struct {
 // keeps the DNS-rebind protection intact for an allowlisted name).
 type SourceSecurityConfig struct {
 	AllowInternalHosts []string `yaml:"allow_internal_hosts,omitempty"`
+
+	// AllowedTokenEnvs, when non-empty, restricts which environment variable
+	// names a git ref's auth.token_env may name (issue #753, the optional
+	// second half of #740's fix list that #748 left as a residual). #740/#748
+	// already gate WHICH ref may carry auth — only a ref declared in
+	// operator-owned config (dicode.yaml's source ref, or a source's root
+	// taskset.yaml), never one discovered inside an already-resolved
+	// sub-tree. This narrows WHICH variable an already-trusted ref may name:
+	// without it, anyone with push access to a git source's root
+	// taskset.yaml can still name any variable in the daemon's own
+	// environment (e.g. an unrelated provider API key) as auth.token_env on
+	// an entry pointing at a host they control.
+	//
+	// The zero value (unset or empty) is fully permissive — this is optional,
+	// additive hardening, so an existing dicode.yaml with auth.token_env
+	// already configured keeps working unchanged until the operator opts in.
+	AllowedTokenEnvs []string `yaml:"allowed_token_envs,omitempty"`
 }
 
 // Allowlist parses the configured entries into the guard's runtime allowlist.
@@ -811,6 +831,14 @@ func (cfg *Config) validate() error {
 	// blocked clone.
 	if _, err := cfg.SourceSecurity.Allowlist(); err != nil {
 		return err
+	}
+	// allowed_token_envs (issue #753): reject blank entries at load — a blank
+	// entry can never match a real env var name, so it can only be a typo
+	// (e.g. a stray list item) that would otherwise silently do nothing.
+	for _, v := range cfg.SourceSecurity.AllowedTokenEnvs {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("source_security.allowed_token_envs: entries must be non-empty variable names")
+		}
 	}
 	return nil
 }

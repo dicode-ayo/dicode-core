@@ -1248,7 +1248,7 @@ func buildSources(cfg *config.Config, dataDir string, reg *registry.Registry, lo
 		if entry == nil || entry.Ref == nil {
 			continue
 		}
-		ts := buildTaskSetSourceFromEntry(name, entry, dataDir, log)
+		ts := buildTaskSetSourceFromEntry(name, entry, dataDir, cfg.SourceSecurity.AllowedTokenEnvs, log)
 		sources = append(sources, ts)
 		tasksetSources[name] = ts
 	}
@@ -1257,7 +1257,7 @@ func buildSources(cfg *config.Config, dataDir string, reg *registry.Registry, lo
 	return sources, sourceMgr, nil
 }
 
-func buildTaskSetSourceFromEntry(name string, entry *taskset.Entry, dataDir string, log *zap.Logger) *taskset.Source {
+func buildTaskSetSourceFromEntry(name string, entry *taskset.Entry, dataDir string, allowedTokenEnvs []string, log *zap.Logger) *taskset.Source {
 	// The entry key is the namespace. The ref points at the taskset.yaml.
 	// applyDefaults has already expanded ${VAR} and set branch/poll defaults.
 	ref := entry.Ref
@@ -1268,7 +1268,7 @@ func buildTaskSetSourceFromEntry(name string, entry *taskset.Entry, dataDir stri
 	id := taskset.SourceID(name, ref)
 	pollInterval := ref.PollInterval
 
-	var opts []taskset.SourceOption
+	opts := []taskset.SourceOption{taskset.WithAllowedTokenEnvs(allowedTokenEnvs)}
 	if entry.Overrides != nil {
 		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
 	}

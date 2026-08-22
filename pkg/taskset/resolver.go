@@ -65,8 +65,9 @@ type Resolver struct {
 	devMode bool
 	log     *zap.Logger
 
-	mu     sync.Mutex
-	clones map[repoKey]string // (url, branch) → absolute local dir
+	mu               sync.Mutex
+	clones           map[repoKey]string // (url, branch) → absolute local dir
+	allowedTokenEnvs []string           // operator allowlist for ref.auth.token_env (#753); nil/empty = unrestricted
 }
 
 // NewResolver creates a Resolver.
@@ -92,6 +93,21 @@ func (r *Resolver) DevMode() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.devMode
+}
+
+// SetAllowedTokenEnvs installs the operator-declared allowlist of environment
+// variable names a git ref's auth.token_env may name (#753's first residual:
+// #740/#748 gated WHICH ref may carry auth but left WHICH variable it may
+// name unconstrained). A nil or empty allowlist is fully permissive — this
+// is optional, additive hardening, not a default restriction — so an
+// operator who never sets source_security.allowed_token_envs keeps today's
+// behavior unchanged. The allowlist only ever narrows a ref that gatedTokenEnv
+// already decided to trust; it has no effect on a ref discovered inside a
+// resolved sub-tree, which gatedTokenEnv strips regardless.
+func (r *Resolver) SetAllowedTokenEnvs(envs []string) {
+	r.mu.Lock()
+	r.allowedTokenEnvs = envs
+	r.mu.Unlock()
 }
 
 // Resolve walks the TaskSet rooted at tsRef with the given namespace prefix.
@@ -290,16 +306,17 @@ func (r *Resolver) resolveBody(
 			continue
 		}
 
-		// A ref whose configured path explicitly names "task.yaml" (as every
-		// entry taskset.AddTaskEntry writes does — see taskEntryRefPath) can
-		// legitimately be kind: Task or kind: PipelineTask, but never kind:
+		// A ref that resolves to a task.yaml/task.yml file (as every entry
+		// taskset.AddTaskEntry writes does — see taskEntryRefPath — and as any
+		// directory-valued ref whose resolveYAMLPath probe lands on one, #753)
+		// can legitimately be kind: Task or kind: PipelineTask, but never kind:
 		// TaskSet. Letting it resolve as a TaskSet would route an
-		// attacker-editable task.yaml into the KindTaskSet branch below —
+		// attacker-editable task file into the KindTaskSet branch below —
 		// recursing into it with full ref-auth/entry-merge machinery instead of
 		// loading it as the leaf task its path declares it to be (#740). Treat
 		// that mismatch as a load failure, not a routing choice.
 		if mustBeTask && kind == KindTaskSet {
-			err := fmt.Errorf("ref path %q names task.yaml but %s declares kind TaskSet — a task ref must not resolve as a TaskSet", ref.Path, localPath)
+			err := fmt.Errorf("ref path %q resolves to a task file (%s) but declares kind TaskSet — a task ref must not resolve as a TaskSet", ref.Path, localPath)
 			r.log.Warn("taskset: task ref resolved to kind TaskSet; refusing",
 				zap.String("entry", fullID), zap.Error(err))
 			failures = append(failures, ResolveFailure{ID: fullID, Error: err})
@@ -430,9 +447,24 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 }
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref,
-// and reports whether that path declares itself a task ref (its configured
-// path names "task.yaml" explicitly, so the resolved file must not be kind:
-// TaskSet — see the mustBeTask check in resolveBody, #740).
+// and reports whether that path resolves to a task file (a "task.yaml" or
+// "task.yml" basename, so the resolved file must not be kind: TaskSet — see
+// the mustBeTask check in resolveBody, #740).
+//
+// mustBeTask is true if EITHER the ref's own configured path or the path
+// resolveYAMLPath actually landed on names a task file (#753's second
+// residual, hardened further after a security review of the first draft).
+// Checking the resolved path alone catches a ref whose path names a
+// directory (e.g. "./x" or "./x/") whose resolveYAMLPath probe lands on a
+// task.yaml inside it — before this fix that shape always got
+// mustBeTask=false, silently exempting it from the #740 hardening below.
+// Checking the configured path alone would miss that same case, but is
+// needed for the reverse: a writable source shadowing a scaffolded
+// ".../task.yaml" ref path with a DIRECTORY of that name holding a nested
+// taskset.yaml, which resolveYAMLPath would silently probe into and return
+// (basename "taskset.yaml"), clearing mustBeTask despite the ref being
+// declared exactly the trusted shape taskEntryRefPath writes. Checking both
+// closes each without reopening the other.
 // For git refs this may trigger a clone or pull.
 // parentTSPath is the absolute path of the parent taskset.yaml — used to resolve
 // relative paths in local refs against the parent's directory.
@@ -450,7 +482,6 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 // silently dropped) and the clone proceeds unauthenticated.
 func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string, cloneRoot string, allowAuth bool) (string, bool, error) {
 	path := expandRefPath(ref.Path, refVars)
-	mustBeTask := filepath.Base(path) == "task.yaml"
 
 	var resolved string
 	if !ref.IsGit() {
@@ -480,7 +511,20 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 			return "", false, fmt.Errorf("ref path %q: %w", ref.Path, err)
 		}
 	}
-	return resolveYAMLPath(resolved), mustBeTask, nil
+	resolvedPath := resolveYAMLPath(resolved)
+	// See this function's doc comment for why mustBeTask ORs the configured
+	// and resolved basenames rather than checking either alone.
+	mustBeTask := isTaskFileName(filepath.Base(path)) || isTaskFileName(filepath.Base(resolvedPath))
+	return resolvedPath, mustBeTask, nil
+}
+
+// isTaskFileName reports whether name is a recognized task-file basename.
+// task.LoadDirWithVars and buildin/write-task-file's assertTaskDocument both
+// accept task.yaml and task.yml interchangeably; the mustBeTask hardening
+// (#740) must recognize the same pair or a ref resolving to a bare task.yml
+// would skip the "must not be kind: TaskSet" check entirely (#753).
+func isTaskFileName(name string) bool {
+	return name == "task.yaml" || name == "task.yml"
 }
 
 // gatedTokenEnv decides whether a git ref's ref.auth.token_env is honoured.
@@ -494,6 +538,47 @@ func gatedTokenEnv(allowAuth bool, tokenEnv string) (effective string, blocked b
 		return tokenEnv, false
 	}
 	return "", true
+}
+
+// tokenEnvAllowed reports whether envVar may be named as a git ref's
+// auth.token_env under the operator's allowlist (#753's first residual: an
+// empty/nil allowlist is unrestricted, matching behavior before this
+// allowlist existed. A non-empty allowlist is exhaustive — envVar must
+// appear in it exactly). Pure function, split out from ensureClone for the
+// same reason gatedTokenEnv is: the trust decision should be unit testable
+// independent of the clone it gates.
+func tokenEnvAllowed(envVar string, allowlist []string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	for _, v := range allowlist {
+		if v == envVar {
+			return true
+		}
+	}
+	return false
+}
+
+// applyTokenEnvAllowlist returns tokenEnv unchanged when it is empty or
+// allowed by r.allowedTokenEnvs; otherwise it logs the drop and returns "".
+// Shared by every call site that hands a token_env to cloneOrPull — Pull
+// (a source's root ref, always allowAuth=true) and ensureClone (a nested
+// ref, post-gatedTokenEnv) — so the allowlist covers every git-authenticated
+// clone path consistently. A caller that already knows tokenEnv is "" may
+// skip calling this; it is a no-op in that case regardless.
+func (r *Resolver) applyTokenEnvAllowlist(url, tokenEnv string) string {
+	if tokenEnv == "" {
+		return ""
+	}
+	r.mu.Lock()
+	allowlist := r.allowedTokenEnvs
+	r.mu.Unlock()
+	if !tokenEnvAllowed(tokenEnv, allowlist) {
+		r.log.Warn("taskset: ignoring ref.auth.token_env — not in the operator's source_security.allowed_token_envs allowlist (#753)",
+			zap.String("url", url), zap.String("token_env", tokenEnv))
+		return ""
+	}
+	return tokenEnv
 }
 
 // containedPath reports whether target stays within root, rejecting both
@@ -530,13 +615,17 @@ func expandRefPath(path string, vars map[string]string) string {
 }
 
 // resolveYAMLPath returns path unchanged if it is already a file.
-// If path is a directory it probes for taskset.yaml then task.yaml inside it.
+// If path is a directory it probes, in order, for taskset.yaml, task.yaml,
+// then task.yml inside it — the same pair isTaskFileName recognizes, so a
+// directory-valued ref containing only a task.yml (CodeRabbit review of
+// #753) resolves onto it instead of silently staying an unresolved
+// directory that DetectKind then fails to load.
 func resolveYAMLPath(path string) string {
 	fi, err := os.Stat(path)
 	if err != nil || !fi.IsDir() {
 		return path
 	}
-	for _, candidate := range []string{"taskset.yaml", "task.yaml"} {
+	for _, candidate := range []string{"taskset.yaml", "task.yaml", "task.yml"} {
 		p := filepath.Join(path, candidate)
 		if fsutil.Exists(p) {
 			return p
@@ -597,7 +686,14 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	}
 	branch := ref.effectiveBranch()
 	dir := repoCloneDir(r.dataDir, ref.URL, branch, true)
-	if err := cloneOrPull(ctx, dir, ref.URL, branch, ref.Auth.TokenEnv); err != nil {
+	// Pull always fetches an operator-owned root ref (allowAuth=true by
+	// construction — see this method's doc comment), so token_env only ever
+	// needs the allowlist check, never gatedTokenEnv's allowAuth gate. This
+	// is the primary case source_security.allowed_token_envs documents
+	// itself as covering (security review of #753's first draft: this path
+	// was missed entirely, so a root ref's token_env went unchecked).
+	effectiveTokenEnv := r.applyTokenEnvAllowlist(ref.URL, ref.Auth.TokenEnv)
+	if err := cloneOrPull(ctx, dir, ref.URL, branch, effectiveTokenEnv); err != nil {
 		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, branch, err)
 	}
 	key := repoKey{URL: ref.URL, Branch: branch, AllowAuth: true}
@@ -619,6 +715,11 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 // tokenEnv against the same allowAuth: passing the ref's raw, ungated
 // auth.token_env alongside allowAuth=false is always safe, by construction,
 // regardless of what any other call site does or how it evolves (#740).
+//
+// A token that survives gatedTokenEnv is then checked against
+// r.allowedTokenEnvs (#753): even a ref trusted enough to carry auth can
+// only name a variable the operator has explicitly allowlisted via
+// source_security.allowed_token_envs. An unset allowlist is unrestricted.
 func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string, allowAuth bool) (string, error) {
 	key := repoKey{URL: url, Branch: branch, AllowAuth: allowAuth}
 
@@ -634,6 +735,7 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 		r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
 			zap.String("url", url))
 	}
+	effectiveTokenEnv = r.applyTokenEnvAllowlist(url, effectiveTokenEnv)
 
 	dir := repoCloneDir(r.dataDir, url, branch, allowAuth)
 

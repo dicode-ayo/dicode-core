@@ -540,30 +540,34 @@ return { count: lines.length }
 ## Configuration Reference
 
 ```yaml
-# sources: one or more task sources (git repos and/or local directories)
-sources:
-  # Remote git repo — pulled every poll_interval or on push webhook
-  - type: git
-    url: https://github.com/you/my-tasks   # required
-    branch: main                            # default: main
-    poll_interval: 30s                      # default: 30s
-    auth:
-      type: token                           # "token" or "ssh"
-      token_env: GITHUB_TOKEN               # env var holding the token
-      ssh_key: ~/.ssh/id_ed25519            # path to SSH key (if type: ssh)
+# spec.entries: one or more named task sources (git repos and/or local
+# directories), each pointing at a root taskset.yaml (git) or a task.yaml/
+# taskset.yaml directly (local) — see "TaskSet sources" above.
+spec:
+  entries:
+    # Remote git repo — pulled every poll_interval or on push webhook
+    my-tasks:
+      ref:
+        url: https://github.com/you/my-tasks   # required
+        branch: main                            # default: main
+        poll_interval: 30s                      # default: 30s
+        auth:
+          token_env: GITHUB_TOKEN               # env var holding the token
+          # ssh_key: ~/.ssh/id_ed25519           # for an ssh:// url instead
 
-  # Second git repo — multiple sources are merged into one registry
-  - type: git
-    url: https://github.com/team/shared-tasks
-    branch: main
-    auth:
-      type: token
-      token_env: GITHUB_TOKEN
+    # Second git repo — multiple entries are merged into one registry
+    shared-tasks:
+      ref:
+        url: https://github.com/team/shared-tasks
+        branch: main
+        auth:
+          token_env: GITHUB_TOKEN
 
-  # Local directory — watched via fsnotify for instant reloads (dev workflow)
-  - type: local
-    path: ~/tasks-dev                       # required
-    watch: true                             # default: true
+    # Local directory — watched via fsnotify for instant reloads (dev workflow)
+    dev-tasks:
+      ref:
+        path: ~/tasks-dev                       # required
+        watch: true                             # default: true
 
 secrets:
   providers:
@@ -572,12 +576,6 @@ secrets:
     # - type: vault
     #   address: https://vault.example.com
     #   token_env: VAULT_TOKEN
-
-defaults:
-  on_failure_chain: buildin/alert         # fire any task on failure — point at
-                                          # buildin/alert (desktop), buildin/notifications,
-                                          # or any task you write yourself for
-                                          # ntfy / Slack / Discord / email / etc.
 
 server:
   port: 8080                              # web UI + API port (default: 8080)
@@ -626,6 +624,14 @@ source_security:
   allow_internal_hosts:
     - git.corp.internal                   # authorises ssh:// and git@host:path to this host
     - 10.0.0.0/8                          # ALSO required for http/https (see note below)
+  # Optional: restrict which env var names a trusted git ref's auth.token_env
+  # may name. Unset = unrestricted (today's default). Only applies to refs
+  # already trusted to carry auth (dicode.yaml's source ref, or an entry in a
+  # source's root taskset.yaml) — never to a ref discovered inside a resolved
+  # sub-tree, which never gets auth honoured regardless of this list.
+  allowed_token_envs:
+    - GITHUB_TOKEN
+    - GIT_DEPLOY_TOKEN
 
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.
@@ -639,6 +645,8 @@ data_dir: ~/.dicode                       # where to store repo clones, sqlite d
 - `http`/`https` remotes are *additionally* re-checked at connection time against the **resolved IP**, so for those you must also list the target's **IP or CIDR** (e.g. `10.0.0.0/8`). A hostname entry alone never authorises the address it resolves to — this is deliberate, so allowlisting a name can't be turned into a DNS-rebind bypass.
 
 Leave the block empty (or omit it) to keep the fully fail-closed default. A rejected clone's error names this key.
+
+**Restricting which credential a trusted ref may name** (`source_security.allowed_token_envs`): a git ref's `auth.token_env` is only ever honoured when the ref is declared in operator-owned config to begin with (`dicode.yaml`'s source ref, or an entry in a source's root `taskset.yaml`) — never for a ref discovered while resolving an already-resolved sub-tree. `allowed_token_envs` narrows that further, to *which variable* such a ref may name: leave it unset to keep today's behavior (any variable in the daemon's environment), or list the specific names a `token_env` may ever reference.
 
 **Task ID uniqueness**: task IDs (directory names) must be unique across all sources. If two sources contain a task with the same ID, the second one is skipped and an error is logged.
 
