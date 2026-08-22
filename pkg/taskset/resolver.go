@@ -505,7 +505,22 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		}
 	}
 	resolvedPath := resolveYAMLPath(resolved)
-	return resolvedPath, isTaskFileName(filepath.Base(resolvedPath)), nil
+	// mustBeTask is true if EITHER the ref's own configured path names a task
+	// file, or the path resolveYAMLPath actually landed on does (security
+	// review of #753's first draft). Checking only the resolved basename let
+	// a writable source shadow a scaffolded ".../task.yaml" ref path with a
+	// DIRECTORY of that same name containing a nested taskset.yaml:
+	// resolveYAMLPath silently probes into it and returns the nested file,
+	// whose basename is "taskset.yaml" — clearing mustBeTask even though the
+	// ref was declared exactly the trusted shape taskEntryRefPath scaffolds.
+	// Checking only the configured path, in turn, is what missed a
+	// directory-valued ref whose probe lands on a task file — the original
+	// #753 gap this fix was written for. Checking both closes each without
+	// reopening the other: a genuine directory ref that was never declared
+	// as a task file (e.g. a normal nested TaskSet subdirectory) matches
+	// neither and resolves exactly as it did before #753.
+	mustBeTask := isTaskFileName(filepath.Base(path)) || isTaskFileName(filepath.Base(resolvedPath))
+	return resolvedPath, mustBeTask, nil
 }
 
 // isTaskFileName reports whether name is a recognized task-file basename.
@@ -547,6 +562,28 @@ func tokenEnvAllowed(envVar string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// applyTokenEnvAllowlist returns tokenEnv unchanged when it is empty or
+// allowed by r.allowedTokenEnvs; otherwise it logs the drop and returns "".
+// Shared by every call site that hands a token_env to cloneOrPull — Pull
+// (a source's root ref, always allowAuth=true) and ensureClone (a nested
+// ref, post-gatedTokenEnv) — so the allowlist covers every git-authenticated
+// clone path consistently. A caller that already knows tokenEnv is "" may
+// skip calling this; it is a no-op in that case regardless.
+func (r *Resolver) applyTokenEnvAllowlist(url, tokenEnv string) string {
+	if tokenEnv == "" {
+		return ""
+	}
+	r.mu.Lock()
+	allowlist := r.allowedTokenEnvs
+	r.mu.Unlock()
+	if !tokenEnvAllowed(tokenEnv, allowlist) {
+		r.log.Warn("taskset: ignoring ref.auth.token_env — not in the operator's source_security.allowed_token_envs allowlist (#753)",
+			zap.String("url", url), zap.String("token_env", tokenEnv))
+		return ""
+	}
+	return tokenEnv
 }
 
 // containedPath reports whether target stays within root, rejecting both
@@ -650,7 +687,14 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	}
 	branch := ref.effectiveBranch()
 	dir := repoCloneDir(r.dataDir, ref.URL, branch, true)
-	if err := cloneOrPull(ctx, dir, ref.URL, branch, ref.Auth.TokenEnv); err != nil {
+	// Pull always fetches an operator-owned root ref (allowAuth=true by
+	// construction — see this method's doc comment), so token_env only ever
+	// needs the allowlist check, never gatedTokenEnv's allowAuth gate. This
+	// is the primary case source_security.allowed_token_envs documents
+	// itself as covering (security review of #753's first draft: this path
+	// was missed entirely, so a root ref's token_env went unchecked).
+	effectiveTokenEnv := r.applyTokenEnvAllowlist(ref.URL, ref.Auth.TokenEnv)
+	if err := cloneOrPull(ctx, dir, ref.URL, branch, effectiveTokenEnv); err != nil {
 		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, branch, err)
 	}
 	key := repoKey{URL: ref.URL, Branch: branch, AllowAuth: true}
@@ -692,17 +736,7 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 		r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
 			zap.String("url", url))
 	}
-
-	if effectiveTokenEnv != "" {
-		r.mu.Lock()
-		allowlist := r.allowedTokenEnvs
-		r.mu.Unlock()
-		if !tokenEnvAllowed(effectiveTokenEnv, allowlist) {
-			r.log.Warn("taskset: ignoring ref.auth.token_env — not in the operator's source_security.allowed_token_envs allowlist (#753)",
-				zap.String("url", url), zap.String("token_env", effectiveTokenEnv))
-			effectiveTokenEnv = ""
-		}
-	}
+	effectiveTokenEnv = r.applyTokenEnvAllowlist(url, effectiveTokenEnv)
 
 	dir := repoCloneDir(r.dataDir, url, branch, allowAuth)
 

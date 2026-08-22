@@ -466,3 +466,102 @@ func TestIsTaskFileName(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveRef_MustBeTask_ConfiguredTaskFilePathShadowedByDirectory is the
+// regression test for a bypass a security review of #753's first draft
+// found: computing mustBeTask ONLY from the resolved path let a writable
+// source shadow a scaffolded ".../task.yaml" ref path — the exact shape
+// taskEntryRefPath writes — with a DIRECTORY of that same name containing a
+// nested taskset.yaml. resolveYAMLPath silently probes into it and returns
+// the nested file, whose basename is "taskset.yaml", clearing mustBeTask
+// even though the ref was declared exactly the trusted shape. mustBeTask
+// must also honor the ref's own CONFIGURED path, not only the resolved one.
+func TestResolveRef_MustBeTask_ConfiguredTaskFilePathShadowedByDirectory(t *testing.T) {
+	repoDir := t.TempDir()
+	// "task.yaml" is a DIRECTORY, not a file — shadowing the scaffolded
+	// ".//task.yaml" ref shape with a nested kind: TaskSet.
+	taskYamlDir := filepath.Join(repoDir, "task.yaml")
+	if err := os.MkdirAll(taskYamlDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, taskYamlDir, "taskset.yaml", `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: evil
+spec:
+  entries: {}
+`)
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    evil:
+      ref:
+        path: ./task.yaml
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a ref configured as .../task.yaml, shadowed on disk by a directory holding kind: TaskSet, must not flatten into results, got %d: %+v", len(results), results)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("want exactly 1 resolve failure, got %d: %+v", len(failures), failures)
+	}
+	if !strings.Contains(failures[0].Error.Error(), "TaskSet") {
+		t.Errorf("failure should explain the kind mismatch, got: %v", failures[0].Error)
+	}
+}
+
+// TestPull_TokenEnvAllowlist_BlocksUnlistedVar is the regression test for
+// the second security-review finding: the token_env allowlist was wired
+// into ensureClone (nested refs) but not Pull, which fetches a SOURCE'S
+// ROOT ref — the primary case source_security.allowed_token_envs documents
+// itself as covering. Before the fix, Pull passed ref.Auth.TokenEnv straight
+// to cloneOrPull with no allowlist check at all.
+func TestPull_TokenEnvAllowlist_BlocksUnlistedVar(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commit(t, "marker.txt", "content", "seed")
+
+	logger, logs := newObservedLogger()
+	r := NewResolver(t.TempDir(), false, logger)
+	r.SetAllowedTokenEnvs([]string{"GH_TOKEN"})
+
+	dir, err := r.Pull(context.Background(), &Ref{URL: bare.url, Branch: "main", Auth: RefAuth{TokenEnv: "OPENAI_API_KEY"}})
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); err != nil {
+		t.Errorf("pull should still succeed unauthenticated against a repo with no real auth requirement: %v", err)
+	}
+	if n := logs.FilterMessageSnippet("not in the operator's source_security.allowed_token_envs allowlist").Len(); n != 1 {
+		t.Errorf("want exactly 1 allowlist-block warning, got %d", n)
+	}
+}
+
+// TestPull_TokenEnvAllowlist_PermitsListedVar proves the allowlist on Pull's
+// root-ref path only blocks — a variable the operator did list still works.
+func TestPull_TokenEnvAllowlist_PermitsListedVar(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commit(t, "marker.txt", "content", "seed")
+
+	logger, logs := newObservedLogger()
+	r := NewResolver(t.TempDir(), false, logger)
+	r.SetAllowedTokenEnvs([]string{"GH_TOKEN"})
+
+	if _, err := r.Pull(context.Background(), &Ref{URL: bare.url, Branch: "main", Auth: RefAuth{TokenEnv: "GH_TOKEN"}}); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if n := logs.FilterMessageSnippet("allowed_token_envs allowlist").Len(); n != 0 {
+		t.Errorf("token_env named in allowlist must not be blocked on Pull's root-ref path, got %d warnings", n)
+	}
+}
