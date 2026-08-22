@@ -99,10 +99,9 @@ func cmdTaskCreate(c *ipc.ControlClient, args []string) error {
 	} else if res.Reply != "" {
 		fmt.Fprintln(os.Stderr, res.Reply)
 	}
-	printAuthoringPostCondition(res.FilesChanged)
-	// The task id goes to stdout either way — the scaffold landed and the
-	// task is registered, so a pipeline still needs it — but a turn that
-	// wrote nothing must not exit 0 behind a reply claiming otherwise (#755).
+	printFilesWritten(res.FilesChanged)
+	// The scaffold landed and the task is registered, so a pipeline still
+	// needs the id even when the turn that followed wrote nothing (#755).
 	fmt.Println(res.TaskID)
 	if res.WroteNothing {
 		return wroteNothingError(res.TaskID, res.RunID)
@@ -191,18 +190,18 @@ func cmdTaskEdit(c *ipc.ControlClient, args []string) error {
 	if res.Reply != "" {
 		fmt.Println(res.Reply)
 	}
-	printAuthoringPostCondition(res.FilesChanged)
+	printFilesWritten(res.FilesChanged)
 	if res.WroteNothing {
 		return wroteNothingError(res.TaskID, res.RunID)
 	}
 	return nil
 }
 
-// printAuthoringPostCondition reports what the AI turn actually changed on
-// disk (#755). Metadata, so stderr — stdout stays the reply. Silent when the
-// post-condition wasn't evaluated (no turn fired, the run suspended, or the
-// task directory couldn't be snapshotted).
-func printAuthoringPostCondition(files []string) {
+// printFilesWritten names what the AI turn changed on disk (#755). Metadata,
+// so stderr — stdout stays the reply. Silent when nothing changed and when the
+// post-condition was not evaluated at all; the two are distinguished by
+// TaskEditResult.WroteNothing, not by this line.
+func printFilesWritten(files []string) {
 	if len(files) == 0 {
 		return
 	}
@@ -210,9 +209,8 @@ func printAuthoringPostCondition(files []string) {
 }
 
 // wroteNothingError is the non-zero exit for a turn that completed while
-// leaving the task directory untouched (#755). The reply has already been
-// printed: it is the agent's own account of its work, and this is the only
-// thing in the chain that checked that account against disk.
+// leaving the task directory untouched (#755). The reply is already printed
+// above it — evidence the caller can read, not a verdict.
 func wroteNothingError(taskID, runID string) error {
 	return fmt.Errorf("the AI turn changed no files in %s — nothing was written to disk, whatever the reply above says (run %s)", taskID, runID)
 }

@@ -345,9 +345,9 @@ type TaskCreateResult struct {
 	// hanging or erroring.
 	Suspended bool `json:"suspended,omitempty"`
 	// FilesChanged and WroteNothing carry the chained edit turn's disk
-	// post-condition (#755); see TaskEditResult for both. The scaffold lands
-	// before the turn fires, so they describe what the AI turn changed on top
-	// of it, not the scaffolding itself.
+	// post-condition (#755); see TaskEditResult. The scaffold lands before
+	// the turn fires, so they describe what the turn changed on top of it,
+	// not the scaffolding.
 	FilesChanged []string `json:"filesChanged,omitempty"`
 	WroteNothing bool     `json:"wroteNothing,omitempty"`
 }
@@ -376,16 +376,12 @@ type TaskEditResult struct {
 	Suspended bool `json:"suspended,omitempty"`
 	// FilesChanged lists the task-directory files the turn added, modified
 	// or removed, as directory-relative slash paths (#755). Nil when the
-	// turn fired no AI call, suspended, or the directory could not be
-	// snapshotted on both sides of the turn — an unevaluated post-condition
-	// and an empty one are different facts, and WroteNothing carries the
-	// latter.
+	// turn fired no AI call, suspended, or could not be snapshotted on both
+	// sides — cases WroteNothing also reports as false.
 	FilesChanged []string `json:"filesChanged,omitempty"`
 	// WroteNothing is true when the turn ran to completion and left the task
-	// directory byte-identical (#755). The agent's reply is its own account
-	// of its work and nothing else compares that account against disk, so a
-	// turn that wrote no file is otherwise indistinguishable from one that
-	// did the work. False whenever the post-condition was not evaluated.
+	// directory byte-identical (#755). False whenever the post-condition was
+	// not evaluated, so it never carries an unevaluated check as a verdict.
 	WroteNothing bool `json:"wroteNothing,omitempty"`
 }
 

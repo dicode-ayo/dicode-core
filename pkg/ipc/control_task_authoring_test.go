@@ -837,27 +837,118 @@ func TestControl_TaskCreate_WithAI_FoldsPostCondition(t *testing.T) {
 	eng := &promptCapturingEngine{reply: "I wrote all three files."}
 	cs := newAuthoringAIControl(t, m, eng)
 
-	res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "fetch the zen endpoint daily"})
-	if err != nil {
-		t.Fatalf("handleTaskCreate: %v", err)
-	}
-	if !res.WroteNothing {
-		t.Error("create --ai must carry the chained turn's wrote-nothing verdict")
-	}
+	t.Run("turn wrote nothing", func(t *testing.T) {
+		res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "fetch the zen endpoint daily"})
+		if err != nil {
+			t.Fatalf("handleTaskCreate: %v", err)
+		}
+		if !res.WroteNothing {
+			t.Error("create --ai must carry the chained turn's wrote-nothing verdict")
+		}
+	})
 
+	t.Run("turn wrote a file", func(t *testing.T) {
+		eng.onFire = func() {
+			if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0644); err != nil {
+				t.Errorf("write task.ts: %v", err)
+			}
+		}
+		res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "try again"})
+		if err != nil {
+			t.Fatalf("handleTaskCreate: %v", err)
+		}
+		if res.WroteNothing {
+			t.Error("a turn that wrote a file must clear the verdict")
+		}
+		if !reflect.DeepEqual(res.FilesChanged, []string{"task.ts"}) {
+			t.Errorf("FilesChanged = %v, want [task.ts]", res.FilesChanged)
+		}
+	})
+}
+
+// TestControl_TaskEdit_WroteNothing_LandsOnTheRunLog: the agent task's run
+// really did succeed, so its status stays "success" and an operator reading
+// history would see only green. The verdict has to be somewhere durable and
+// attached to that run — `dicode logs <run-id>` and the WebUI run detail both
+// read the run log (#755).
+func TestControl_TaskEdit_WroteNothing_LandsOnTheRunLog(t *testing.T) {
+	dir := scaffoldTaskDir(t)
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
+	eng := &promptCapturingEngine{reply: "all three files are written"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
+	if err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	logs, err := cs.reg.GetRunLogs(context.Background(), res.RunID)
+	if err != nil {
+		t.Fatalf("GetRunLogs: %v", err)
+	}
+	var found string
+	for _, l := range logs {
+		if strings.Contains(l.Message, "post-condition") {
+			found = l.Message
+		}
+	}
+	if found == "" {
+		t.Fatalf("the wrote-nothing verdict must reach run %s's log, got %d entries", res.RunID, len(logs))
+	}
+	if !strings.Contains(found, dir) {
+		t.Errorf("the run-log line must name the directory checked, got %q", found)
+	}
+}
+
+// TestControl_TaskEdit_TurnThatWrote_LeavesTheRunLogAlone: the verdict line is
+// the exception, not a per-turn annotation.
+func TestControl_TaskEdit_TurnThatWrote_LeavesTheRunLogAlone(t *testing.T) {
+	dir := scaffoldTaskDir(t)
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
+	eng := &promptCapturingEngine{reply: "done"}
 	eng.onFire = func() {
 		if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0644); err != nil {
 			t.Errorf("write task.ts: %v", err)
 		}
 	}
-	res, err = cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "try again"})
+	cs := newAuthoringAIControl(t, m, eng)
+
+	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
 	if err != nil {
-		t.Fatalf("handleTaskCreate: %v", err)
+		t.Fatalf("handleTaskEdit: %v", err)
 	}
-	if res.WroteNothing {
-		t.Error("a turn that wrote a file must clear the verdict")
+	logs, err := cs.reg.GetRunLogs(context.Background(), res.RunID)
+	if err != nil {
+		t.Fatalf("GetRunLogs: %v", err)
 	}
-	if !reflect.DeepEqual(res.FilesChanged, []string{"task.ts"}) {
-		t.Errorf("FilesChanged = %v, want [task.ts]", res.FilesChanged)
+	for _, l := range logs {
+		if strings.Contains(l.Message, "post-condition") {
+			t.Errorf("a turn that wrote files must not log a verdict, got %q", l.Message)
+		}
+	}
+}
+
+// TestSnapshotTaskDir_ErrorNamesTheOperationAndDirectory: the failure is only
+// ever seen in a daemon log line, next to the same task's other warnings, so
+// it has to say which operation failed. The underlying fs.PathError already
+// carries the path; what the wrap adds is that this was the snapshot.
+func TestSnapshotTaskDir_ErrorNamesTheOperationAndDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through a 0000 directory")
+	}
+	dir := scaffoldTaskDir(t)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := snapshotTaskDir(dir)
+	if err == nil {
+		t.Fatal("an unreadable directory must not snapshot cleanly")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error = %q, want the unreadable directory named in it", err)
+	}
+	if !strings.Contains(err.Error(), "inventory task dir") {
+		t.Errorf("error = %q, want it to name the operation that failed", err)
 	}
 }

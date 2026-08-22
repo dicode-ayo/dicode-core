@@ -574,9 +574,9 @@ func (r *recordingAuthoring) EditTask(ctx context.Context, sessionID, taskID str
 	return r.fakeAuthoring.EditTask(ctx, sessionID, taskID)
 }
 
-// scaffoldedTaskDir writes the two files CreateTask scaffolds, giving the
-// #755 post-condition a real directory to snapshot on both sides of a turn.
-func scaffoldedTaskDir(t *testing.T) string {
+// scaffoldTaskDir writes the two files CreateTask scaffolds, giving the #755
+// post-condition a real directory to snapshot on both sides of a turn.
+func scaffoldTaskDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("apiVersion: dicode/v1\nkind: Task\nname: t\n"), 0644); err != nil {
@@ -607,11 +607,10 @@ func (e *writingEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, 
 	}, nil
 }
 
-// TestCmdTaskEdit_TurnThatWroteNothing_Fails is #755 end to end: the agent
-// reports work it never did, the run succeeds, and the command must still not
-// exit 0. The reply is printed either way — it is evidence, not a verdict.
+// TestCmdTaskEdit_TurnThatWroteNothing_Fails: the agent reports work it never
+// did and the run succeeds; the command must still not exit 0 (#755).
 func TestCmdTaskEdit_TurnThatWroteNothing_Fails(t *testing.T) {
-	dir := scaffoldedTaskDir(t)
+	dir := scaffoldTaskDir(t)
 	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
 		edit: ipc.AuthoringEditResult{SessionID: "sess-1", TaskID: "ai-scratch/zen", TaskDir: dir},
 	}, &replyingEngine{reply: "I created task.yaml, task.ts and task.test.ts. The tests pass."})
@@ -631,10 +630,10 @@ func TestCmdTaskEdit_TurnThatWroteNothing_Fails(t *testing.T) {
 	}
 }
 
-// TestCmdTaskEdit_TurnThatWrote_ListsFilesAndSucceeds is the same command's
-// other outcome: files moved, so the command succeeds and names them.
+// TestCmdTaskEdit_TurnThatWrote_ListsFilesAndSucceeds: files moved, so the
+// command succeeds and names them.
 func TestCmdTaskEdit_TurnThatWrote_ListsFilesAndSucceeds(t *testing.T) {
-	dir := scaffoldedTaskDir(t)
+	dir := scaffoldTaskDir(t)
 	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
 		edit: ipc.AuthoringEditResult{SessionID: "sess-1", TaskID: "ai-scratch/zen", TaskDir: dir},
 	}, &writingEngine{dir: dir})
@@ -653,9 +652,9 @@ func TestCmdTaskEdit_TurnThatWrote_ListsFilesAndSucceeds(t *testing.T) {
 
 // TestCmdTaskCreate_WithAI_TurnThatWroteNothing_FailsButKeepsTaskID: the
 // scaffold landed and the task is registered, so the id still belongs on
-// stdout — only the exit status changes (#755).
+// stdout; only the exit status changes (#755).
 func TestCmdTaskCreate_WithAI_TurnThatWroteNothing_FailsButKeepsTaskID(t *testing.T) {
-	dir := scaffoldedTaskDir(t)
+	dir := scaffoldTaskDir(t)
 	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
 		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/zen", Source: "ai-scratch"},
 		edit:   ipc.AuthoringEditResult{SessionID: "sess-1", TaskID: "ai-scratch/zen", TaskDir: dir},

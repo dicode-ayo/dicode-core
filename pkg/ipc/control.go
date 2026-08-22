@@ -593,13 +593,9 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		params["session_id"] = res.AgentSessionID
 	}
 
-	// The agent's reply is its own account of its work, and nothing else in
-	// the chain compares that account against disk — a turn that never called
-	// the write tool settles exactly like one that did the work (#755).
-	// Snapshotting the target directory around the turn is the one check that
-	// holds regardless of which agent backend cfg.AI.CreateTask points at. A
-	// snapshot that cannot be taken leaves the post-condition unevaluated
-	// rather than condemning an otherwise good turn.
+	// A turn's reply is the agent's own account of its work; only disk is
+	// evidence (#755). A snapshot that cannot be taken leaves the
+	// post-condition unevaluated — never condemned.
 	before, snapErr := snapshotTaskDir(res.TaskDir)
 	if snapErr != nil {
 		cs.log.Warn("cannot snapshot task directory; the turn's disk post-condition will not be evaluated",
@@ -675,6 +671,15 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 				cs.log.Warn("authoring turn wrote no files",
 					zap.String("session", res.SessionID), zap.String("task", res.TaskID),
 					zap.String("dir", res.TaskDir), zap.String("run", run.RunID))
+				// The run's own status stays success — the agent task did
+				// run — so the verdict has to reach the run log, or an
+				// operator reading history sees only green.
+				if lerr := cs.reg.AppendLog(ctx, run.RunID, "warn",
+					fmt.Sprintf("authoring post-condition: no file in %s changed during this turn — the reply is the agent's own account, not evidence of work", res.TaskDir),
+				); lerr != nil {
+					cs.log.Warn("failed to record the wrote-nothing verdict on the run log",
+						zap.String("run", run.RunID), zap.Error(lerr))
+				}
 			}
 		}
 	}

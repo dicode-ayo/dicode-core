@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/dicode/dicode/pkg/task"
@@ -15,16 +16,21 @@ import (
 type taskFileSnapshot map[string]string
 
 // snapshotTaskDir digests every file constituting the task rooted at dir.
-// An empty dir is an error rather than an empty snapshot: "the directory could
-// not be located" and "the directory is empty" lead to opposite verdicts about
-// a turn that wrote nothing.
+//
+// An unresolved dir is an error, because a caller with no directory has
+// nothing to compare and must skip the check rather than conclude from it. A
+// dir that is merely absent from disk is NOT an error: task.Inventory
+// inventories a missing directory as an empty one, so an agent that creates
+// the directory itself still shows up as having written files, and an agent
+// writing somewhere other than the resolved target still shows up as having
+// written nothing there — which is the true answer about that target.
 func snapshotTaskDir(dir string) (taskFileSnapshot, error) {
 	if dir == "" {
 		return nil, errors.New("task directory unknown")
 	}
 	metas, err := task.Inventory(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inventory task dir %s: %w", dir, err)
 	}
 	snap := make(taskFileSnapshot, len(metas))
 	for _, m := range metas {
