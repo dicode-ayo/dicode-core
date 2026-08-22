@@ -2937,7 +2937,10 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	// entry.Overrides is always nil for a freshly constructed entry today;
 	// the guard is defensive in case a future code path (e.g. clone-with-
 	// overrides) populates it before this call.
-	var opts []taskset.SourceOption
+	s.cfgMu.RLock()
+	allowedTokenEnvs := s.cfg.SourceSecurity.AllowedTokenEnvs
+	s.cfgMu.RUnlock()
+	opts := []taskset.SourceOption{taskset.WithAllowedTokenEnvs(allowedTokenEnvs)}
 	if entry.Overrides != nil {
 		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
 	}

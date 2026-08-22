@@ -96,6 +96,15 @@ func WithParentOverrides(ov *Overrides) SourceOption {
 	return func(s *Source) { s.parentOverrides = ov }
 }
 
+// WithAllowedTokenEnvs installs the operator's source_security.
+// allowed_token_envs allowlist (#753) on the source's resolver. Without this
+// every git ref's auth.token_env stays unrestricted (the resolver's default),
+// which is the correct behavior when the operator never configured an
+// allowlist — see Resolver.SetAllowedTokenEnvs.
+func WithAllowedTokenEnvs(envs []string) SourceOption {
+	return func(s *Source) { s.resolver.SetAllowedTokenEnvs(envs) }
+}
+
 type taskSnap struct {
 	specHash string
 	kinded   task.Kinded

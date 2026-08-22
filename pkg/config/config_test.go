@@ -163,6 +163,71 @@ source_security:
 	}
 }
 
+// TestLoad_SourceSecurityAllowedTokenEnvs parses a valid allowed_token_envs
+// list straight through to the Config struct (#753) — no derived allowlist
+// type here, unlike allow_internal_hosts, so the raw slice is the contract.
+func TestLoad_SourceSecurityAllowedTokenEnvs(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+source_security:
+  allowed_token_envs:
+    - GITHUB_TOKEN
+    - GIT_DEPLOY_TOKEN
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	want := []string{"GITHUB_TOKEN", "GIT_DEPLOY_TOKEN"}
+	if len(cfg.SourceSecurity.AllowedTokenEnvs) != len(want) {
+		t.Fatalf("AllowedTokenEnvs = %v, want %v", cfg.SourceSecurity.AllowedTokenEnvs, want)
+	}
+	for i, v := range want {
+		if cfg.SourceSecurity.AllowedTokenEnvs[i] != v {
+			t.Errorf("AllowedTokenEnvs[%d] = %q, want %q", i, cfg.SourceSecurity.AllowedTokenEnvs[i], v)
+		}
+	}
+}
+
+// TestLoad_SourceSecurityRejectsBlankTokenEnvEntry proves a blank
+// allowed_token_envs entry fails at load time rather than silently doing
+// nothing (#753).
+func TestLoad_SourceSecurityRejectsBlankTokenEnvEntry(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+source_security:
+  allowed_token_envs:
+    - GITHUB_TOKEN
+    - ""
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load accepted a blank allowed_token_envs entry; want error")
+	}
+	if !strings.Contains(err.Error(), "allowed_token_envs") {
+		t.Errorf("error = %v; want mention of allowed_token_envs", err)
+	}
+}
+
+// TestSourceSecurityConfig_AllowedTokenEnvsUnsetIsPermissive documents the
+// non-breaking default: an operator who never sets allowed_token_envs gets
+// the zero value, which Resolver.SetAllowedTokenEnvs/tokenEnvAllowed treat
+// as unrestricted (#753).
+func TestSourceSecurityConfig_AllowedTokenEnvsUnsetIsPermissive(t *testing.T) {
+	var c SourceSecurityConfig
+	if c.AllowedTokenEnvs != nil {
+		t.Fatalf("zero value AllowedTokenEnvs = %v, want nil", c.AllowedTokenEnvs)
+	}
+}
+
 // TestLoad_RejectsLegacyNotificationsBlock ensures the removed
 // `notifications:` block is rejected at load time. yaml.v3 would otherwise
 // drop it silently and operators would lose alerts without warning.

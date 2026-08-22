@@ -676,6 +676,32 @@ spec:
 // overrides via SetParentOverrides causes a fresh resolve+emit cycle on the
 // already-running source — the user-facing path for the task enable/disable
 // toggle in dc-task-list.
+// TestNewSource_WithAllowedTokenEnvs_WiresResolver proves the SourceOption
+// actually reaches the Source's Resolver (#753) — the option is otherwise
+// unobservable from outside the package, since Resolver exposes no getter
+// for allowedTokenEnvs; ensureClone's own behavior is covered directly in
+// resolver_security_test.go.
+func TestNewSource_WithAllowedTokenEnvs_WiresResolver(t *testing.T) {
+	src := NewSource(
+		"src-id", "buildin",
+		&Ref{Path: "/nonexistent/taskset.yaml"},
+		"", t.TempDir(), false, 0,
+		zaptest.NewLogger(t),
+		WithAllowedTokenEnvs([]string{"GH_TOKEN", "OTHER_TOKEN"}),
+	)
+
+	want := []string{"GH_TOKEN", "OTHER_TOKEN"}
+	got := src.resolver.allowedTokenEnvs
+	if len(got) != len(want) {
+		t.Fatalf("resolver.allowedTokenEnvs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("resolver.allowedTokenEnvs = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestSource_RefreshAfterSetParentOverrides(t *testing.T) {
 	repoDir := t.TempDir()
 	taskDir := writeTaskDir(t, repoDir, "deploy")

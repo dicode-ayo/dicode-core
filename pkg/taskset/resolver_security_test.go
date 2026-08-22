@@ -263,3 +263,206 @@ spec:
 		t.Errorf("failure should explain the kind mismatch, got: %v", failures[0].Error)
 	}
 }
+
+// ── #753: the two residuals #748 left behind — an operator allowlist for
+// token_env, and mustBeTask matching only a literal "task.yaml" basename. ──
+
+// TestTokenEnvAllowed is a pure unit test of the allowlist decision
+// ensureClone delegates to: an empty/nil allowlist is unrestricted (matching
+// behavior before this allowlist existed), while a non-empty allowlist is
+// exhaustive.
+func TestTokenEnvAllowed(t *testing.T) {
+	cases := []struct {
+		name      string
+		envVar    string
+		allowlist []string
+		want      bool
+	}{
+		{"no allowlist configured", "GH_TOKEN", nil, true},
+		{"empty allowlist configured", "GH_TOKEN", []string{}, true},
+		{"listed", "GH_TOKEN", []string{"GH_TOKEN", "OTHER"}, true},
+		{"not listed", "OPENAI_API_KEY", []string{"GH_TOKEN"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tokenEnvAllowed(tc.envVar, tc.allowlist); got != tc.want {
+				t.Errorf("tokenEnvAllowed(%q, %v) = %v, want %v", tc.envVar, tc.allowlist, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnsureClone_TokenEnvAllowlist_BlocksUnlistedVar is the #753 regression
+// test for the first residual: even a ref trusted enough to carry auth
+// (allowAuth=true) must have its token_env stripped when the operator has
+// configured an allowlist that doesn't name it. Before the fix, Resolver had
+// no allowedTokenEnvs concept at all, so gatedTokenEnv's allowAuth=true
+// result passed straight through regardless of which variable was named.
+func TestEnsureClone_TokenEnvAllowlist_BlocksUnlistedVar(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commit(t, "marker.txt", "content", "seed")
+
+	logger, logs := newObservedLogger()
+	r := NewResolver(t.TempDir(), false, logger)
+	r.SetAllowedTokenEnvs([]string{"GH_TOKEN"})
+
+	dir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "OPENAI_API_KEY", true)
+	if err != nil {
+		t.Fatalf("ensureClone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); err != nil {
+		t.Errorf("clone should still succeed unauthenticated against a repo with no real auth requirement: %v", err)
+	}
+	if n := logs.FilterMessageSnippet("not in the operator's source_security.allowed_token_envs allowlist").Len(); n != 1 {
+		t.Errorf("want exactly 1 allowlist-block warning, got %d", n)
+	}
+}
+
+// TestEnsureClone_TokenEnvAllowlist_PermitsListedVar proves the allowlist
+// only blocks — it never breaks a variable the operator did list, and an
+// unset allowlist stays fully permissive (no regression from #740's
+// allowAuth=true path).
+func TestEnsureClone_TokenEnvAllowlist_PermitsListedVar(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commit(t, "marker.txt", "content", "seed")
+
+	cases := []struct {
+		name      string
+		allowlist []string
+	}{
+		{"listed explicitly", []string{"GH_TOKEN"}},
+		{"no allowlist configured", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, logs := newObservedLogger()
+			r := NewResolver(t.TempDir(), false, logger)
+			r.SetAllowedTokenEnvs(tc.allowlist)
+
+			if _, err := r.ensureClone(context.Background(), bare.url, "main", 0, "GH_TOKEN", true); err != nil {
+				t.Fatalf("ensureClone: %v", err)
+			}
+			if n := logs.FilterMessageSnippet("allowed_token_envs allowlist").Len(); n != 0 {
+				t.Errorf("token_env named in (or with no) allowlist must not be blocked, got %d warnings", n)
+			}
+		})
+	}
+}
+
+// TestResolveRef_MustBeTask_AcceptsTaskYml is the #753 regression test for
+// the extension half of the second residual: a ref path ending in "task.yml"
+// — which task.LoadDirWithVars and write-task-file's assertTaskDocument both
+// accept — must be treated exactly like "task.yaml" by the mustBeTask guard.
+// Before the fix, mustBeTask compared only against the literal "task.yaml"
+// basename, so a "task.yml" ref smuggling kind: TaskSet would have flattened
+// straight into the result set instead of being refused.
+func TestResolveRef_MustBeTask_AcceptsTaskYml(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, repoDir, "task.yml", `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: evil
+spec:
+  entries: {}
+`)
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    evil:
+      ref:
+        path: ./task.yml
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a task.yml ref smuggling kind: TaskSet must not flatten into results, got %d: %+v", len(results), results)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("want exactly 1 resolve failure, got %d: %+v", len(failures), failures)
+	}
+	if !strings.Contains(failures[0].Error.Error(), "TaskSet") {
+		t.Errorf("failure should explain the kind mismatch, got: %v", failures[0].Error)
+	}
+}
+
+// TestResolveRef_MustBeTask_DirectoryValuedRefResolvesToTaskFile is the
+// #753 regression test for the directory half of the second residual: a ref
+// whose configured path names a DIRECTORY, not a file, must still trigger the
+// mustBeTask guard once resolveYAMLPath's own probe lands it on a task.yaml
+// inside that directory. Before the fix, mustBeTask was computed from the
+// ref's literal (pre-resolution) basename — "evil", not "task.yaml" — so this
+// exact shape resolved as kind: TaskSet unchecked.
+func TestResolveRef_MustBeTask_DirectoryValuedRefResolvesToTaskFile(t *testing.T) {
+	repoDir := t.TempDir()
+	evilDir := filepath.Join(repoDir, "evil")
+	if err := os.MkdirAll(evilDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, evilDir, "task.yaml", `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: evil
+spec:
+  entries: {}
+`)
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    evil:
+      ref:
+        path: ./evil
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a directory-valued ref resolving to a task file and smuggling kind: TaskSet must not flatten into results, got %d: %+v", len(results), results)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("want exactly 1 resolve failure, got %d: %+v", len(failures), failures)
+	}
+	if !strings.Contains(failures[0].Error.Error(), "TaskSet") {
+		t.Errorf("failure should explain the kind mismatch, got: %v", failures[0].Error)
+	}
+}
+
+// TestIsTaskFileName is a direct unit test of the basename predicate the
+// mustBeTask fix relies on.
+func TestIsTaskFileName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"task.yaml", true},
+		{"task.yml", true},
+		{"taskset.yaml", false},
+		{"Task.yaml", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isTaskFileName(tc.name); got != tc.want {
+			t.Errorf("isTaskFileName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

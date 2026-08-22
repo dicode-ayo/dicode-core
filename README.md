@@ -626,6 +626,14 @@ source_security:
   allow_internal_hosts:
     - git.corp.internal                   # authorises ssh:// and git@host:path to this host
     - 10.0.0.0/8                          # ALSO required for http/https (see note below)
+  # Optional: restrict which env var names a trusted git ref's auth.token_env
+  # may name. Unset = unrestricted (today's default). Only applies to refs
+  # already trusted to carry auth (dicode.yaml's source ref, or an entry in a
+  # source's root taskset.yaml) — never to a ref discovered inside a resolved
+  # sub-tree, which never gets auth honoured regardless of this list.
+  allowed_token_envs:
+    - GITHUB_TOKEN
+    - GIT_DEPLOY_TOKEN
 
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.
@@ -639,6 +647,8 @@ data_dir: ~/.dicode                       # where to store repo clones, sqlite d
 - `http`/`https` remotes are *additionally* re-checked at connection time against the **resolved IP**, so for those you must also list the target's **IP or CIDR** (e.g. `10.0.0.0/8`). A hostname entry alone never authorises the address it resolves to — this is deliberate, so allowlisting a name can't be turned into a DNS-rebind bypass.
 
 Leave the block empty (or omit it) to keep the fully fail-closed default. A rejected clone's error names this key.
+
+**Restricting which credential a trusted ref may name** (`source_security.allowed_token_envs`): a git ref's `auth.token_env` is only ever honoured when the ref is declared in operator-owned config to begin with (`dicode.yaml`'s source ref, or an entry in a source's root `taskset.yaml`) — never for a ref discovered while resolving an already-resolved sub-tree. `allowed_token_envs` narrows that further, to *which variable* such a ref may name: leave it unset to keep today's behavior (any variable in the daemon's environment), or list the specific names a `token_env` may ever reference.
 
 **Task ID uniqueness**: task IDs (directory names) must be unique across all sources. If two sources contain a task with the same ID, the second one is skipped and an error is logged.
 
