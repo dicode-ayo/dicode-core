@@ -451,13 +451,20 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 // "task.yml" basename, so the resolved file must not be kind: TaskSet — see
 // the mustBeTask check in resolveBody, #740).
 //
-// mustBeTask is computed from the RESOLVED path — after resolveYAMLPath has
-// expanded a directory-valued ref to the file it actually found inside —
-// rather than from ref.Path's literal basename (#753's second residual). A
-// ref whose path names a directory (e.g. "./x" or "./x/") used to always get
-// mustBeTask=false even when resolveYAMLPath's own probe order landed it on
-// a task.yaml inside that directory, silently exempting that shape from the
-// #740 hardening below.
+// mustBeTask is true if EITHER the ref's own configured path or the path
+// resolveYAMLPath actually landed on names a task file (#753's second
+// residual, hardened further after a security review of the first draft).
+// Checking the resolved path alone catches a ref whose path names a
+// directory (e.g. "./x" or "./x/") whose resolveYAMLPath probe lands on a
+// task.yaml inside it — before this fix that shape always got
+// mustBeTask=false, silently exempting it from the #740 hardening below.
+// Checking the configured path alone would miss that same case, but is
+// needed for the reverse: a writable source shadowing a scaffolded
+// ".../task.yaml" ref path with a DIRECTORY of that name holding a nested
+// taskset.yaml, which resolveYAMLPath would silently probe into and return
+// (basename "taskset.yaml"), clearing mustBeTask despite the ref being
+// declared exactly the trusted shape taskEntryRefPath writes. Checking both
+// closes each without reopening the other.
 // For git refs this may trigger a clone or pull.
 // parentTSPath is the absolute path of the parent taskset.yaml — used to resolve
 // relative paths in local refs against the parent's directory.
@@ -505,20 +512,8 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		}
 	}
 	resolvedPath := resolveYAMLPath(resolved)
-	// mustBeTask is true if EITHER the ref's own configured path names a task
-	// file, or the path resolveYAMLPath actually landed on does (security
-	// review of #753's first draft). Checking only the resolved basename let
-	// a writable source shadow a scaffolded ".../task.yaml" ref path with a
-	// DIRECTORY of that same name containing a nested taskset.yaml:
-	// resolveYAMLPath silently probes into it and returns the nested file,
-	// whose basename is "taskset.yaml" — clearing mustBeTask even though the
-	// ref was declared exactly the trusted shape taskEntryRefPath scaffolds.
-	// Checking only the configured path, in turn, is what missed a
-	// directory-valued ref whose probe lands on a task file — the original
-	// #753 gap this fix was written for. Checking both closes each without
-	// reopening the other: a genuine directory ref that was never declared
-	// as a task file (e.g. a normal nested TaskSet subdirectory) matches
-	// neither and resolves exactly as it did before #753.
+	// See this function's doc comment for why mustBeTask ORs the configured
+	// and resolved basenames rather than checking either alone.
 	mustBeTask := isTaskFileName(filepath.Base(path)) || isTaskFileName(filepath.Base(resolvedPath))
 	return resolvedPath, mustBeTask, nil
 }
