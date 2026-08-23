@@ -254,6 +254,12 @@ func (r *Resolver) resolveBody(
 		}
 
 		if entry.Inline != nil {
+			// Expand ${VAR} references in the inline base spec itself before
+			// applying overrides — mirrors what LoadDirWithVars does for a
+			// ref-loaded task.yaml. Without this, an inline entry's own
+			// fields (e.g. permissions.fs[].path) never see substitution,
+			// even though the override layers stacked on top of it do (#726).
+			task.ExpandSpec(entry.Inline, filepath.Dir(tsPath), r.withDataDir(extraVars))
 			layers := expandOverrideLayers(
 				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
 				filepath.Dir(tsPath), r.withDataDir(extraVars))

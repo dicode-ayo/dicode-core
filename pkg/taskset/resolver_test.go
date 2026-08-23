@@ -676,6 +676,72 @@ spec:
 	}
 }
 
+// An inline taskset entry's own base spec must get the same ${VAR}
+// expansion a ref-loaded task.yaml gets from LoadDirWithVars. Regression
+// guard for #726: only the override layers stacked on top of entry.Inline
+// were expanded, leaving literal ${TASK_SET_DIR}/${VAR} tokens in the
+// inline base spec's own permissions.fs[].path and params[].default.
+func TestResolver_InlineEntry_ExpandsVar(t *testing.T) {
+	repoDir := t.TempDir()
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    health-check:
+      inline:
+        name: Health Check
+        runtime: deno
+        trigger:
+          manual: true
+        params:
+          shared_dir:
+            type: string
+            default: "${TASK_SET_DIR}/shared"
+            description: ""
+        permissions:
+          fs:
+            - path: "${TASK_SET_DIR}/pool"
+              permission: rw
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	wantDir := filepath.Dir(tsPath)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if len(spec.Permissions.FS) != 1 {
+		t.Fatalf("want 1 fs entry, got %d", len(spec.Permissions.FS))
+	}
+	if got, want := spec.Permissions.FS[0].Path, wantDir+"/pool"; got != want {
+		t.Errorf("fs.path: got %q, want %q (literal ${TASK_SET_DIR} survived expansion)", got, want)
+	}
+
+	var sharedDefault string
+	for _, p := range spec.Params {
+		if p.Name == "shared_dir" {
+			sharedDefault = p.Default
+			break
+		}
+	}
+	if got, want := sharedDefault, wantDir+"/shared"; got != want {
+		t.Errorf("params[shared_dir].default: got %q, want %q (literal ${TASK_SET_DIR} survived expansion)", got, want)
+	}
+}
+
 // ── mergeOverrides ────────────────────────────────────────────────────────────
 
 func TestMergeOverrides_BNil(t *testing.T) {
