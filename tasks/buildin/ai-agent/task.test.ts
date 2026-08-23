@@ -96,7 +96,7 @@ test("returns not_configured when no provider params are set", async () => {
   // fails its dispatch on a null field, which would replace the hint with the
   // resolver's own error.
   assert.ok(result.reply.includes("model"));
-  assert.ok(result.task_dir);
+  assert.ok(result.caller_context);
   assert.ok(result.session_id);
   // Should list model and base_url as missing at minimum
   assert.ok(result.missing.includes("model"));
@@ -871,4 +871,46 @@ test("eager keeps the skill bodies after the operator's system prompt", async ()
   const prompt = lastSystemPrompt();
   assert.ok(prompt.indexOf("OPERATOR_PROMPT_MARKER") < prompt.indexOf("UNIQUE_BODY_MARKER"),
     "eager mode must leave the bodies where they were");
+});
+
+// caller_context is the agent's opaque pass-through: a pipeline stage cannot
+// read the params its pipeline was fired with unless it is stage 0, so a
+// caller that needs its own context on the far side of an agent turn sends it
+// here and reads it back off the return value. The agent must never interpret
+// it — buildin/task-create sends an absolute path through it, and a future
+// caller could send anything at all.
+test("caller_context is returned verbatim and never interpreted", async () => {
+  useLocal();
+  params.set("prompt", "hello");
+  params.set("caller_context", "/srv/ai-tasks/zen quote/../weird:value");
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("done"),
+  });
+
+  const result = await runTask();
+
+  assert.equal(result.caller_context, "/srv/ai-tasks/zen quote/../weird:value");
+  // It is the caller's value, not an instruction to the model: it must not
+  // reach the provider at all.
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  assert.ok(!JSON.stringify(sent).includes("weird:value"));
+});
+
+// An absent pass-through still has to come back non-empty: the downstream
+// ${input.output.caller_context} reference fails its dispatch on an empty
+// string, which would take a whole pipeline down over a field nobody set.
+test("caller_context defaults to a non-empty sentinel when unset", async () => {
+  useLocal();
+  params.set("prompt", "hello");
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("done"),
+  });
+
+  const result = await runTask();
+
+  assert.equal(result.caller_context, "unknown");
 });

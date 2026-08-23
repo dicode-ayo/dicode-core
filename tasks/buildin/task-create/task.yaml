@@ -47,14 +47,17 @@ stages:
           default: "${input.params.prompt}"
         - name: session_id
           default: "${input.params.session_id}"
-        - name: task_dir
+        # The agent never reads this; it hands it back verbatim so the
+        # verification stage can learn where the turn was told to write. A
+        # stage cannot see the pipeline's own fire params unless it is stage 0.
+        - name: caller_context
           default: "${input.params.task_dir}"
 
   - task: buildin/verify-task-written
     overrides:
       params:
         - name: task_dir
-          default: "${input.output.task_dir}"
+          default: "${input.output.caller_context}"
         - name: reply
           default: "${input.output.reply}"
         - name: session_id

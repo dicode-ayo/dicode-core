@@ -191,8 +191,13 @@ func TestTaskCreatePipeline_VerifiesWhatTheTurnWrote(t *testing.T) {
 	for _, po := range first.Overrides.Params {
 		threaded[po.Name] = po.Default
 	}
-	for _, name := range []string{"prompt", "session_id", "task_dir"} {
-		want := "${input.params." + name + "}"
+	for name, want := range map[string]string{
+		"prompt":     "${input.params.prompt}",
+		"session_id": "${input.params.session_id}",
+		// task_dir is authoring's concern, not the generic agent's: it rides
+		// across the turn in the agent's opaque caller_context pass-through.
+		"caller_context": "${input.params.task_dir}",
+	} {
 		if threaded[name] != want {
 			t.Errorf("first stage param %q = %q, want %q", name, threaded[name], want)
 		}
@@ -208,7 +213,7 @@ func TestTaskCreatePipeline_VerifiesWhatTheTurnWrote(t *testing.T) {
 			}
 		}
 	}
-	if verifyDir != "${input.output.task_dir}" {
-		t.Errorf("verify stage task_dir = %q, want ${input.output.task_dir}", verifyDir)
+	if verifyDir != "${input.output.caller_context}" {
+		t.Errorf("verify stage task_dir = %q, want ${input.output.caller_context}", verifyDir)
 	}
 }

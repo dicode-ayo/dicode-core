@@ -610,7 +610,7 @@ interface NotConfiguredResponse {
   error: "not_configured";
   missing: string[];
   hint: string;
-  task_dir: string;
+  caller_context: string;
 }
 
 // requireTaskId fails loud when the IPC handshake didn't populate task_id.
@@ -1044,9 +1044,9 @@ async function oneShotTurn(
   const resolved = await resolveAgentRuntime(params, dicode);
   if (!resolved.ok) {
     // Same non-empty guarantee as the success path below, for the same
-    // reason: a downstream pipeline stage reads reply and task_dir through
-    // ${input.output.<field>}, which fails the dispatch on a null or absent
-    // field. Returning the misconfiguration as prose is also what lets the
+    // reason: a downstream pipeline stage reads reply and caller_context
+    // through ${input.output.<field>}, which fails the dispatch on a null or
+    // absent field. Returning the misconfiguration as prose is also what lets the
     // hint reach the caller at all — an input-reference error would replace
     // it with the resolver's own message.
     const response: NotConfiguredResponse = {
@@ -1055,7 +1055,7 @@ async function oneShotTurn(
       error: "not_configured",
       missing: resolved.missing,
       hint: resolved.hint,
-      task_dir: await params.get("task_dir") || "unknown",
+      caller_context: await params.get("caller_context") || "unknown",
     };
     return response;
   }
@@ -1071,14 +1071,14 @@ async function oneShotTurn(
   // Do NOT call output.html() here; it would override Content-Type and the
   // browser UI would have to parse HTML instead of JSON.
   //
-  // reply and task_dir are both guaranteed non-empty: a downstream pipeline
-  // stage reaches them through ${input.output.<field>}, which fails the
-  // dispatch on an empty string. A turn that ends on tool calls alone would
-  // otherwise take the whole pipeline down with it.
+  // reply and caller_context are both guaranteed non-empty: a downstream
+  // pipeline stage reaches them through ${input.output.<field>}, which fails
+  // the dispatch on an empty string. A turn that ends on tool calls alone
+  // would otherwise take the whole pipeline down with it.
   return {
     session_id: sessionId,
     reply: reply || "(the model returned no text this turn)",
-    task_dir: await params.get("task_dir") || "unknown",
+    caller_context: await params.get("caller_context") || "unknown",
   };
 }
 

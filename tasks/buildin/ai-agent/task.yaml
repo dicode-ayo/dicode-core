@@ -27,14 +27,16 @@ params:
     type: string
     default: ""
     description: "Conversation id. Empty = auto-generate and return in response."
-  task_dir:
+  caller_context:
     type: string
     default: ""
     description: >
-      Directory the caller wants this turn's file writes to land in. The agent
-      does not read it — it is echoed back in the response so a downstream
-      pipeline stage can check that directory against what the reply claims
-      (#755). "unknown" means the caller could not resolve one.
+      Opaque value the agent never reads, returned verbatim in the response.
+      A pipeline stage cannot see the params its pipeline was fired with (only
+      stage 0 can), so a caller that needs its own context on the far side of
+      an agent turn — a target path, a ticket id, a run key — passes it here
+      and reads it back off the turn's return value. Same pass-through shape
+      as session_id.
 
   # ─── Tools ─────────────────────────────────────────────────────────────────
   # Tools are other dicode tasks the model can call via dicode.run_task().
