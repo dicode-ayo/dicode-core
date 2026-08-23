@@ -99,13 +99,7 @@ func cmdTaskCreate(c *ipc.ControlClient, args []string) error {
 	} else if res.Reply != "" {
 		fmt.Fprintln(os.Stderr, res.Reply)
 	}
-	printFilesWritten(res.FilesChanged)
-	// The scaffold landed and the task is registered, so a pipeline still
-	// needs the id even when the turn that followed wrote nothing (#755).
 	fmt.Println(res.TaskID)
-	if res.WroteNothing {
-		return wroteNothingError(res.TaskID, res.RunID)
-	}
 	return nil
 }
 
@@ -190,29 +184,7 @@ func cmdTaskEdit(c *ipc.ControlClient, args []string) error {
 	if res.Reply != "" {
 		fmt.Println(res.Reply)
 	}
-	printFilesWritten(res.FilesChanged)
-	if res.WroteNothing {
-		return wroteNothingError(res.TaskID, res.RunID)
-	}
 	return nil
-}
-
-// printFilesWritten names what the AI turn changed on disk (#755). Metadata,
-// so stderr — stdout stays the reply. Silent when nothing changed and when the
-// post-condition was not evaluated at all; the two are distinguished by
-// TaskEditResult.WroteNothing, not by this line.
-func printFilesWritten(files []string) {
-	if len(files) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "wrote: %s\n", strings.Join(files, ", "))
-}
-
-// wroteNothingError is the non-zero exit for a turn that completed while
-// leaving the task directory untouched (#755). The reply is already printed
-// above it — evidence the caller can read, not a verdict.
-func wroteNothingError(taskID, runID string) error {
-	return fmt.Errorf("the AI turn changed no files in %s — nothing was written to disk, whatever the reply above says (run %s)", taskID, runID)
 }
 
 // cmdTaskSave applies a session and closes it.

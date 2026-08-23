@@ -1,0 +1,35 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Verify Task Written"
+description: >
+  Post-condition for an AI authoring turn: checks that the target task
+  directory actually holds a task, and fails the run when it does not. An
+  agent's reply is its own account of its work; this reads the disk instead
+  (#755). Runs as the terminal stage of buildin/task-create, so its verdict
+  becomes the pipeline's status and its return value becomes the turn's
+  response.
+runtime: deno
+trigger:
+  manual: true
+params:
+  task_dir:
+    type: string
+    required: true
+    description: >
+      Absolute directory the turn was told to write into. The literal
+      "unknown" means the caller could not resolve one, and the check is
+      skipped rather than failed — an unevaluated post-condition is not a
+      negative one.
+  reply:
+    type: string
+    default: ""
+    description: "The turn's reply, passed through to the pipeline's response."
+  session_id:
+    type: string
+    default: ""
+    description: "The turn's session id, passed through to the pipeline's response."
+permissions:
+  fs:
+    - path: "${DATADIR}/ai-tasks"
+      permission: r
+timeout: 30s

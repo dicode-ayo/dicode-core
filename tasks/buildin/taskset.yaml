@@ -244,11 +244,22 @@ spec:
     # deliberately carries no provider defaults) so it works zero-config with
     # just OPENAI_API_KEY set — cfg.AI.CreateTask documents "buildin/task-create"
     # as the out-of-the-box default other users are expected to just use.
+    # The pipeline `ai.create_task` points at: the agent turn below, then the
+    # post-condition that checks the target directory against what the turn
+    # claimed (#755). Firing task-create-turn directly skips that check.
     task-create:
+      ref:
+        path: ./task-create/task.yaml
+
+    verify-task-written:
+      ref:
+        path: ./verify-task-written/task.yaml
+
+    task-create-turn:
       ref:
         path: ./ai-agent/task.yaml
       overrides:
-        name: "Task Create (AI)"
+        name: "Task Create (AI) — agent turn"
         description: >
           Scaffolds a brand-new dicode task from a natural-language
           description. Writes task.yaml + task.ts/task.js + task.test.ts

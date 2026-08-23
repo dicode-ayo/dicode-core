@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -309,10 +306,6 @@ type promptCapturingEngine struct {
 	status string // defaults to "success"
 	reply  string
 	sessID string
-	// onFire runs inside FireManual, standing in for whatever the agent
-	// does to the task directory during its turn — the window the #755
-	// post-condition snapshots around.
-	onFire func()
 }
 
 func (e *promptCapturingEngine) FireManual(_ context.Context, taskID string, params map[string]string) (string, error) {
@@ -320,9 +313,6 @@ func (e *promptCapturingEngine) FireManual(_ context.Context, taskID string, par
 		return "", errors.New("unexpected task id: " + taskID)
 	}
 	e.calls = append(e.calls, params)
-	if e.onFire != nil {
-		e.onFire()
-	}
 	return fmt.Sprintf("run-%d", len(e.calls)), nil
 }
 
@@ -375,8 +365,14 @@ func TestControl_TaskEdit_PromptFiresAITurn(t *testing.T) {
 	if _, ok := got["task_id"]; ok {
 		t.Errorf("must not send a bare task_id param — ai-agent doesn't declare or read one (#723): params = %v", got)
 	}
-	if _, ok := got["session_id"]; ok {
-		t.Errorf("first turn must not send session_id (no prior turn): params = %v", got)
+	// A pipeline stage's ${input.params.session_id} reference fails the
+	// dispatch when the value is absent or empty, so the first turn mints one
+	// rather than omitting it (#755).
+	if got["session_id"] == "" {
+		t.Errorf("first turn must send a freshly minted session_id: params = %v", got)
+	}
+	if got["task_dir"] == "" {
+		t.Errorf("every turn must send a non-empty task_dir, sentinel included: params = %v", got)
 	}
 	// The turn's agent session id must have been persisted back onto the
 	// authoring session for the next call to pick up.
@@ -523,8 +519,8 @@ func TestControl_TaskEdit_ConcurrentSameSession_Serializes(t *testing.T) {
 	// is parked in WaitRunSettled.
 	select {
 	case params1 := <-eng.fireCh:
-		if _, ok := params1["session_id"]; ok {
-			t.Errorf("call 1 sent a session_id param, want none (first turn): %v", params1)
+		if params1["session_id"] == "" {
+			t.Errorf("call 1 must mint a session_id for the first turn: %v", params1)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("call 1 never fired")
@@ -712,243 +708,35 @@ func TestControl_TaskEdit_PromptOmitsEmptyTaskDir(t *testing.T) {
 	}
 }
 
-// scaffoldTaskDir writes the two files CreateTask scaffolds, so a test starts
-// from the same on-disk state a real authoring turn does.
-func scaffoldTaskDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	write := func(name, body string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	write("task.yaml", "apiVersion: dicode/v1\nkind: Task\nname: t\n")
-	write("task.js", "export default async function main() {}\n")
-	return dir
-}
-
-// TestControl_TaskEdit_TurnThatWritesNothing_ReportsWroteNothing pins #755's
-// central case: the agent answers with a confident account of files it never
-// wrote, and the run itself succeeds. The reply still reaches the caller —
-// what changes is that the untouched directory is reported as a fact
-// alongside it.
-func TestControl_TaskEdit_TurnThatWritesNothing_ReportsWroteNothing(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
-	eng := &promptCapturingEngine{reply: "I created task.yaml, task.ts and task.test.ts. All three are written."}
-	cs := newAuthoringAIControl(t, m, eng)
-
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
-	if err != nil {
-		t.Fatalf("handleTaskEdit: %v", err)
-	}
-	if !res.WroteNothing {
-		t.Error("a turn that touched no file must report WroteNothing")
-	}
-	if len(res.FilesChanged) != 0 {
-		t.Errorf("FilesChanged = %v, want none", res.FilesChanged)
-	}
-	if res.Reply != eng.reply {
-		t.Errorf("Reply = %q, want the agent's reply carried through unchanged", res.Reply)
-	}
-}
-
-// TestControl_TaskEdit_TurnThatWrites_ReportsChangedFiles covers all three
-// ways a directory can move — a file added, one rewritten, one removed — since
-// only the first is what an authoring turn usually does and the other two must
-// not read as "wrote nothing".
-func TestControl_TaskEdit_TurnThatWrites_ReportsChangedFiles(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
-	eng := &promptCapturingEngine{reply: "done"}
-	eng.onFire = func() {
-		if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("apiVersion: dicode/v1\nkind: Task\nname: t\ntrigger:\n  cron: \"0 9 * * *\"\n"), 0644); err != nil {
-			t.Errorf("rewrite task.yaml: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0644); err != nil {
-			t.Errorf("write task.ts: %v", err)
-		}
-		if err := os.Remove(filepath.Join(dir, "task.js")); err != nil {
-			t.Errorf("remove task.js: %v", err)
-		}
-	}
-	cs := newAuthoringAIControl(t, m, eng)
-
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
-	if err != nil {
-		t.Fatalf("handleTaskEdit: %v", err)
-	}
-	if res.WroteNothing {
-		t.Error("a turn that rewrote, added and removed files must not report WroteNothing")
-	}
-	want := []string{"task.js", "task.ts", "task.yaml"}
-	if !reflect.DeepEqual(res.FilesChanged, want) {
-		t.Errorf("FilesChanged = %v, want %v (removed, added, modified)", res.FilesChanged, want)
-	}
-}
-
-// TestControl_TaskEdit_SuspendedRun_LeavesPostConditionUnevaluated: a
-// suspended turn hasn't finished, so its directory being untouched says
-// nothing about whether it will write.
-func TestControl_TaskEdit_SuspendedRun_LeavesPostConditionUnevaluated(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
-	eng := &promptCapturingEngine{status: registry.StatusSuspended}
-	cs := newAuthoringAIControl(t, m, eng)
-
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "need clarification"})
-	if err != nil {
-		t.Fatalf("handleTaskEdit: %v", err)
-	}
-	if res.WroteNothing {
-		t.Error("a suspended turn must not be condemned for having written nothing yet")
-	}
-}
-
-// TestControl_TaskEdit_UnknownTaskDir_LeavesPostConditionUnevaluated: with no
-// directory to snapshot the check has no verdict, and an unevaluated
-// post-condition must not masquerade as a negative one.
-func TestControl_TaskEdit_UnknownTaskDir_LeavesPostConditionUnevaluated(t *testing.T) {
+// TestControl_TaskEdit_UnresolvedTaskDirTravelsAsSentinel: buildin/task-create
+// is a pipeline, and a stage's ${input.params.task_dir} reference fails the
+// dispatch on an empty value. An unresolved directory therefore has to travel
+// as a sentinel the post-condition stage can recognise, not as an omission
+// that would fail the turn outright (#755).
+func TestControl_TaskEdit_UnresolvedTaskDirTravelsAsSentinel(t *testing.T) {
 	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
 	eng := &promptCapturingEngine{reply: "done"}
 	cs := newAuthoringAIControl(t, m, eng)
 
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
-	if err != nil {
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"}); err != nil {
 		t.Fatalf("handleTaskEdit: %v", err)
 	}
-	if res.WroteNothing {
-		t.Error("an unresolvable task dir must leave WroteNothing false, not report a failure it never checked")
-	}
-	if len(res.FilesChanged) != 0 {
-		t.Errorf("FilesChanged = %v, want none", res.FilesChanged)
+	if got := eng.calls[0]["task_dir"]; got != unresolvedTaskDir {
+		t.Errorf("task_dir = %q, want the %q sentinel", got, unresolvedTaskDir)
 	}
 }
 
-// TestControl_TaskCreate_WithAI_FoldsPostCondition: `task create --ai` chains
-// into an edit turn, so the same verdict has to reach the create result — this
-// is the exact command #755 was filed against.
-func TestControl_TaskCreate_WithAI_FoldsPostCondition(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{
-		createResult: AuthoringCreateResult{TaskID: "ai-scratch/zen-quote", Source: "ai-scratch", Files: []string{"task.yaml", "task.js"}},
-		editResult:   AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/zen-quote", TaskDir: dir},
-	}
-	eng := &promptCapturingEngine{reply: "I wrote all three files."}
-	cs := newAuthoringAIControl(t, m, eng)
-
-	t.Run("turn wrote nothing", func(t *testing.T) {
-		res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "fetch the zen endpoint daily"})
-		if err != nil {
-			t.Fatalf("handleTaskCreate: %v", err)
-		}
-		if !res.WroteNothing {
-			t.Error("create --ai must carry the chained turn's wrote-nothing verdict")
-		}
-	})
-
-	t.Run("turn wrote a file", func(t *testing.T) {
-		eng.onFire = func() {
-			if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0644); err != nil {
-				t.Errorf("write task.ts: %v", err)
-			}
-		}
-		res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen-quote", Prompt: "try again"})
-		if err != nil {
-			t.Fatalf("handleTaskCreate: %v", err)
-		}
-		if res.WroteNothing {
-			t.Error("a turn that wrote a file must clear the verdict")
-		}
-		if !reflect.DeepEqual(res.FilesChanged, []string{"task.ts"}) {
-			t.Errorf("FilesChanged = %v, want [task.ts]", res.FilesChanged)
-		}
-	})
-}
-
-// TestControl_TaskEdit_WroteNothing_LandsOnTheRunLog: the agent task's run
-// really did succeed, so its status stays "success" and an operator reading
-// history would see only green. The verdict has to be somewhere durable and
-// attached to that run — `dicode logs <run-id>` and the WebUI run detail both
-// read the run log (#755).
-func TestControl_TaskEdit_WroteNothing_LandsOnTheRunLog(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
-	eng := &promptCapturingEngine{reply: "all three files are written"}
-	cs := newAuthoringAIControl(t, m, eng)
-
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
-	if err != nil {
-		t.Fatalf("handleTaskEdit: %v", err)
-	}
-	logs, err := cs.reg.GetRunLogs(context.Background(), res.RunID)
-	if err != nil {
-		t.Fatalf("GetRunLogs: %v", err)
-	}
-	var found string
-	for _, l := range logs {
-		if strings.Contains(l.Message, "post-condition") {
-			found = l.Message
-		}
-	}
-	if found == "" {
-		t.Fatalf("the wrote-nothing verdict must reach run %s's log, got %d entries", res.RunID, len(logs))
-	}
-	if !strings.Contains(found, dir) {
-		t.Errorf("the run-log line must name the directory checked, got %q", found)
-	}
-}
-
-// TestControl_TaskEdit_TurnThatWrote_LeavesTheRunLogAlone: the verdict line is
-// the exception, not a per-turn annotation.
-func TestControl_TaskEdit_TurnThatWrote_LeavesTheRunLogAlone(t *testing.T) {
-	dir := scaffoldTaskDir(t)
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: dir}}
+// TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim guards the other half:
+// the sentinel must never stand in for a directory that did resolve.
+func TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: "/srv/tasks/t"}}
 	eng := &promptCapturingEngine{reply: "done"}
-	eng.onFire = func() {
-		if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0644); err != nil {
-			t.Errorf("write task.ts: %v", err)
-		}
-	}
 	cs := newAuthoringAIControl(t, m, eng)
 
-	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"})
-	if err != nil {
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"}); err != nil {
 		t.Fatalf("handleTaskEdit: %v", err)
 	}
-	logs, err := cs.reg.GetRunLogs(context.Background(), res.RunID)
-	if err != nil {
-		t.Fatalf("GetRunLogs: %v", err)
-	}
-	for _, l := range logs {
-		if strings.Contains(l.Message, "post-condition") {
-			t.Errorf("a turn that wrote files must not log a verdict, got %q", l.Message)
-		}
-	}
-}
-
-// TestSnapshotTaskDir_ErrorNamesTheOperationAndDirectory: the failure is only
-// ever seen in a daemon log line, next to the same task's other warnings, so
-// it has to say which operation failed. The underlying fs.PathError already
-// carries the path; what the wrap adds is that this was the snapshot.
-func TestSnapshotTaskDir_ErrorNamesTheOperationAndDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads through a 0000 directory")
-	}
-	dir := scaffoldTaskDir(t)
-	if err := os.Chmod(dir, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-
-	_, err := snapshotTaskDir(dir)
-	if err == nil {
-		t.Fatal("an unreadable directory must not snapshot cleanly")
-	}
-	if !strings.Contains(err.Error(), dir) {
-		t.Errorf("error = %q, want the unreadable directory named in it", err)
-	}
-	if !strings.Contains(err.Error(), "inventory task dir") {
-		t.Errorf("error = %q, want it to name the operation that failed", err)
+	if got := eng.calls[0]["task_dir"]; got != "/srv/tasks/t" {
+		t.Errorf("task_dir = %q, want the resolved directory", got)
 	}
 }

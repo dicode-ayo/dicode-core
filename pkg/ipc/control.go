@@ -18,6 +18,7 @@ import (
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/tasktest"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -504,8 +505,6 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	out.Reply = edit.Reply
 	out.RunID = edit.RunID
 	out.Suspended = edit.Suspended
-	out.FilesChanged = edit.FilesChanged
-	out.WroteNothing = edit.WroteNothing
 	return out, nil
 }
 
@@ -567,7 +566,10 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	if cs.defaultCreateTask == "" {
 		return out, fmt.Errorf("session %s opened but no create task configured — set ai.create_task in dicode.yaml", res.SessionID)
 	}
-	if _, ok := cs.reg.Get(cs.defaultCreateTask); !ok {
+	// GetKinded, not Get: buildin/task-create is a kind: PipelineTask (the
+	// authoring turn plus the disk post-condition that follows it, #755), and
+	// Get filters to kind: Task.
+	if _, ok := cs.reg.GetKinded(cs.defaultCreateTask); !ok {
 		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
 	}
 
@@ -586,21 +588,18 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	if res.TaskDir != "" {
 		header = fmt.Sprintf("(Target task: %s — its files live in %s; write them there with the write-task-file tool)", res.TaskID, res.TaskDir)
 	}
+	// Every value a pipeline stage needs must be threaded explicitly through
+	// ${input.params.<name>} on its first stage, and an absent or empty
+	// reference fails the dispatch — so task_dir and session_id are always
+	// sent, sentinel and freshly-minted respectively rather than omitted.
+	sessionID := res.AgentSessionID
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
 	params := map[string]string{
-		"prompt": header + "\n\n" + req.Prompt,
-	}
-	if res.AgentSessionID != "" {
-		params["session_id"] = res.AgentSessionID
-	}
-
-	// A turn's reply is the agent's own account of its work; only disk is
-	// evidence (#755). A snapshot that cannot be taken leaves the
-	// post-condition unevaluated — never condemned.
-	before, snapErr := snapshotTaskDir(res.TaskDir)
-	if snapErr != nil {
-		cs.log.Warn("cannot snapshot task directory; the turn's disk post-condition will not be evaluated",
-			zap.String("session", res.SessionID), zap.String("task", res.TaskID),
-			zap.String("dir", res.TaskDir), zap.Error(snapErr))
+		"prompt":     header + "\n\n" + req.Prompt,
+		"session_id": sessionID,
+		"task_dir":   taskDirParam(res.TaskDir),
 	}
 
 	runID, err := cs.engine.FireManual(ctx, cs.defaultCreateTask, params)
@@ -658,31 +657,6 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		}
 	}
 
-	if snapErr == nil {
-		after, aerr := snapshotTaskDir(res.TaskDir)
-		if aerr != nil {
-			cs.log.Warn("cannot re-snapshot task directory; the turn's disk post-condition was not evaluated",
-				zap.String("session", res.SessionID), zap.String("task", res.TaskID),
-				zap.String("dir", res.TaskDir), zap.Error(aerr))
-		} else {
-			out.FilesChanged = changedTaskFiles(before, after)
-			out.WroteNothing = len(out.FilesChanged) == 0
-			if out.WroteNothing {
-				cs.log.Warn("authoring turn wrote no files",
-					zap.String("session", res.SessionID), zap.String("task", res.TaskID),
-					zap.String("dir", res.TaskDir), zap.String("run", run.RunID))
-				// The run's own status stays success — the agent task did
-				// run — so the verdict has to reach the run log, or an
-				// operator reading history sees only green.
-				if lerr := cs.reg.AppendLog(ctx, run.RunID, "warn",
-					fmt.Sprintf("authoring post-condition: no file in %s changed during this turn — the reply is the agent's own account, not evidence of work", res.TaskDir),
-				); lerr != nil {
-					cs.log.Warn("failed to record the wrote-nothing verdict on the run log",
-						zap.String("run", run.RunID), zap.Error(lerr))
-				}
-			}
-		}
-	}
 	return out, nil
 }
 
@@ -1212,4 +1186,21 @@ func triggerLabel(s *task.Spec) string {
 	default:
 		return "manual"
 	}
+}
+
+// unresolvedTaskDir is the task_dir value sent when the authoring session
+// cannot resolve the target directory. A pipeline stage's ${input.params.…}
+// reference fails the dispatch on an empty value, so the fact has to travel as
+// a sentinel rather than as an omission — and the post-condition stage treats
+// it as "not checkable", never as "nothing was written". No real value can
+// collide with it: a resolved task dir is always an absolute path.
+const unresolvedTaskDir = "unknown"
+
+// taskDirParam renders dir for the task_dir param, substituting the sentinel
+// for an unresolved directory.
+func taskDirParam(dir string) string {
+	if dir == "" {
+		return unresolvedTaskDir
+	}
+	return dir
 }

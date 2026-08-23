@@ -1062,7 +1062,16 @@ async function oneShotTurn(
   // Bare return → dicode serializes as application/json.
   // Do NOT call output.html() here; it would override Content-Type and the
   // browser UI would have to parse HTML instead of JSON.
-  return { session_id: sessionId, reply };
+  //
+  // reply and task_dir are both guaranteed non-empty: a downstream pipeline
+  // stage reaches them through ${input.output.<field>}, which fails the
+  // dispatch on an empty string. A turn that ends on tool calls alone would
+  // otherwise take the whole pipeline down with it.
+  return {
+    session_id: sessionId,
+    reply: reply || "(the model returned no text this turn)",
+    task_dir: await params.get("task_dir") || "unknown",
+  };
 }
 
 export const steps = {

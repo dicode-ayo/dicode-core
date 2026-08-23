@@ -4,10 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 )
 
-// TestTaskCreateEntry_HasExpectedDicodePerms pins task-create's granted
+// TestTaskCreateEntry_HasExpectedDicodePerms pins task-create-turn's granted
 // capabilities against the real taskset.yaml rather than its doc comment.
 // Every capability listed here becomes a tool the model can call, so the
 // absent ones are as much a part of the contract as the present ones:
@@ -18,16 +19,16 @@ func TestTaskCreateEntry_HasExpectedDicodePerms(t *testing.T) {
 		t.Fatalf("load taskset: %v", err)
 	}
 
-	entry, ok := ts.Spec.Entries["task-create"]
+	entry, ok := ts.Spec.Entries["task-create-turn"]
 	if !ok {
-		t.Fatal("task-create entry not found in buildin taskset")
+		t.Fatal("task-create-turn entry not found in buildin taskset")
 	}
 	if entry.Overrides == nil {
-		t.Fatal("task-create entry has no overrides")
+		t.Fatal("task-create-turn entry has no overrides")
 	}
 	d := entry.Overrides.Dicode
 	if d == nil {
-		t.Fatal("task-create overrides.dicode is nil")
+		t.Fatal("task-create-turn overrides.dicode is nil")
 	}
 
 	want := map[string]bool{
@@ -87,9 +88,9 @@ func TestTaskCreateEntry_TriggerIsManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load taskset: %v", err)
 	}
-	entry, ok := ts.Spec.Entries["task-create"]
+	entry, ok := ts.Spec.Entries["task-create-turn"]
 	if !ok {
-		t.Fatal("task-create entry not found in buildin taskset")
+		t.Fatal("task-create-turn entry not found in buildin taskset")
 	}
 	if entry.Overrides == nil || entry.Overrides.Trigger == nil {
 		t.Fatal("task-create entry has no trigger override")
@@ -111,12 +112,12 @@ func TestTaskCreateEntry_ProviderDefaultsLikeDicodai(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load taskset: %v", err)
 	}
-	entry, ok := ts.Spec.Entries["task-create"]
+	entry, ok := ts.Spec.Entries["task-create-turn"]
 	if !ok {
-		t.Fatal("task-create entry not found in buildin taskset")
+		t.Fatal("task-create-turn entry not found in buildin taskset")
 	}
 	if entry.Overrides == nil {
-		t.Fatal("task-create entry has no overrides")
+		t.Fatal("task-create-turn entry has no overrides")
 	}
 
 	params := map[string]string{}
@@ -153,5 +154,61 @@ func TestTaskCreateEntry_ProviderDefaultsLikeDicodai(t *testing.T) {
 	}
 	if !hasOpenAINet {
 		t.Errorf("task-create net grants missing api.openai.com; got %v", entry.Overrides.Net)
+	}
+}
+
+// TestTaskCreatePipeline_VerifiesWhatTheTurnWrote pins the structure the #755
+// post-condition depends on. The check is not in the control plane — the
+// control plane fires whatever ai.create_task names — so it exists only for as
+// long as buildin/task-create stays a pipeline whose LAST stage reads the disk.
+// Collapsing it back to a bare agent entry silently restores the bug where a
+// turn that wrote nothing settles green, so that has to be a deliberate act
+// that fails this test, not an edit nobody notices.
+func TestTaskCreatePipeline_VerifiesWhatTheTurnWrote(t *testing.T) {
+	p, err := task.LoadPipelineDir("../../tasks/buildin/task-create", nil)
+	if err != nil {
+		t.Fatalf("buildin/task-create must be a kind: PipelineTask: %v", err)
+	}
+	if len(p.Stages) < 2 {
+		t.Fatalf("stages = %d, want the agent turn plus a verification stage", len(p.Stages))
+	}
+	last := p.Stages[len(p.Stages)-1]
+	if last.Task != "buildin/verify-task-written" {
+		t.Errorf("terminal stage = %q, want buildin/verify-task-written — a failing terminal stage is what fails the run", last.Task)
+	}
+	if p.Stages[0].Task != "buildin/task-create-turn" {
+		t.Errorf("first stage = %q, want buildin/task-create-turn", p.Stages[0].Task)
+	}
+
+	// Stages receive no params of their own and ${input.params.…} resolves
+	// only on the first stage, so the turn's inputs have to be threaded there
+	// explicitly or the agent runs with bare defaults and no prompt.
+	first := p.Stages[0]
+	if first.Overrides == nil {
+		t.Fatal("first stage must thread the fire params through overrides")
+	}
+	threaded := map[string]string{}
+	for _, po := range first.Overrides.Params {
+		threaded[po.Name] = po.Default
+	}
+	for _, name := range []string{"prompt", "session_id", "task_dir"} {
+		want := "${input.params." + name + "}"
+		if threaded[name] != want {
+			t.Errorf("first stage param %q = %q, want %q", name, threaded[name], want)
+		}
+	}
+
+	// The verification stage learns the directory from the turn's return
+	// value; without this it would check nothing and pass everything.
+	var verifyDir string
+	if last.Overrides != nil {
+		for _, po := range last.Overrides.Params {
+			if po.Name == "task_dir" {
+				verifyDir = po.Default
+			}
+		}
+	}
+	if verifyDir != "${input.output.task_dir}" {
+		t.Errorf("verify stage task_dir = %q, want ${input.output.task_dir}", verifyDir)
 	}
 }

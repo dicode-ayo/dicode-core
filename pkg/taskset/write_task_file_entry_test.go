@@ -86,7 +86,7 @@ func TestWriteTaskFileEntry_IsRegisteredWithScopedGrants(t *testing.T) {
 func TestAuthoringAgents_AllowWriteTaskFile(t *testing.T) {
 	specs := resolveBuildin(t, "/data")
 
-	for _, id := range []string{"buildin/task-create"} {
+	for _, id := range []string{"buildin/task-create-turn"} {
 		spec, ok := specs[id]
 		if !ok {
 			t.Errorf("%s not resolved", id)
@@ -106,9 +106,9 @@ func TestAuthoringAgents_AllowWriteTaskFile(t *testing.T) {
 // disk; a prompt describing capabilities it has no tool for costs a paid model
 // call and produces nothing.
 func TestTaskCreateEntry_PromptNamesTheWriteTool(t *testing.T) {
-	spec, ok := resolveBuildin(t, "/data")["buildin/task-create"]
+	spec, ok := resolveBuildin(t, "/data")["buildin/task-create-turn"]
 	if !ok {
-		t.Fatal("buildin/task-create not resolved")
+		t.Fatal("buildin/task-create-turn not resolved")
 	}
 	prompt := ""
 	for _, p := range spec.Params {

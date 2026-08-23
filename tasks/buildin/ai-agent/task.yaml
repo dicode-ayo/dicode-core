@@ -27,6 +27,14 @@ params:
     type: string
     default: ""
     description: "Conversation id. Empty = auto-generate and return in response."
+  task_dir:
+    type: string
+    default: ""
+    description: >
+      Directory the caller wants this turn's file writes to land in. The agent
+      does not read it — it is echoed back in the response so a downstream
+      pipeline stage can check that directory against what the reply claims
+      (#755). "unknown" means the caller could not resolve one.
 
   # ─── Tools ─────────────────────────────────────────────────────────────────
   # Tools are other dicode tasks the model can call via dicode.run_task().
