@@ -92,7 +92,11 @@ test("returns not_configured when no provider params are set", async () => {
   const result = await runTask();
 
   assert.equal(result.error, "not_configured");
-  assert.equal(result.reply, null);
+  // Non-empty and descriptive: a pipeline stage reading ${input.output.reply}
+  // fails its dispatch on a null field, which would replace the hint with the
+  // resolver's own error.
+  assert.ok(result.reply.includes("model"));
+  assert.ok(result.task_dir);
   assert.ok(result.session_id);
   // Should list model and base_url as missing at minimum
   assert.ok(result.missing.includes("model"));
