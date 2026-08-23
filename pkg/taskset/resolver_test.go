@@ -794,6 +794,50 @@ spec:
 	}
 }
 
+// TestResolver_InlineEntry_NormalizesRuntimeAlias proves an inline taskset
+// entry that omits runtime: (or spells the "js" alias) gets the same
+// normalization to task.RuntimeDeno that LoadDirWithVars applies to a
+// ref-loaded task.yaml. Spec.validate() accepts "" / "js" / RuntimeDeno as
+// equally valid, so without this normalization the entry registers
+// successfully but pkg/trigger/run.go's exact-match executor lookup
+// (e.executors[spec.Runtime]) finds nothing for "" or "js" — only
+// task.RuntimeDeno is ever registered — and every run fails with "no
+// executor for runtime" at dispatch time instead of at register time.
+func TestResolver_InlineEntry_NormalizesRuntimeAlias(t *testing.T) {
+	repoDir := t.TempDir()
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    no-runtime:
+      inline:
+        name: no-runtime
+        trigger:
+          manual: true
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if spec.Runtime != task.RuntimeDeno {
+		t.Errorf("Runtime = %q, want %q (omitted runtime: left unnormalized)", spec.Runtime, task.RuntimeDeno)
+	}
+}
+
 // ── mergeOverrides ────────────────────────────────────────────────────────────
 
 func TestMergeOverrides_BNil(t *testing.T) {

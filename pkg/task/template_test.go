@@ -243,6 +243,26 @@ func TestExpandSpec_Exported(t *testing.T) {
 	}
 }
 
+func TestExpandSpec_NormalizesRuntimeAlias(t *testing.T) {
+	cases := []struct {
+		name    string
+		runtime Runtime
+	}{
+		{"omitted", ""},
+		{"js alias", "js"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &Spec{Runtime: tc.runtime}
+			ExpandSpec(spec, "/repo/tasks/myagent", nil)
+
+			if spec.Runtime != RuntimeDeno {
+				t.Errorf("Runtime = %q, want %q", spec.Runtime, RuntimeDeno)
+			}
+		})
+	}
+}
+
 func TestBuiltinVars_TaskSetDirPassedThrough(t *testing.T) {
 	extras := map[string]string{VarTaskSetDir: "/repo/tasks"}
 	vars := builtinVars("/repo/tasks/myagent", extras)
