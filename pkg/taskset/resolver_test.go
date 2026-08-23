@@ -742,6 +742,58 @@ spec:
 	}
 }
 
+// TestResolver_InlineEntry_WebhookAuthDowngrade proves an inline taskset
+// entry gets the same auth: any → session downgrade LoadDirWithVars applies
+// to a ref-loaded task.yaml, when its webhook_secret names a template var
+// that never resolves (env unset, not in the resolve-time vars map). Without
+// ExpandSpec running normalizeWebhookAuth, the literal "${WEBHOOK_SECRET_NOT_SET}"
+// string would be served as the HMAC key for a relay-reachable, unauthenticated
+// webhook — see pkg/task/webhook_auth_normalize_test.go for the ref-loaded
+// mirror of this test.
+func TestResolver_InlineEntry_WebhookAuthDowngrade(t *testing.T) {
+	os.Unsetenv("WEBHOOK_SECRET_NOT_SET")
+
+	repoDir := t.TempDir()
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    ai-hook:
+      inline:
+        name: ai-hook
+        runtime: deno
+        trigger:
+          webhook: /hooks/x
+          auth: any
+          webhook_secret: "${WEBHOOK_SECRET_NOT_SET}"
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if spec.Trigger.WebhookAuth != task.WebhookAuthSession {
+		t.Errorf("Trigger.WebhookAuth = %q, want %q (downgraded from unresolved auth: any)",
+			spec.Trigger.WebhookAuth, task.WebhookAuthSession)
+	}
+	if spec.Trigger.WebhookSecret != "" {
+		t.Errorf("Trigger.WebhookSecret = %q, want \"\" (placeholder cleared)", spec.Trigger.WebhookSecret)
+	}
+}
+
 // ── mergeOverrides ────────────────────────────────────────────────────────────
 
 func TestMergeOverrides_BNil(t *testing.T) {

@@ -208,15 +208,17 @@ func ExpandOverrideLayer(o *Overrides, taskDir string, extras map[string]string)
 	return &cp
 }
 
-// ExpandSpec applies the same ${VAR} template expansion LoadDirWithVars
-// applies to a spec loaded from task.yaml, to a *Spec obtained some other
-// way — e.g. an inline taskset entry decoded directly out of taskset.yaml
-// (see pkg/taskset.Resolver.resolveBody). taskDir is used as VarTaskDir;
-// extras are merged over the built-ins exactly as builtinVars does.
+// ExpandSpec applies the same ${VAR} template expansion AND the same
+// post-expansion webhook-auth safety downgrade that LoadDirWithVars applies
+// to a spec loaded from task.yaml, to a *Spec obtained some other way — e.g.
+// an inline taskset entry decoded directly out of taskset.yaml (see
+// pkg/taskset.Resolver.resolveBody). taskDir is used as VarTaskDir; extras
+// are merged over the built-ins exactly as builtinVars does.
 //
 // Mutates spec in place — same contract as expandSpec/LoadDirWithVars.
 func ExpandSpec(spec *Spec, taskDir string, extras map[string]string) {
 	expandSpec(spec, builtinVars(taskDir, extras))
+	normalizeWebhookAuth(spec)
 }
 
 // builtinVars returns the template var map for a task loaded from dir, with
