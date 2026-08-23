@@ -254,12 +254,33 @@ func (r *Resolver) resolveBody(
 		}
 
 		if entry.Inline != nil {
+			taskDir := filepath.Dir(tsPath)
+			extras := r.withDataDir(extraVars)
+			// Expand ${VAR} references in the inline base spec itself before
+			// applying overrides — mirrors what LoadDirWithVars does for a
+			// ref-loaded task.yaml. Without this, an inline entry's own
+			// fields (e.g. permissions.fs[].path) never see substitution,
+			// even though the override layers stacked on top of it do (#726).
+			// ExpandSpec also runs the same post-expansion webhook-auth safety
+			// downgrade LoadDirWithVars runs, so an inline entry's auth: any
+			// webhook gets the same unresolved-secret protection a ref-loaded
+			// task.yaml does.
+			task.ExpandSpec(entry.Inline, taskDir, extras)
+			// Capture and log any downgrade (or other) warning now — before
+			// resolved.Validate() below resets Warnings — mirroring the
+			// KindTask branch's ordering a few dozen lines below.
+			for _, w := range entry.Inline.Warnings {
+				r.log.Warn("taskset: task config warning",
+					zap.String("entry", fullID),
+					zap.String("warning", w),
+				)
+			}
 			layers := expandOverrideLayers(
 				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
-				filepath.Dir(tsPath), r.withDataDir(extraVars))
+				taskDir, extras)
 			resolved := applyOverrides(entry.Inline, layers...)
 			resolved.ID = fullID
-			resolved.TaskDir = filepath.Dir(tsPath)
+			resolved.TaskDir = taskDir
 			resolved.Enabled = enabled
 			// Re-validate after the override merge so a bad override
 			// surfaces here (with the operator-relevant taskset path)

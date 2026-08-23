@@ -224,6 +224,45 @@ func TestBuiltinVars(t *testing.T) {
 	}
 }
 
+// ExpandSpec is the exported entry point pkg/taskset uses to expand an
+// inline taskset entry's base spec (a *Spec obtained by decoding
+// taskset.yaml directly, never via LoadDirWithVars). It must apply the same
+// substitution LoadDirWithVars applies to a ref-loaded task.yaml.
+func TestExpandSpec_Exported(t *testing.T) {
+	spec := &Spec{
+		Permissions: Permissions{
+			FS: []FSEntry{
+				{Path: "${TASK_DIR}/state", Permission: "rw"},
+			},
+		},
+	}
+	ExpandSpec(spec, "/repo/tasks/myagent", nil)
+
+	if got, want := spec.Permissions.FS[0].Path, "/repo/tasks/myagent/state"; got != want {
+		t.Errorf("FS[0].Path = %q, want %q", got, want)
+	}
+}
+
+func TestExpandSpec_NormalizesRuntimeAlias(t *testing.T) {
+	cases := []struct {
+		name    string
+		runtime Runtime
+	}{
+		{"omitted", ""},
+		{"js alias", "js"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &Spec{Runtime: tc.runtime}
+			ExpandSpec(spec, "/repo/tasks/myagent", nil)
+
+			if spec.Runtime != RuntimeDeno {
+				t.Errorf("Runtime = %q, want %q", spec.Runtime, RuntimeDeno)
+			}
+		})
+	}
+}
+
 func TestBuiltinVars_TaskSetDirPassedThrough(t *testing.T) {
 	extras := map[string]string{VarTaskSetDir: "/repo/tasks"}
 	vars := builtinVars("/repo/tasks/myagent", extras)

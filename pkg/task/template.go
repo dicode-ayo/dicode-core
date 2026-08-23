@@ -208,6 +208,32 @@ func ExpandOverrideLayer(o *Overrides, taskDir string, extras map[string]string)
 	return &cp
 }
 
+// ExpandSpec applies the same ${VAR} template expansion, the same
+// post-expansion webhook-auth safety downgrade, and the same runtime-alias
+// normalization ("" / "js" → RuntimeDeno) that LoadDirWithVars applies to a
+// spec loaded from task.yaml, to a *Spec obtained some other way — e.g. an
+// inline taskset entry decoded directly out of taskset.yaml (see
+// pkg/taskset.Resolver.resolveBody). taskDir is used as VarTaskDir; extras
+// are merged over the built-ins exactly as builtinVars does.
+//
+// Mutates spec in place — same contract as expandSpec/LoadDirWithVars. This
+// is a deliberate difference from its sibling ExpandOverrideLayer, which
+// copies its input and documents why (repeated rendering back to an operator
+// via the raw-config editor / approval diff). ExpandSpec mutates in place
+// because its caller — the taskset resolver — parses a fresh *TaskSetSpec
+// from disk on every call and never caches or re-renders it, so there is no
+// stale or shared state for an in-place mutation to corrupt. Any future
+// caller must uphold that same contract: pass a *Spec obtained from a fresh,
+// call-local parse — never one that is cached across calls or read again
+// afterward for anything other than the immediate use this call is part of.
+func ExpandSpec(spec *Spec, taskDir string, extras map[string]string) {
+	expandSpec(spec, builtinVars(taskDir, extras))
+	normalizeWebhookAuth(spec)
+	if spec.Runtime == "" || spec.Runtime == "js" {
+		spec.Runtime = RuntimeDeno
+	}
+}
+
 // builtinVars returns the template var map for a task loaded from dir, with
 // any extra vars merged in (extras take precedence over builtins). Pass nil
 // for extras when loading a task outside of a source context.

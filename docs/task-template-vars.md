@@ -24,6 +24,10 @@ Expansion is deliberately **not** applied to every string field — most
 (`name`, `description`, `system_prompt` defaults, …) should be taken
 literally. These are the fields that get expanded:
 
+Expansion applies identically regardless of how a taskset entry supplies its
+spec — an `inline:` entry's base spec is expanded exactly like a `ref:`
+entry's loaded `task.yaml`.
+
 | Field                       | Env fallback? | Notes                                                                                                                   |
 | --------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `trigger.webhook_secret`    | Yes           | HMAC secret used server-side; task code never sees it. Env fallback lets you reference `${WEBHOOK_SECRET}` from the daemon env. |

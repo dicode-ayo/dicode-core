@@ -676,6 +676,168 @@ spec:
 	}
 }
 
+// An inline taskset entry's own base spec must get the same ${VAR}
+// expansion a ref-loaded task.yaml gets from LoadDirWithVars. Regression
+// guard for #726: only the override layers stacked on top of entry.Inline
+// were expanded, leaving literal ${TASK_SET_DIR}/${VAR} tokens in the
+// inline base spec's own permissions.fs[].path and params[].default.
+func TestResolver_InlineEntry_ExpandsVar(t *testing.T) {
+	repoDir := t.TempDir()
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    health-check:
+      inline:
+        name: Health Check
+        runtime: deno
+        trigger:
+          manual: true
+        params:
+          shared_dir:
+            type: string
+            default: "${TASK_SET_DIR}/shared"
+            description: ""
+        permissions:
+          fs:
+            - path: "${TASK_SET_DIR}/pool"
+              permission: rw
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	wantDir := filepath.Dir(tsPath)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if len(spec.Permissions.FS) != 1 {
+		t.Fatalf("want 1 fs entry, got %d", len(spec.Permissions.FS))
+	}
+	if got, want := spec.Permissions.FS[0].Path, wantDir+"/pool"; got != want {
+		t.Errorf("fs.path: got %q, want %q (literal ${TASK_SET_DIR} survived expansion)", got, want)
+	}
+
+	var sharedDefault string
+	for _, p := range spec.Params {
+		if p.Name == "shared_dir" {
+			sharedDefault = p.Default
+			break
+		}
+	}
+	if got, want := sharedDefault, wantDir+"/shared"; got != want {
+		t.Errorf("params[shared_dir].default: got %q, want %q (literal ${TASK_SET_DIR} survived expansion)", got, want)
+	}
+}
+
+// TestResolver_InlineEntry_WebhookAuthDowngrade proves an inline taskset
+// entry gets the same auth: any → session downgrade LoadDirWithVars applies
+// to a ref-loaded task.yaml, when its webhook_secret names a template var
+// that never resolves (env unset, not in the resolve-time vars map). Without
+// ExpandSpec running normalizeWebhookAuth, the literal "${WEBHOOK_SECRET_NOT_SET}"
+// string would be served as the HMAC key for a relay-reachable, unauthenticated
+// webhook — see pkg/task/webhook_auth_normalize_test.go for the ref-loaded
+// mirror of this test.
+func TestResolver_InlineEntry_WebhookAuthDowngrade(t *testing.T) {
+	os.Unsetenv("WEBHOOK_SECRET_NOT_SET")
+
+	repoDir := t.TempDir()
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    ai-hook:
+      inline:
+        name: ai-hook
+        runtime: deno
+        trigger:
+          webhook: /hooks/x
+          auth: any
+          webhook_secret: "${WEBHOOK_SECRET_NOT_SET}"
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if spec.Trigger.WebhookAuth != task.WebhookAuthSession {
+		t.Errorf("Trigger.WebhookAuth = %q, want %q (downgraded from unresolved auth: any)",
+			spec.Trigger.WebhookAuth, task.WebhookAuthSession)
+	}
+	if spec.Trigger.WebhookSecret != "" {
+		t.Errorf("Trigger.WebhookSecret = %q, want \"\" (placeholder cleared)", spec.Trigger.WebhookSecret)
+	}
+}
+
+// TestResolver_InlineEntry_NormalizesRuntimeAlias proves an inline taskset
+// entry that omits runtime: (or spells the "js" alias) gets the same
+// normalization to task.RuntimeDeno that LoadDirWithVars applies to a
+// ref-loaded task.yaml. Spec.validate() accepts "" / "js" / RuntimeDeno as
+// equally valid, so without this normalization the entry registers
+// successfully but pkg/trigger/run.go's exact-match executor lookup
+// (e.executors[spec.Runtime]) finds nothing for "" or "js" — only
+// task.RuntimeDeno is ever registered — and every run fails with "no
+// executor for runtime" at dispatch time instead of at register time.
+func TestResolver_InlineEntry_NormalizesRuntimeAlias(t *testing.T) {
+	repoDir := t.TempDir()
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    no-runtime:
+      inline:
+        name: no-runtime
+        trigger:
+          manual: true
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %+v", failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := rtSpec(results[0])
+	if spec.Runtime != task.RuntimeDeno {
+		t.Errorf("Runtime = %q, want %q (omitted runtime: left unnormalized)", spec.Runtime, task.RuntimeDeno)
+	}
+}
+
 // ── mergeOverrides ────────────────────────────────────────────────────────────
 
 func TestMergeOverrides_BNil(t *testing.T) {
