@@ -225,6 +225,11 @@ spec:
           tasks:
             - "git-pr"
         fs:
+          # overrides REPLACE permissions.fs, so the base ai-agent grant on
+          # the skills directory has to be restated here or every skill this
+          # entry declares fails to load.
+          - path: "${TASK_SET_DIR}/../skills"
+            permission: r
           - path: "${DATADIR}/dev-clones"
             permission: rw
 
@@ -366,5 +371,10 @@ spec:
             - "git-pr"
             - "buildin/write-task-file"
         fs:
+          # overrides REPLACE permissions.fs, so the base ai-agent grant on
+          # the skills directory has to be restated here or every skill this
+          # entry declares fails to load.
+          - path: "${TASK_SET_DIR}/../skills"
+            permission: r
           - path: "${DATADIR}/dev-clones"
             permission: rw

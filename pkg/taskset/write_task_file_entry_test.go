@@ -120,3 +120,35 @@ func TestTaskCreateEntry_PromptNamesTheWriteTool(t *testing.T) {
 		t.Errorf("task-create system_prompt never names the write tool:\n%s", prompt)
 	}
 }
+
+// TestAgentEntries_DeclaringSkillsCanReadThem guards a trap in the override
+// merge: taskset overrides REPLACE permissions.fs (override.go, `spec.
+// Permissions.FS = o.Fs`) rather than adding to it. buildin/ai-agent grants
+// itself read on the skills directory, so any entry that overrides fs for its
+// own reasons — a dev-clones path, a write root — silently drops that grant
+// and every skill it declares fails to load at runtime. Nothing else catches
+// it: the task still runs, the model just never sees the skills, and under
+// skills_mode "index" it is left holding names it cannot read.
+func TestAgentEntries_DeclaringSkillsCanReadThem(t *testing.T) {
+	for id, spec := range resolveBuildin(t, "/data") {
+		skills := ""
+		for _, p := range spec.Params {
+			if p.Name == "skills" {
+				skills = p.Default
+			}
+		}
+		if skills == "" {
+			continue
+		}
+		readable := false
+		for _, e := range spec.Permissions.FS {
+			if strings.HasSuffix(e.Path, "/skills") && strings.Contains(e.Permission, "r") {
+				readable = true
+			}
+		}
+		if !readable {
+			t.Errorf("%s declares skills %q but cannot read the skills directory; fs = %v",
+				id, skills, spec.Permissions.FS)
+		}
+	}
+}
