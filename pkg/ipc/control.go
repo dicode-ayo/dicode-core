@@ -424,6 +424,13 @@ type AuthoringService interface {
 	// agentSessionID (some alternative agent tasks may not return one) is a
 	// no-op.
 	UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error
+	// SandboxWritable reports whether dir is a directory the authoring write
+	// tool will accept a write into, and returns the roots it checked
+	// against so a refusal can name them. handleTaskEdit calls it before
+	// firing a turn: a session whose sandbox is outside those roots can only
+	// produce an agent that narrates writes it never made, so the refusal
+	// belongs before the model is asked to try.
+	SandboxWritable(dir string) (bool, []string)
 	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
 	// CLI can print an "open: <url>" hint pointing at the session.
 	WebUIBaseURL() string
@@ -571,6 +578,17 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	// Get filters to kind: Task.
 	if _, ok := cs.reg.GetKinded(cs.defaultCreateTask); !ok {
 		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
+	}
+	// The agent's only route to disk refuses a path outside its declared
+	// roots, and a tool error comes back to the model as a tool result it is
+	// free to narrate its way past. Refusing here names the boundary to the
+	// operator instead of leaving them a green run that wrote nothing.
+	if ok, roots := cs.authoring.SandboxWritable(res.SandboxPath); !ok {
+		if len(roots) == 0 {
+			return out, fmt.Errorf("session %s opened but buildin/write-task-file declares no writable root — the agent has no route to disk; register it with a DICODE_TASK_FILE_ROOTS grant before authoring", res.SessionID)
+		}
+		return out, fmt.Errorf("session %s opened but its task directory %q is outside the authoring write tool's roots [%s] — every write the agent attempts would be refused; declare that root in an override of the buildin/write-task-file entry, or author into a source under an existing root",
+			res.SessionID, res.SandboxPath, strings.Join(roots, ", "))
 	}
 
 	// The agent's target — task id and the directory its files live in —

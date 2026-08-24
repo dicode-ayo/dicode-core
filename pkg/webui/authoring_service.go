@@ -49,6 +49,15 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 	if !ok {
 		return ipc.AuthoringCreateResult{}, authErr(404, "source %q not found", source)
 	}
+	// A git source resolves from the pull cache, and gitops pulls with
+	// Force: true, so a scaffold there survives only until the next upstream
+	// commit — which discards the task files and the taskset entry alike,
+	// leaving an unregistered directory behind. Dev mode moves
+	// RootTaskSetPath into a clone, which is a working tree and writable.
+	if src.IsGit() && !src.DevMode() {
+		return ipc.AuthoringCreateResult{}, authErr(409,
+			"source %q is git-backed: files scaffolded into its pull cache are discarded by the next pull — enable dev mode on the source, or create into a local source", source)
+	}
 
 	if name == "" {
 		name = "new-task-" + uuid.New().String()[:8]
@@ -189,12 +198,17 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 	sessID := uuid.New().String()
 	now := time.Now()
 	sess := AuthoringSession{
-		ID:         sessID,
-		Kind:       "edit",
-		Source:     source,
-		TaskID:     taskID,
-		CreatedAt:  now,
-		LastTurnAt: now,
+		ID:     sessID,
+		Kind:   "edit",
+		Source: source,
+		TaskID: taskID,
+		// Resolved once, at open, rather than per turn: this is the
+		// boundary the session's writes are confined to, and a boundary
+		// that moves when the registry re-resolves the task elsewhere is
+		// not a boundary.
+		SandboxPath: s.taskDirFor(taskID),
+		CreatedAt:   now,
+		LastTurnAt:  now,
 	}
 	if err := s.authoringSessions.Create(ctx, sess); err != nil {
 		// The partial unique index idx_author_sessions_open_source rejects a
@@ -265,6 +279,58 @@ func (s *Server) taskDirFor(taskID string) string {
 		return ""
 	}
 	return scaffoldDir(tasksetPath, name)
+}
+
+// writeTaskFileTaskID is the authoring agents' only route to disk. Its
+// declared roots bound every write a session makes, so they also decide
+// whether a session has a usable sandbox at all.
+const writeTaskFileTaskID = "buildin/write-task-file"
+
+// SandboxWritable reports whether dir is a directory the authoring write tool
+// will accept a write into, along with the roots it checked against so a
+// refusal can name them. The roots are read off the registered spec rather
+// than a constant, so an operator override that widens them widens this check
+// with it.
+func (s *Server) SandboxWritable(dir string) (bool, []string) {
+	roots := s.writeToolRoots()
+	if dir == "" {
+		return false, roots
+	}
+	dir = filepath.Clean(dir)
+	for _, root := range roots {
+		// The tool writes <root>/<task>/<file> — a task's files live directly
+		// in a directory of their own under a root — so a sandbox nested any
+		// deeper, or a root itself, is one it refuses.
+		if filepath.Dir(dir) == root {
+			return true, roots
+		}
+	}
+	return false, roots
+}
+
+// writeToolRoots returns the cleaned writable roots buildin/write-task-file
+// resolved to, or nil when the task is not registered.
+func (s *Server) writeToolRoots() []string {
+	if s.registry == nil {
+		return nil
+	}
+	spec, ok := s.registry.Get(writeTaskFileTaskID)
+	if !ok {
+		return nil
+	}
+	for _, e := range spec.Permissions.Env {
+		if e.Name != "DICODE_TASK_FILE_ROOTS" {
+			continue
+		}
+		var roots []string
+		for _, r := range strings.Split(e.Value, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				roots = append(roots, filepath.Clean(r))
+			}
+		}
+		return roots
+	}
+	return nil
 }
 
 // scaffoldDir returns the directory a task named name occupies in the source

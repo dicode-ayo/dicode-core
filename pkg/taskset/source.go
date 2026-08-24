@@ -202,6 +202,11 @@ func (s *Source) RootTaskSetPath() string {
 	return path
 }
 
+// IsGit reports whether this source resolves from a git ref. Callers that
+// scaffold into a source need it: a git source's files live under the pull
+// cache, which gitops overwrites with Force: true on the next pull.
+func (s *Source) IsGit() bool { return s.rootRef.IsGit() }
+
 // Start performs an initial resolution, emits events, then watches for changes.
 // For git refs the root repo is cloned eagerly so fsnotify can be set up on the
 // local clone directory immediately. The returned channel is closed when ctx is

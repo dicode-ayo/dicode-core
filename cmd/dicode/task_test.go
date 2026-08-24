@@ -53,7 +53,11 @@ func (f *fakeAuthoring) CancelTask(_ context.Context, sessionID string) error { 
 func (f *fakeAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agentSessionID string) error {
 	return nil
 }
-func (f *fakeAuthoring) WebUIBaseURL() string { return "http://localhost:8080" }
+
+// The CLI tests exercise the turn-firing path, not the sandbox boundary, so
+// the fake reports every sandbox writable.
+func (f *fakeAuthoring) SandboxWritable(string) (bool, []string) { return true, nil }
+func (f *fakeAuthoring) WebUIBaseURL() string                    { return "http://localhost:8080" }
 
 // dialTestClient boots a ControlServer wired to auth and returns a connected
 // ControlClient plus a cleanup func. A "buildin/task-create" task is

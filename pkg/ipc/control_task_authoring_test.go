@@ -52,6 +52,13 @@ type mockAuthoring struct {
 	lastEditSession, lastEditTask             string
 	lastSaveSession, lastCancelSess           string
 	lastUpdateSession, lastUpdateAgentSession string
+
+	// A sandbox the write tool accepts is the default: every test that is
+	// not about the boundary would otherwise have to opt in to a turn firing
+	// at all.
+	sandboxUnwritable bool
+	sandboxRoots      []string
+	lastSandboxDir    string
 }
 
 func (m *mockAuthoring) CreateTask(_ context.Context, name, source string) (AuthoringCreateResult, error) {
@@ -101,6 +108,13 @@ func (m *mockAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agent
 	}
 	m.agentSessionIDs[sessionID] = agentSessionID
 	return nil
+}
+
+func (m *mockAuthoring) SandboxWritable(dir string) (bool, []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSandboxDir = dir
+	return !m.sandboxUnwritable, m.sandboxRoots
 }
 
 func (m *mockAuthoring) WebUIBaseURL() string {
@@ -738,5 +752,78 @@ func TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim(t *testing.T) {
 	}
 	if got := eng.calls[0]["task_dir"]; got != "/srv/tasks/t" {
 		t.Errorf("task_dir = %q, want the resolved directory", got)
+	}
+}
+
+// The agent's write tool refuses a path outside its declared roots, and it
+// refuses it as a tool result the model can narrate its way past — so a
+// session with no writable sandbox must not reach the model at all.
+func TestControl_TaskEdit_RefusesUnwritableSandbox(t *testing.T) {
+	m := &mockAuthoring{
+		editResult: AuthoringEditResult{
+			SessionID:   "sess-1",
+			TaskID:      "scratch/zen-quote",
+			TaskDir:     "/tmp/dc-ai/src/zen-quote",
+			SandboxPath: "/tmp/dc-ai/src/zen-quote",
+		},
+		sandboxUnwritable: true,
+		sandboxRoots:      []string{"/tmp/dc-ai/ai-tasks"},
+	}
+	eng := &promptCapturingEngine{reply: "wrote it"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "scratch/zen-quote", Prompt: "fetch the zen api"})
+	if err == nil {
+		t.Fatal("handleTaskEdit fired a turn into an unwritable sandbox, want a refusal")
+	}
+	// The operator has to be able to act on this: it names the directory that
+	// was refused, the roots it was measured against, and the entry to override.
+	for _, want := range []string{"/tmp/dc-ai/src/zen-quote", "/tmp/dc-ai/ai-tasks", "buildin/write-task-file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if len(eng.calls) != 0 {
+		t.Errorf("fired %d turns despite the refusal", len(eng.calls))
+	}
+	if m.lastSandboxDir != "/tmp/dc-ai/src/zen-quote" {
+		t.Errorf("checked sandbox %q, want the session's own", m.lastSandboxDir)
+	}
+}
+
+// A promptless edit only opens the session — there is no turn to protect, and
+// refusing it would break `dicode task edit <id>` against every source whose
+// root the operator has not widened.
+func TestControl_TaskEdit_UnwritableSandboxStillOpensSession(t *testing.T) {
+	m := &mockAuthoring{
+		editResult:        AuthoringEditResult{SessionID: "sess-1", TaskID: "scratch/zen-quote", SandboxPath: "/tmp/dc-ai/src/zen-quote"},
+		sandboxUnwritable: true,
+	}
+	cs := newAuthoringAIControl(t, m, &promptCapturingEngine{})
+
+	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "scratch/zen-quote"})
+	if err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	if res.SessionID != "sess-1" {
+		t.Errorf("session id = %q, want sess-1", res.SessionID)
+	}
+}
+
+// With no write tool registered there is no root to name, so the refusal has
+// to say that rather than point at an empty list.
+func TestControl_TaskEdit_RefusalNamesAMissingWriteTool(t *testing.T) {
+	m := &mockAuthoring{
+		editResult:        AuthoringEditResult{SessionID: "sess-1", TaskID: "scratch/zen", SandboxPath: "/tmp/dc-ai/src/zen"},
+		sandboxUnwritable: true,
+	}
+	cs := newAuthoringAIControl(t, m, &promptCapturingEngine{})
+
+	_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "scratch/zen", Prompt: "go"})
+	if err == nil {
+		t.Fatal("handleTaskEdit fired a turn with no write tool, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "declares no writable root") || strings.Contains(err.Error(), "[]") {
+		t.Errorf("error = %q, want the missing-write-tool wording and no empty root list", err)
 	}
 }
