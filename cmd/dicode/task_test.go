@@ -54,10 +54,11 @@ func (f *fakeAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agent
 	return nil
 }
 
-// The CLI tests exercise the turn-firing path, not the sandbox boundary, so
-// the fake reports every sandbox writable.
-func (f *fakeAuthoring) SandboxWritable(string) (bool, []string) { return true, nil }
-func (f *fakeAuthoring) WebUIBaseURL() string                    { return "http://localhost:8080" }
+// The CLI tests exercise the turn-firing path, not the write tool's grants,
+// so the fake reports every session authorable.
+func (f *fakeAuthoring) CheckSourceAuthorable(string) error       { return nil }
+func (f *fakeAuthoring) CheckSessionAuthorable(_, _ string) error { return nil }
+func (f *fakeAuthoring) WebUIBaseURL() string                     { return "http://localhost:8080" }
 
 // dialTestClient boots a ControlServer wired to auth and returns a connected
 // ControlClient plus a cleanup func. A "buildin/task-create" task is

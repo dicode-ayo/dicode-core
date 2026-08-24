@@ -660,7 +660,7 @@ func TestCreateTask_RegistrationFailureCleansUpDirectory(t *testing.T) {
 }
 
 // The authoring agent writes files through a tool that takes an absolute
-// path, and list_tasks does not carry TaskDir — so the session is the only
+// path, and list_tasks does not carry a directory — so the session is the only
 // thing that can tell it where the task's files live (#734).
 func TestEditTask_ReportsTaskDir(t *testing.T) {
 	dir := t.TempDir()
@@ -676,8 +676,8 @@ func TestEditTask_ReportsTaskDir(t *testing.T) {
 		t.Fatalf("EditTask: %v", err)
 	}
 	want := filepath.Join(dir, "dirprobe")
-	if res.TaskDir != want {
-		t.Errorf("TaskDir = %q, want %q", res.TaskDir, want)
+	if res.SandboxPath != want {
+		t.Errorf("SandboxPath = %q, want %q", res.SandboxPath, want)
 	}
 
 	// A resumed session must carry it too — every turn after the first goes
@@ -686,7 +686,7 @@ func TestEditTask_ReportsTaskDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EditTask resume: %v", err)
 	}
-	if resumed.TaskDir != want {
-		t.Errorf("resumed TaskDir = %q, want %q", resumed.TaskDir, want)
+	if resumed.SandboxPath != want {
+		t.Errorf("resumed SandboxPath = %q, want %q", resumed.SandboxPath, want)
 	}
 }
