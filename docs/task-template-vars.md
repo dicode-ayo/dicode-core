@@ -35,7 +35,14 @@ entry's loaded `task.yaml`.
 | `permissions.env[].from`    | Yes           | Host env-var name to rename/inject. Identifier, not a value — safe to env-fallback.                                     |
 | `permissions.env[].secret`  | Yes           | Secrets-store key to look up. Identifier, not a value.                                                                  |
 | `permissions.env[].value`   | **No**        | Literal value injected into `Deno.env.get(name)` at runtime. Env fallback would be a direct exfiltration primitive.     |
+| `permissions.env[].default` | **No**        | Fallback literal used when the resolved env value is absent. Same task-visible-value reasoning as `env.value`.         |
 | `params[].default`          | **No**        | Surfaces loader-provided paths as parameter defaults task code reads via `params.get()`. Same reason as `env.value`.    |
+
+`trigger.chain.overrides` — the per-edge `Overrides` a chain trigger applies
+to its downstream task — is expanded through this same table too, and that
+holds however the chain trigger reached the spec: a ref-loaded task's own
+`trigger.chain.overrides`, and one supplied through a taskset entry's own
+`overrides.trigger.chain.overrides` layer, both expand identically.
 
 "Env fallback = Yes" means: if the variable is not a known builtin, the
 loader falls back to `os.Getenv(name)`. This is *off* for any field whose
