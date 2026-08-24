@@ -171,3 +171,85 @@ func TestRunCLI_PortOverride_AdvancedCanStillChange(t *testing.T) {
 		t.Errorf("Port = %d; want 9191 (user's advanced answer beats --port)", res.Port)
 	}
 }
+
+// TestRunCLIWith_SeedSuppliesPromptDefaults covers the seam `dicode init`
+// relies on: the seed, not the package's home-relative constants, decides
+// what pressing enter accepts.
+func TestRunCLIWith_SeedSuppliesPromptDefaults(t *testing.T) {
+	seed := Result{
+		TaskSetsEnabled: map[string]bool{"examples": false},
+		LocalTasksDir:   "${CONFIGDIR}/tasks",
+		DataDir:         "${CONFIGDIR}/.dicode",
+		Port:            9000,
+	}
+	in := scriptedStdin("", "", "", "", "")
+	res, err := RunCLIWith(in, &bytes.Buffer{}, CLIOptions{Seed: seed})
+	if err != nil {
+		t.Fatalf("RunCLIWith: %v", err)
+	}
+	if res.LocalTasksDir != "${CONFIGDIR}/tasks" {
+		t.Errorf("LocalTasksDir = %q; want the seeded value", res.LocalTasksDir)
+	}
+	if res.DataDir != "${CONFIGDIR}/.dicode" {
+		t.Errorf("DataDir = %q; want the seeded value", res.DataDir)
+	}
+	if res.Port != 9000 {
+		t.Errorf("Port = %d; want the seeded 9000", res.Port)
+	}
+	// Seeded off, so enter keeps it off even though its preset is DefaultOn.
+	if res.TaskSetsEnabled["examples"] {
+		t.Error("examples: seeded-off preset should stay off on an empty answer")
+	}
+	// Absent from the seed, so the preset's own DefaultOn applies.
+	if !res.TaskSetsEnabled["buildin"] {
+		t.Error("buildin: preset absent from seed should fall back to DefaultOn")
+	}
+}
+
+// TestRunCLIWith_SeedMapNotMutated: the caller keeps its defaults intact so a
+// failed or abandoned run leaves nothing half-applied behind.
+func TestRunCLIWith_SeedMapNotMutated(t *testing.T) {
+	seed := map[string]bool{"examples": true}
+	in := scriptedStdin("", "n", "", "", "")
+	if _, err := RunCLIWith(in, &bytes.Buffer{}, CLIOptions{
+		Seed: Result{TaskSetsEnabled: seed},
+	}); err != nil {
+		t.Fatalf("RunCLIWith: %v", err)
+	}
+	if !seed["examples"] {
+		t.Error("RunCLIWith wrote through to the caller's map")
+	}
+}
+
+// TestRunCLIWith_PassphrasePrompt: only asked when the caller opts in, and an
+// empty answer must leave the seed's empty passphrase empty rather than
+// generating one — that is what keeps `dicode init` output safe to commit.
+func TestRunCLIWith_PassphrasePrompt(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt bool
+		answer string
+		want   string
+	}{
+		{"not prompted", false, "", ""},
+		{"empty stays empty", true, "", ""},
+		{"entered wins", true, "correct horse", "correct horse"},
+		{"whitespace stays empty", true, "   ", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			in := scriptedStdin("", "", "", "", "", tc.answer)
+			res, err := RunCLIWith(in, &out, CLIOptions{PromptPassphrase: tc.prompt})
+			if err != nil {
+				t.Fatalf("RunCLIWith: %v", err)
+			}
+			if res.Passphrase != tc.want {
+				t.Errorf("Passphrase = %q; want %q", res.Passphrase, tc.want)
+			}
+			if asked := strings.Contains(out.String(), "Passphrase ["); asked != tc.prompt {
+				t.Errorf("passphrase prompt shown = %v; want %v", asked, tc.prompt)
+			}
+		})
+	}
+}
