@@ -37,6 +37,9 @@ func IssueTokenWithTTL(secret []byte, identity, runID string, caps []string, ttl
 }
 
 func issueToken(secret []byte, identity, runID string, caps []string, ttl time.Duration) (string, error) {
+	if len(secret) == 0 {
+		return "", errEmptySecret
+	}
 	claims := tokenClaims{
 		Identity: identity,
 		RunID:    runID,
@@ -52,8 +55,20 @@ func issueToken(secret []byte, identity, runID string, caps []string, ttl time.D
 	return encoded + "." + sig, nil
 }
 
+// errEmptySecret guards IssueToken/VerifyToken against a nil or zero-length
+// signing key. hmac.New places no restriction on key length — a nil key
+// degrades to an all-zero key, not to "unauthenticated" — so without this
+// check a caller that forgot to wire a real secret (as the per-version Deno
+// executor did before issue #718) would silently mint and accept tokens
+// signed under a fixed, publicly-known key instead of failing loudly. Fail
+// closed instead: refuse to issue or verify under an empty key.
+var errEmptySecret = errors.New("ipc: secret must not be empty")
+
 // VerifyToken validates the token signature and expiry, returning the claims.
 func VerifyToken(secret []byte, tok string) (tokenClaims, error) {
+	if len(secret) == 0 {
+		return tokenClaims{}, errEmptySecret
+	}
 	dot := strings.LastIndex(tok, ".")
 	if dot < 0 {
 		return tokenClaims{}, errors.New("ipc: malformed token")
