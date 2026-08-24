@@ -606,10 +606,11 @@ const READ_SKILL_TOOL: BuiltinTool = {
 
 interface NotConfiguredResponse {
   session_id: string;
-  reply: null;
+  reply: string;
   error: "not_configured";
   missing: string[];
   hint: string;
+  caller_context: string;
 }
 
 // requireTaskId fails loud when the IPC handshake didn't populate task_id.
@@ -1042,12 +1043,19 @@ async function oneShotTurn(
 
   const resolved = await resolveAgentRuntime(params, dicode);
   if (!resolved.ok) {
+    // Same non-empty guarantee as the success path below, for the same
+    // reason: a downstream pipeline stage reads reply and caller_context
+    // through ${input.output.<field>}, which fails the dispatch on a null or
+    // absent field. Returning the misconfiguration as prose is also what lets the
+    // hint reach the caller at all — an input-reference error would replace
+    // it with the resolver's own message.
     const response: NotConfiguredResponse = {
       session_id: sessionId,
-      reply: null,
+      reply: `not configured — missing ${resolved.missing.join(", ")}. ${resolved.hint}`,
       error: "not_configured",
       missing: resolved.missing,
       hint: resolved.hint,
+      caller_context: await params.get("caller_context") || "unknown",
     };
     return response;
   }
@@ -1062,7 +1070,16 @@ async function oneShotTurn(
   // Bare return → dicode serializes as application/json.
   // Do NOT call output.html() here; it would override Content-Type and the
   // browser UI would have to parse HTML instead of JSON.
-  return { session_id: sessionId, reply };
+  //
+  // reply and caller_context are both guaranteed non-empty: a downstream
+  // pipeline stage reaches them through ${input.output.<field>}, which fails
+  // the dispatch on an empty string. A turn that ends on tool calls alone
+  // would otherwise take the whole pipeline down with it.
+  return {
+    session_id: sessionId,
+    reply: reply || "(the model returned no text this turn)",
+    caller_context: await params.get("caller_context") || "unknown",
+  };
 }
 
 export const steps = {

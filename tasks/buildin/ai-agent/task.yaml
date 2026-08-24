@@ -27,6 +27,16 @@ params:
     type: string
     default: ""
     description: "Conversation id. Empty = auto-generate and return in response."
+  caller_context:
+    type: string
+    default: ""
+    description: >
+      Opaque value the agent never reads, returned verbatim in the response.
+      A pipeline stage cannot see the params its pipeline was fired with (only
+      stage 0 can), so a caller that needs its own context on the far side of
+      an agent turn — a target path, a ticket id, a run key — passes it here
+      and reads it back off the turn's return value. Same pass-through shape
+      as session_id.
 
   # ─── Tools ─────────────────────────────────────────────────────────────────
   # Tools are other dicode tasks the model can call via dicode.run_task().

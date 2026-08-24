@@ -1,0 +1,64 @@
+apiVersion: dicode/v1
+kind: PipelineTask
+name: "Task Create (AI)"
+description: |
+  The AI authoring turn behind `dicode task create --ai` and
+  `dicode task edit`, plus the post-condition that decides whether it did
+  anything (#755).
+
+  Stages (sequential):
+
+    1. buildin/task-create-turn — the agent turn itself: an ai-agent override
+       carrying the authoring prompt, skills and write/test capabilities.
+
+    2. buildin/verify-task-written — reads the target directory and fails when
+       it holds no task the agent wrote. Failing this stage fails the pipeline,
+       which is what stops a turn that wrote nothing from settling as a
+       successful run.
+
+  The check lives here rather than in the control plane because the control
+  plane fires whatever `ai.create_task` names and has no business knowing what
+  an authoring turn is supposed to leave behind. The cost is that it ships with
+  this pipeline: point `ai.create_task` at a bare agent task and the turn goes
+  back to being taken at its word.
+
+  A stage cannot suspend, so an agent that pauses for clarification fails the
+  pipeline rather than surfacing as suspended. The shipped agent path is
+  one-shot and never suspends; a custom override that does needs its own
+  pipeline (or none).
+
+  Stage 0 pulls every value it needs from the fire params explicitly:
+  stages receive no params of their own, and ${input.params.…} resolves only
+  on the first stage. Stage 1 reads stage 0's return value the same way. Both
+  reference shapes fail the dispatch on an empty value, which is why the
+  control plane always sends a session_id and a task_dir (sentinel "unknown"
+  when it cannot resolve one) rather than omitting either.
+
+subtype: sequential
+
+trigger:
+  manual: true
+
+stages:
+  - task: buildin/task-create-turn
+    overrides:
+      params:
+        - name: prompt
+          default: "${input.params.prompt}"
+        - name: session_id
+          default: "${input.params.session_id}"
+        # The agent never reads this; it hands it back verbatim so the
+        # verification stage can learn where the turn was told to write. A
+        # stage cannot see the pipeline's own fire params unless it is stage 0.
+        - name: caller_context
+          default: "${input.params.task_dir}"
+
+  - task: buildin/verify-task-written
+    overrides:
+      params:
+        - name: task_dir
+          default: "${input.output.caller_context}"
+        - name: reply
+          default: "${input.output.reply}"
+        - name: session_id
+          default: "${input.output.session_id}"

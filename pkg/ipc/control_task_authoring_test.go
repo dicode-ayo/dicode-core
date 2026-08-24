@@ -365,8 +365,14 @@ func TestControl_TaskEdit_PromptFiresAITurn(t *testing.T) {
 	if _, ok := got["task_id"]; ok {
 		t.Errorf("must not send a bare task_id param — ai-agent doesn't declare or read one (#723): params = %v", got)
 	}
-	if _, ok := got["session_id"]; ok {
-		t.Errorf("first turn must not send session_id (no prior turn): params = %v", got)
+	// A pipeline stage's ${input.params.session_id} reference fails the
+	// dispatch when the value is absent or empty, so the first turn mints one
+	// rather than omitting it (#755).
+	if got["session_id"] == "" {
+		t.Errorf("first turn must send a freshly minted session_id: params = %v", got)
+	}
+	if got["task_dir"] == "" {
+		t.Errorf("every turn must send a non-empty task_dir, sentinel included: params = %v", got)
 	}
 	// The turn's agent session id must have been persisted back onto the
 	// authoring session for the next call to pick up.
@@ -513,8 +519,8 @@ func TestControl_TaskEdit_ConcurrentSameSession_Serializes(t *testing.T) {
 	// is parked in WaitRunSettled.
 	select {
 	case params1 := <-eng.fireCh:
-		if _, ok := params1["session_id"]; ok {
-			t.Errorf("call 1 sent a session_id param, want none (first turn): %v", params1)
+		if params1["session_id"] == "" {
+			t.Errorf("call 1 must mint a session_id for the first turn: %v", params1)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("call 1 never fired")
@@ -699,5 +705,38 @@ func TestControl_TaskEdit_PromptOmitsEmptyTaskDir(t *testing.T) {
 	}
 	if want, got := "(Target task: ai-scratch/t)\n\nscaffold it", eng.calls[0]["prompt"]; got != want {
 		t.Errorf("prompt param = %q, want %q", got, want)
+	}
+}
+
+// TestControl_TaskEdit_UnresolvedTaskDirTravelsAsSentinel: buildin/task-create
+// is a pipeline, and a stage's ${input.params.task_dir} reference fails the
+// dispatch on an empty value. An unresolved directory therefore has to travel
+// as a sentinel the post-condition stage can recognise, not as an omission
+// that would fail the turn outright (#755).
+func TestControl_TaskEdit_UnresolvedTaskDirTravelsAsSentinel(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
+	eng := &promptCapturingEngine{reply: "done"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"}); err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	if got := eng.calls[0]["task_dir"]; got != unresolvedTaskDir {
+		t.Errorf("task_dir = %q, want the %q sentinel", got, unresolvedTaskDir)
+	}
+}
+
+// TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim guards the other half:
+// the sentinel must never stand in for a directory that did resolve.
+func TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: "/srv/tasks/t"}}
+	eng := &promptCapturingEngine{reply: "done"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	if _, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "write it"}); err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	if got := eng.calls[0]["task_dir"]; got != "/srv/tasks/t" {
+		t.Errorf("task_dir = %q, want the resolved directory", got)
 	}
 }
