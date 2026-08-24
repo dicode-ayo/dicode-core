@@ -202,6 +202,25 @@ func (s *Source) RootTaskSetPath() string {
 	return path
 }
 
+// DurableRoot reports whether a file written beside RootTaskSetPath survives
+// the next sync. A local ref does, and so does a git ref resolved through a
+// dev-mode clone — a working tree. A git ref resolved through the pull cache
+// does not: gitops pulls with Force: true and discards anything written there.
+//
+// The dev-mode condition below is the one RootTaskSetPath itself applies, and
+// deliberately so: reading DevMode() alone would answer true during a dev-mode
+// disable, which clears devRootPath before it lowers the resolver's flag, in
+// which case RootTaskSetPath has already fallen back to the pull cache.
+func (s *Source) DurableRoot() bool {
+	if !s.rootRef.IsGit() {
+		return true
+	}
+	s.mu.Lock()
+	devRootPath := s.devRootPath
+	s.mu.Unlock()
+	return devRootPath != "" && s.resolver.DevMode()
+}
+
 // Start performs an initial resolution, emits events, then watches for changes.
 // For git refs the root repo is cloned eagerly so fsnotify can be set up on the
 // local clone directory immediately. The returned channel is closed when ctx is

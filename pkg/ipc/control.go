@@ -424,6 +424,17 @@ type AuthoringService interface {
 	// agentSessionID (some alternative agent tasks may not return one) is a
 	// no-op.
 	UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error
+	// CheckSourceAuthorable reports why a task scaffolded into source could
+	// not then be authored by an AI turn, or nil when it could.
+	// handleTaskCreate calls it before scaffolding, so a --ai create that
+	// cannot work leaves neither files nor an open session behind.
+	CheckSourceAuthorable(source string) error
+	// CheckSessionAuthorable reports why an AI turn writing into dir could
+	// not reach disk, or nil when it can. handleTaskEdit calls it before
+	// firing: the write tool refuses an ineligible path as a tool result the
+	// model is free to narrate its way past, so the refusal has to reach the
+	// operator before the model is asked to try.
+	CheckSessionAuthorable(source, dir string) error
 	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
 	// CLI can print an "open: <url>" hint pointing at the session.
 	WebUIBaseURL() string
@@ -441,17 +452,17 @@ type AuthoringCreateResult struct {
 // the session's own task id (sess.TaskID), not the caller's claim, so the CLI
 // echoes back the identity the session actually belongs to.
 type AuthoringEditResult struct {
-	SessionID   string
-	TaskID      string
+	SessionID string
+	TaskID    string
+	// SandboxPath is the absolute directory holding the task's files. The
+	// authoring agent writes through a tool that takes absolute paths and
+	// dicode.list_tasks does not carry a directory, so the session is the
+	// only thing that can tell the agent where to write — and it is the same
+	// directory CheckSessionAuthorable clears, so the model is never aimed
+	// somewhere the gate did not look. Empty when it cannot be resolved.
 	SandboxPath string
 	Source      string
 	SourceKind  string
-	// TaskDir is the absolute directory holding the task's files. The
-	// authoring agent writes through a tool that takes absolute paths, and
-	// dicode.list_tasks does not carry TaskDir, so the session is the only
-	// thing that can tell the agent where to write. Empty when the directory
-	// can't be resolved; the prompt then names the target task alone.
-	TaskDir string
 	// AgentSessionID is the ai-agent run's own session id stored on this
 	// authoring session from a prior turn (#568), or "" if no AI turn has
 	// happened on it yet. handleTaskEdit reads this before firing the next
@@ -478,6 +489,14 @@ func (cs *ControlServer) SetTestGuard(g func(taskID string) error) { cs.testGuar
 func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (TaskCreateResult, error) {
 	if cs.authoring == nil {
 		return TaskCreateResult{}, errors.New("authoring service not configured")
+	}
+	// Before scaffolding, not after: a --ai create whose target the agent
+	// could never write to must not leave a task registered and a session
+	// occupying its source's single open-session slot.
+	if req.Prompt != "" {
+		if err := cs.authoring.CheckSourceAuthorable(req.Source); err != nil {
+			return TaskCreateResult{}, err
+		}
 	}
 	res, err := cs.authoring.CreateTask(ctx, req.TaskName, req.Source)
 	if err != nil {
@@ -572,6 +591,12 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	if _, ok := cs.reg.GetKinded(cs.defaultCreateTask); !ok {
 		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
 	}
+	// The write tool refuses an ineligible path as a tool result the model is
+	// free to narrate its way past, so a turn that cannot write must not be
+	// fired at all.
+	if err := cs.authoring.CheckSessionAuthorable(res.Source, res.SandboxPath); err != nil {
+		return out, fmt.Errorf("session %s opened but no turn was fired: %w", res.SessionID, err)
+	}
 
 	// The agent's target — task id and the directory its files live in —
 	// must ride in `prompt` itself, not a bare `task_id`
@@ -584,9 +609,13 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	// supposed to be working on. Prefixing the target into the prompt text
 	// is the cheapest fix that's guaranteed visible to the model regardless
 	// of which ai-agent-family task cfg.AI.CreateTask points at.
+	// SandboxPath, not TaskDir: the directory named here is the one
+	// CheckSessionAuthorable just cleared, and the one the pipeline's
+	// post-condition stage watches. TaskDir re-resolves per call, so aiming
+	// the model at it could send writes somewhere the gate never checked.
 	header := fmt.Sprintf("(Target task: %s)", res.TaskID)
-	if res.TaskDir != "" {
-		header = fmt.Sprintf("(Target task: %s — its files live in %s; write them there with the write-task-file tool)", res.TaskID, res.TaskDir)
+	if res.SandboxPath != "" {
+		header = fmt.Sprintf("(Target task: %s — its files live in %s; write them there with the write-task-file tool)", res.TaskID, res.SandboxPath)
 	}
 	// Every value a pipeline stage needs must be threaded explicitly through
 	// ${input.params.<name>} on its first stage, and an absent or empty
@@ -599,7 +628,7 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	params := map[string]string{
 		"prompt":     header + "\n\n" + req.Prompt,
 		"session_id": sessionID,
-		"task_dir":   taskDirParam(res.TaskDir),
+		"task_dir":   taskDirParam(res.SandboxPath),
 	}
 
 	runID, err := cs.engine.FireManual(ctx, cs.defaultCreateTask, params)

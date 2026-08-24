@@ -52,6 +52,13 @@ type mockAuthoring struct {
 	lastEditSession, lastEditTask             string
 	lastSaveSession, lastCancelSess           string
 	lastUpdateSession, lastUpdateAgentSession string
+
+	// An authorable session is the default: every test that is not about the
+	// boundary would otherwise have to opt in to a turn firing at all.
+	sourceAuthorableErr  error
+	sessionAuthorableErr error
+	lastSandboxDir       string
+	sourceChecks         int
 }
 
 func (m *mockAuthoring) CreateTask(_ context.Context, name, source string) (AuthoringCreateResult, error) {
@@ -101,6 +108,20 @@ func (m *mockAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agent
 	}
 	m.agentSessionIDs[sessionID] = agentSessionID
 	return nil
+}
+
+func (m *mockAuthoring) CheckSourceAuthorable(string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sourceChecks++
+	return m.sourceAuthorableErr
+}
+
+func (m *mockAuthoring) CheckSessionAuthorable(_, dir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSandboxDir = dir
+	return m.sessionAuthorableErr
 }
 
 func (m *mockAuthoring) WebUIBaseURL() string {
@@ -673,7 +694,7 @@ func TestControl_TaskCancel(t *testing.T) {
 // model has no way to ask for it (#734).
 func TestControl_TaskEdit_PromptCarriesTaskDir(t *testing.T) {
 	m := &mockAuthoring{editResult: AuthoringEditResult{
-		SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: "/data/ai-tasks/t",
+		SessionID: "s1", TaskID: "ai-scratch/t", SandboxPath: "/data/ai-tasks/t",
 	}}
 	eng := &promptCapturingEngine{reply: "ok", sessID: "asid-1"}
 	cs := newAuthoringAIControl(t, m, eng)
@@ -729,7 +750,7 @@ func TestControl_TaskEdit_UnresolvedTaskDirTravelsAsSentinel(t *testing.T) {
 // TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim guards the other half:
 // the sentinel must never stand in for a directory that did resolve.
 func TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim(t *testing.T) {
-	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", TaskDir: "/srv/tasks/t"}}
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t", SandboxPath: "/srv/tasks/t"}}
 	eng := &promptCapturingEngine{reply: "done"}
 	cs := newAuthoringAIControl(t, m, eng)
 
@@ -738,5 +759,95 @@ func TestControl_TaskEdit_ResolvedTaskDirTravelsVerbatim(t *testing.T) {
 	}
 	if got := eng.calls[0]["task_dir"]; got != "/srv/tasks/t" {
 		t.Errorf("task_dir = %q, want the resolved directory", got)
+	}
+}
+
+// The write tool refuses an ineligible path as a tool result the model can
+// narrate its way past, so a session that cannot write must not reach it.
+func TestControl_TaskEdit_RefusesUnauthorableSession(t *testing.T) {
+	m := &mockAuthoring{
+		editResult: AuthoringEditResult{
+			SessionID:   "sess-1",
+			TaskID:      "scratch/zen-quote",
+			Source:      "scratch",
+			SandboxPath: "/tmp/dc-ai/src/zen-quote",
+		},
+		sessionAuthorableErr: errors.New("\"/tmp/dc-ai/src/zen-quote\" is outside buildin/write-task-file's writable fs grant [/tmp/dc-ai/ai-tasks]"),
+	}
+	eng := &promptCapturingEngine{reply: "wrote it"}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "scratch/zen-quote", Prompt: "fetch the zen api"})
+	if err == nil {
+		t.Fatal("handleTaskEdit fired a turn into an unauthorable session, want a refusal")
+	}
+	// The service's explanation has to survive to the operator intact — it is
+	// the half that names the path, the grant and the remedy.
+	if !strings.Contains(err.Error(), "/tmp/dc-ai/ai-tasks") || !strings.Contains(err.Error(), "sess-1") {
+		t.Errorf("error %q lost either the session id or the service's reason", err)
+	}
+	if len(eng.calls) != 0 {
+		t.Errorf("fired %d turns despite the refusal", len(eng.calls))
+	}
+	if m.lastSandboxDir != "/tmp/dc-ai/src/zen-quote" {
+		t.Errorf("checked %q, want the session's own recorded directory", m.lastSandboxDir)
+	}
+}
+
+// A promptless edit only opens the session — there is no turn to protect, and
+// refusing it would break `dicode task edit <id>` against every source whose
+// grants the operator has not widened.
+func TestControl_TaskEdit_UnauthorableSessionStillOpens(t *testing.T) {
+	m := &mockAuthoring{
+		editResult:           AuthoringEditResult{SessionID: "sess-1", TaskID: "scratch/zen", SandboxPath: "/tmp/dc-ai/src/zen"},
+		sessionAuthorableErr: errors.New("outside the grant"),
+	}
+	cs := newAuthoringAIControl(t, m, &promptCapturingEngine{})
+
+	res, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "scratch/zen"})
+	if err != nil {
+		t.Fatalf("handleTaskEdit: %v", err)
+	}
+	if res.SessionID != "sess-1" {
+		t.Errorf("session id = %q, want sess-1", res.SessionID)
+	}
+}
+
+// A --ai create whose target could never be written must leave nothing behind:
+// no scaffolded task, and no open session holding its source's only slot.
+func TestControl_TaskCreate_AIRefusesBeforeScaffolding(t *testing.T) {
+	m := &mockAuthoring{
+		createResult:        AuthoringCreateResult{TaskID: "scratch/zen"},
+		sourceAuthorableErr: errors.New("outside buildin/write-task-file's writable fs grant"),
+	}
+	cs := newAuthoringAIControl(t, m, &promptCapturingEngine{})
+
+	_, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen", Source: "scratch", Prompt: "fetch the zen api"})
+	if err == nil {
+		t.Fatal("handleTaskCreate scaffolded into an unauthorable source, want a refusal")
+	}
+	if m.lastCreateName != "" || m.lastEditTask != "" {
+		t.Errorf("refusal came after create=%q / edit=%q; it must come before both", m.lastCreateName, m.lastEditTask)
+	}
+}
+
+// A plain create writes through the daemon, not through the agent, so the
+// authorability of the agent's write tool is none of its business.
+func TestControl_TaskCreate_PlainSkipsTheAuthorabilityCheck(t *testing.T) {
+	m := &mockAuthoring{
+		createResult:        AuthoringCreateResult{TaskID: "scratch/zen", Source: "scratch"},
+		sourceAuthorableErr: errors.New("outside the grant"),
+	}
+	cs := newAuthoringControl(m)
+
+	res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "zen", Source: "scratch"})
+	if err != nil {
+		t.Fatalf("plain create was refused: %v", err)
+	}
+	if res.TaskID != "scratch/zen" {
+		t.Errorf("task id = %q", res.TaskID)
+	}
+	if m.sourceChecks != 0 {
+		t.Errorf("plain create ran the authorability check %d times, want 0", m.sourceChecks)
 	}
 }

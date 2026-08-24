@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -48,6 +49,9 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 	src, ok := s.sourceMgr.Get(source)
 	if !ok {
 		return ipc.AuthoringCreateResult{}, authErr(404, "source %q not found", source)
+	}
+	if !src.DurableRoot() {
+		return ipc.AuthoringCreateResult{}, gitSourceRefusal(source)
 	}
 
 	if name == "" {
@@ -189,12 +193,17 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 	sessID := uuid.New().String()
 	now := time.Now()
 	sess := AuthoringSession{
-		ID:         sessID,
-		Kind:       "edit",
-		Source:     source,
-		TaskID:     taskID,
-		CreatedAt:  now,
-		LastTurnAt: now,
+		ID:     sessID,
+		Kind:   "edit",
+		Source: source,
+		TaskID: taskID,
+		// Resolved at open and reused for every turn, so the directory
+		// checked against the write tool's grants is the same one the model
+		// is told to write into even if the registry re-resolves the task
+		// elsewhere mid-session.
+		SandboxPath: s.taskDirFor(taskID),
+		CreatedAt:   now,
+		LastTurnAt:  now,
 	}
 	if err := s.authoringSessions.Create(ctx, sess); err != nil {
 		// The partial unique index idx_author_sessions_open_source rejects a
@@ -228,11 +237,18 @@ func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSessio
 // editResultFor projects a session onto the IPC wire shape every EditTask
 // path returns.
 func (s *Server) editResultFor(sess *AuthoringSession) ipc.AuthoringEditResult {
+	// A row written before sandbox_path was assigned carries "", as does one
+	// whose source had not resolved at open. Resolving it now is what those
+	// sessions have instead of a recorded boundary; without it they refuse
+	// every turn while naming an empty directory.
+	sandbox := sess.SandboxPath
+	if sandbox == "" {
+		sandbox = s.taskDirFor(sess.TaskID)
+	}
 	return ipc.AuthoringEditResult{
 		SessionID:      sess.ID,
 		TaskID:         sess.TaskID,
-		SandboxPath:    sess.SandboxPath,
-		TaskDir:        s.taskDirFor(sess.TaskID),
+		SandboxPath:    sandbox,
 		Source:         sess.Source,
 		SourceKind:     s.resolveSourceKind(sess.Source),
 		AgentSessionID: derefOrEmpty(sess.AgentSessionID),
@@ -265,6 +281,180 @@ func (s *Server) taskDirFor(taskID string) string {
 		return ""
 	}
 	return scaffoldDir(tasksetPath, name)
+}
+
+// writeTaskFileTaskID is the authoring agents' only route to disk. Whether a
+// directory lies inside its grants decides whether an authoring turn can write
+// at all.
+const writeTaskFileTaskID = "buildin/write-task-file"
+
+// taskFileRootsEnv carries the write tool's inner boundary. Its value is
+// parsed here as well as by the tool, so the matching below mirrors
+// assertTaskFilePath in tasks/buildin/write-task-file/task.ts rather than
+// normalising first — a root the tool would reject must be rejected here too,
+// or the check passes a turn the tool then refuses.
+const taskFileRootsEnv = "DICODE_TASK_FILE_ROOTS"
+
+// gitSourceRefusal is the wording both the scaffold gate and the turn gate
+// use, so an operator meets one explanation of the pull-cache problem rather
+// than two.
+func gitSourceRefusal(source string) error {
+	return authErr(409, "source %q is git-backed and not in dev mode: files written beside its taskset resolve into the pull cache, which the next pull discards along with the taskset entry — enable dev mode on the source, or author into a local source", source)
+}
+
+// CheckSourceAuthorable reports why an AI authoring turn against a task about
+// to be scaffolded into source could not write, or nil when it could. It is
+// the pre-flight for `task create --ai`: the scaffold itself is durable for
+// any source this passes, so the caller can refuse before writing anything.
+func (s *Server) CheckSourceAuthorable(source string) error {
+	src, err := s.authoringSource(source)
+	if err != nil {
+		return err
+	}
+	root := src.RootTaskSetPath()
+	if root == "" {
+		return authErr(409, "source %q has no resolved taskset path; is it started?", source)
+	}
+	// CreateTask scaffolds a directory beside the taskset file, so the
+	// question is whether such a directory would be writable — which depends
+	// on the parent alone, not on the name the task ends up with. The probe
+	// child is never created; it only carries the depth the tool requires.
+	parent := filepath.Dir(root)
+	return s.checkWritable(filepath.Join(parent, "task"),
+		fmt.Sprintf("a task scaffolded into %q", parent))
+}
+
+// CheckSessionAuthorable reports why an AI authoring turn writing into dir
+// could not reach disk, or nil when it can. dir is the session's own recorded
+// boundary, the same directory the model is told to write into.
+func (s *Server) CheckSessionAuthorable(source, dir string) error {
+	if _, err := s.authoringSource(source); err != nil {
+		return err
+	}
+	if dir == "" {
+		return authErr(409, "the session has no resolved task directory, so there is nowhere to check and nothing to write — cancel it and open a new one")
+	}
+	return s.checkWritable(dir, fmt.Sprintf("the session's task directory %q", dir))
+}
+
+// authoringSource resolves source and rejects it when a write beside its
+// taskset would not survive the next sync.
+func (s *Server) authoringSource(name string) (*taskset.Source, error) {
+	if name == "" {
+		name = "ai-scratch"
+	}
+	if s.sourceMgr == nil {
+		return nil, authErr(503, "source manager not available")
+	}
+	src, ok := s.sourceMgr.Get(name)
+	if !ok {
+		return nil, authErr(404, "source %q not found", name)
+	}
+	if !src.DurableRoot() {
+		return nil, gitSourceRefusal(name)
+	}
+	return src, nil
+}
+
+// checkWritable reports whether the write tool could write a file into dir.
+// Two grants have to agree for that: the fs grant, which becomes the runtime's
+// write permission, and the roots env, which the tool's own path check reads.
+// An operator who widens one and not the other gets a turn that fails inside
+// the tool loop, where the failure reaches the model as a tool result rather
+// than the operator as an error — so both are checked here.
+func (s *Server) checkWritable(dir, subject string) error {
+	if s.registry == nil {
+		return authErr(503, "registry not available")
+	}
+	spec, ok := s.registry.Get(writeTaskFileTaskID)
+	if !ok {
+		return authErr(409, "%s is not registered, so the agent has no route to disk", writeTaskFileTaskID)
+	}
+
+	grants := writableFSPaths(spec)
+	if len(grants) == 0 {
+		return authErr(409, "%s declares no writable fs grant, so the agent has no route to disk", writeTaskFileTaskID)
+	}
+	if !underAnyFSGrant(dir, grants) {
+		return authErr(409, "%s is outside %s's writable fs grant [%s] — the runtime would refuse every write; grant that path in an override of the %s entry, or author into a source under an existing grant",
+			subject, writeTaskFileTaskID, strings.Join(grants, ", "), writeTaskFileTaskID)
+	}
+
+	// A roots value supplied via `from:` or `secret:` is resolved at dispatch
+	// and is not knowable here. Refusing on that would reject a working
+	// configuration, so the fs grant above stands as the whole check.
+	roots, known := declaredTaskFileRoots(spec)
+	if !known {
+		return nil
+	}
+	if !underAnyTaskFileRoot(dir, roots) {
+		return authErr(409, "%s is outside %s's declared %s [%s] — the tool would refuse every write; add that root in an override of the %s entry alongside its fs grant",
+			subject, writeTaskFileTaskID, taskFileRootsEnv, strings.Join(roots, ", "), writeTaskFileTaskID)
+	}
+	return nil
+}
+
+// writableFSPaths returns the paths spec may write to.
+func writableFSPaths(spec *task.Spec) []string {
+	var out []string
+	for _, g := range spec.Permissions.FS {
+		if strings.Contains(g.Permission, "w") && g.Path != "" {
+			out = append(out, g.Path)
+		}
+	}
+	return out
+}
+
+// underAnyFSGrant mirrors the runtime's write permission, which is a prefix
+// grant: everything below a granted path is writable, at any depth.
+func underAnyFSGrant(dir string, grants []string) bool {
+	dir = filepath.Clean(dir)
+	for _, g := range grants {
+		g = filepath.Clean(g)
+		if dir == g || strings.HasPrefix(dir, g+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// declaredTaskFileRoots returns the roots the write tool will read, and
+// whether they are knowable from the spec at all. A literal `value:` is; a
+// `from:`/`secret:` reference is not.
+func declaredTaskFileRoots(spec *task.Spec) ([]string, bool) {
+	for _, e := range spec.Permissions.Env {
+		if e.Name != taskFileRootsEnv {
+			continue
+		}
+		if e.Value == "" {
+			return nil, false
+		}
+		var roots []string
+		for _, r := range strings.Split(e.Value, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				roots = append(roots, r)
+			}
+		}
+		return roots, len(roots) > 0
+	}
+	return nil, false
+}
+
+// underAnyTaskFileRoot mirrors assertTaskFilePath: a root matches by raw
+// string prefix with only trailing slashes trimmed, and a task's directory
+// sits directly beneath it. Normalising the root first would accept one the
+// tool rejects.
+func underAnyTaskFileRoot(dir string, roots []string) bool {
+	for _, r := range roots {
+		root := strings.TrimRight(r, "/")
+		if root == "" || !strings.HasPrefix(dir, root+"/") {
+			continue
+		}
+		if rest := dir[len(root)+1:]; rest != "" && !strings.Contains(rest, "/") {
+			return true
+		}
+	}
+	return false
 }
 
 // scaffoldDir returns the directory a task named name occupies in the source

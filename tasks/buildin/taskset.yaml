@@ -166,9 +166,9 @@ spec:
     # via run_task. Registering it makes it callable by every task holding
     # dicode.tasks "*", which the ai-agent base grants — the task confines
     # itself accordingly (see its permissions.fs comment). Its one root is the
-    # synthesised ai-scratch source, where `dicode task create` scaffolds; a
-    # git-backed source's checkout lives in the pull cache (#730) and an
-    # operator authoring there declares that root in their own override.
+    # synthesised ai-scratch source, where `dicode task create` scaffolds; an
+    # operator authoring into a source of their own declares that root in
+    # their own override.
     write-task-file:
       ref:
         path: ./write-task-file/task.yaml
