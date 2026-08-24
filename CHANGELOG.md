@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.1](https://github.com/dicode-ayo/dicode-core/compare/v0.5.0...v0.5.1) (2026-08-24)
+
+
+### Features
+
+* **ai:** authoring Phase 0 — ship buildin/task-create + thread the prompt ([#659](https://github.com/dicode-ayo/dicode-core/issues/659)) ([c53b691](https://github.com/dicode-ayo/dicode-core/commit/c53b691579eaea2e326212ed456214db6dd055bd))
+* **ai:** give the agent the dicode capabilities its taskset declares ([#735](https://github.com/dicode-ayo/dicode-core/issues/735)) ([062f617](https://github.com/dicode-ayo/dicode-core/commit/062f6170ea25079363f99c7a0232138dbdaac6e3))
+* **mcp:** make switch_dev_mode, test_task and list_sources act ([#724](https://github.com/dicode-ayo/dicode-core/issues/724)) ([22f0fb1](https://github.com/dicode-ayo/dicode-core/commit/22f0fb145ddf6184a8bd9b77f1e2aa7d3a77f852))
+
+
+### Bug Fixes
+
+* **ai-agent-claude-cli:** fail the run when a turn cannot run ([#749](https://github.com/dicode-ayo/dicode-core/issues/749)) ([a357e39](https://github.com/dicode-ayo/dicode-core/commit/a357e39364a67d318cbdfb2101cde4fcb4bb6df1))
+* **ai-agent:** advertise skills and hand the bodies out on demand ([#759](https://github.com/dicode-ayo/dicode-core/issues/759)) ([48d14fc](https://github.com/dicode-ayo/dicode-core/commit/48d14fc879694be8dad801d5178d3e2b768aba59)), closes [#757](https://github.com/dicode-ayo/dicode-core/issues/757)
+* **ai-agent:** send an explicit temperature, and show the authoring prompt a real task.yaml ([#758](https://github.com/dicode-ayo/dicode-core/issues/758)) ([3a7f3b6](https://github.com/dicode-ayo/dicode-core/commit/3a7f3b6c7608da60d4bf6300856e8f30431d61cf))
+* **ai:** give the authoring agent a way to put files on disk ([#734](https://github.com/dicode-ayo/dicode-core/issues/734)) ([#738](https://github.com/dicode-ayo/dicode-core/issues/738)) ([c013bbb](https://github.com/dicode-ayo/dicode-core/commit/c013bbb8059e9b3710cde53913f579d8bf859ed8))
+* **ai:** install skills in the layout the Claude CLI actually loads ([#733](https://github.com/dicode-ayo/dicode-core/issues/733)) ([#744](https://github.com/dicode-ayo/dicode-core/issues/744)) ([886c8b0](https://github.com/dicode-ayo/dicode-core/commit/886c8b04594405ac737a4716923df69b3be81309))
+* **authoring:** check an AI turn's claims against disk before calling it a success ([#760](https://github.com/dicode-ayo/dicode-core/issues/760)) ([2c6b858](https://github.com/dicode-ayo/dicode-core/commit/2c6b858321125e94bf3d8b5b2c84fe3bbe98d97f)), closes [#755](https://github.com/dicode-ayo/dicode-core/issues/755)
+* **authoring:** register the task `task create` scaffolds ([#728](https://github.com/dicode-ayo/dicode-core/issues/728)) ([7779598](https://github.com/dicode-ayo/dicode-core/commit/777959838bd453777d53c94010b04a03d9927091))
+* **taskset:** expand ${VAR} in inline entry base specs ([#762](https://github.com/dicode-ayo/dicode-core/issues/762)) ([64ef623](https://github.com/dicode-ayo/dicode-core/commit/64ef62389512013d4780f800d3baec339b1cfd31))
+* **taskset:** expand ${VAR} in override permission paths ([#725](https://github.com/dicode-ayo/dicode-core/issues/725)) ([9908923](https://github.com/dicode-ayo/dicode-core/commit/99089230328110e54654c05c4bf06249edbd7ac2))
+* **taskset:** expand ${VAR} in trigger.chain.overrides supplied via an override layer ([#764](https://github.com/dicode-ayo/dicode-core/issues/764)) ([92e3a7e](https://github.com/dicode-ayo/dicode-core/commit/92e3a7e45fbd11c3b274a17285f4cc629406d767))
+* **test:** surface cleanup failures in withPendingWebhookChange ([#716](https://github.com/dicode-ayo/dicode-core/issues/716)) ([096f1a2](https://github.com/dicode-ayo/dicode-core/commit/096f1a24db99cddc39c4120bf2e12f4187ec3cd6))
+
 ## [0.5.0](https://github.com/dicode-ayo/dicode-core/compare/v0.4.0...v0.5.0) (2026-08-18)
 
 
