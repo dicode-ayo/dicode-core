@@ -57,6 +57,8 @@ func TestExpandOverrideLayer_NilInput(t *testing.T) {
 // layer must be expanded the same way a ref-loaded task's own
 // trigger.chain.overrides already is via expandSpec (#727).
 func TestExpandOverrideLayer_ChainOverrides_ParamsAndFsExpand(t *testing.T) {
+	t.Setenv("NESTED_ENV", "daemon-value")
+
 	in := &Overrides{
 		Trigger: &TriggerPatch{
 			Chain: &ChainTrigger{
@@ -67,6 +69,15 @@ func TestExpandOverrideLayer_ChainOverrides_ParamsAndFsExpand(t *testing.T) {
 					},
 					Fs: []FSEntry{
 						{Path: "${DATADIR}/downstream", Permission: "rw"},
+					},
+					Env: []EnvEntry{
+						{
+							Name:    "EXAMPLE",
+							From:    "${NESTED_ENV}",
+							Secret:  "${NESTED_ENV}",
+							Value:   "${NESTED_ENV}",
+							Default: "${NESTED_ENV}",
+						},
 					},
 				},
 			},
@@ -81,6 +92,25 @@ func TestExpandOverrideLayer_ChainOverrides_ParamsAndFsExpand(t *testing.T) {
 	}
 	if want := filepath.Join(dataDir, "downstream"); out.Trigger.Chain.Overrides.Fs[0].Path != want {
 		t.Errorf("nested chain fs path = %q, want %q", out.Trigger.Chain.Overrides.Fs[0].Path, want)
+	}
+
+	// From/Secret are identifiers, not task-visible values — env fallback is
+	// safe and expected. Value/Default ARE task-visible, so env fallback must
+	// stay off: an unrecognized ${VAR} is left literal rather than resolving
+	// against the daemon's own environment (the exfiltration guard this
+	// table's "No" column documents).
+	env := out.Trigger.Chain.Overrides.Env[0]
+	if env.From != "daemon-value" {
+		t.Errorf("nested chain env.from = %q, want env-fallback resolved value", env.From)
+	}
+	if env.Secret != "daemon-value" {
+		t.Errorf("nested chain env.secret = %q, want env-fallback resolved value", env.Secret)
+	}
+	if env.Value != "${NESTED_ENV}" {
+		t.Errorf("nested chain env.value = %q, want unresolved literal (no env fallback)", env.Value)
+	}
+	if env.Default != "${NESTED_ENV}" {
+		t.Errorf("nested chain env.default = %q, want unresolved literal (no env fallback)", env.Default)
 	}
 }
 
