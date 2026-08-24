@@ -51,3 +51,62 @@ func TestExpandOverrideLayer_NilInput(t *testing.T) {
 		t.Errorf("ExpandOverrideLayer(nil) = %v, want nil", got)
 	}
 }
+
+// A taskset-entry override layer can itself rewire a chain trigger through
+// overrides.trigger.chain.overrides — the ${VAR} references in that nested
+// layer must be expanded the same way a ref-loaded task's own
+// trigger.chain.overrides already is via expandSpec (#727).
+func TestExpandOverrideLayer_ChainOverrides_ParamsAndFsExpand(t *testing.T) {
+	in := &Overrides{
+		Trigger: &TriggerPatch{
+			Chain: &ChainTrigger{
+				From: "upstream",
+				Overrides: &Overrides{
+					Params: ParamOverrides{
+						{Name: "path", Default: "${DATADIR}/downstream/out.yaml"},
+					},
+					Fs: []FSEntry{
+						{Path: "${DATADIR}/downstream", Permission: "rw"},
+					},
+				},
+			},
+		},
+	}
+
+	dataDir := filepath.Join("/var", "lib", "dicode")
+	out := ExpandOverrideLayer(in, "/srv/tasks/agent", map[string]string{VarDataDir: dataDir})
+
+	if want := filepath.Join(dataDir, "downstream", "out.yaml"); out.Trigger.Chain.Overrides.Params[0].Default != want {
+		t.Errorf("nested chain param default = %q, want %q", out.Trigger.Chain.Overrides.Params[0].Default, want)
+	}
+	if want := filepath.Join(dataDir, "downstream"); out.Trigger.Chain.Overrides.Fs[0].Path != want {
+		t.Errorf("nested chain fs path = %q, want %q", out.Trigger.Chain.Overrides.Fs[0].Path, want)
+	}
+}
+
+// The copy contract ExpandOverrideLayer already upholds for its top-level
+// Params/Fs/Env fields must also hold for a nested Trigger.Chain.Overrides:
+// expanding the returned copy must never mutate the layer the taskset
+// resolver holds for the daemon's lifetime.
+func TestExpandOverrideLayer_ChainOverrides_LeavesInputUntouched(t *testing.T) {
+	const authoredPath = "${DATADIR}/downstream"
+	in := &Overrides{
+		Trigger: &TriggerPatch{
+			Chain: &ChainTrigger{
+				From: "upstream",
+				Overrides: &Overrides{
+					Fs: []FSEntry{{Path: authoredPath, Permission: "rw"}},
+				},
+			},
+		},
+	}
+
+	out := ExpandOverrideLayer(in, "/srv/tasks/agent", map[string]string{VarDataDir: "/var/lib/dicode"})
+
+	if out.Trigger.Chain.Overrides == in.Trigger.Chain.Overrides {
+		t.Fatal("ExpandOverrideLayer aliased the nested chain Overrides; must return a copy")
+	}
+	if in.Trigger.Chain.Overrides.Fs[0].Path != authoredPath {
+		t.Errorf("input nested chain fs path mutated: %q, want %q", in.Trigger.Chain.Overrides.Fs[0].Path, authoredPath)
+	}
+}

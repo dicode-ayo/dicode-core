@@ -187,6 +187,19 @@ func expandOverrides(o *Overrides, vars map[string]string) {
 		o.Env[i].Value = expandString(o.Env[i].Value, vars, false)
 		o.Env[i].Default = expandString(o.Env[i].Default, vars, false)
 	}
+
+	// A taskset-entry override layer can itself carry a trigger.chain.overrides
+	// (an override-of-an-override, e.g. an entry that rewires a chain trigger's
+	// downstream Overrides through overrides.trigger.chain.overrides).
+	// expandSpec expands a ref-loaded task's OWN Trigger.Chain.Overrides
+	// directly; this is the sibling route for one supplied through an
+	// override layer's Trigger patch, which applyTriggerPatch (taskset/
+	// override.go) later copies onto the spec verbatim. Without recursing
+	// here, ${VAR} references in that nested layer reach the runtime literal
+	// (#727 — the #721 bug class again, through a more obscure path).
+	if o.Trigger != nil && o.Trigger.Chain != nil {
+		expandOverrides(o.Trigger.Chain.Overrides, vars)
+	}
 }
 
 // ExpandOverrideLayer returns a copy of o with ${VAR} substitution applied,
@@ -197,6 +210,17 @@ func expandOverrides(o *Overrides, vars map[string]string) {
 // absolute paths into the config the raw-config editor and approval diff
 // render back to the operator.
 func ExpandOverrideLayer(o *Overrides, taskDir string, extras map[string]string) *Overrides {
+	cp := copyOverridesForExpand(o)
+	expandOverrides(cp, builtinVars(taskDir, extras))
+	return cp
+}
+
+// copyOverridesForExpand copies exactly the fields expandOverrides may
+// mutate — Params, Fs, Env and, recursively, a nested Trigger.Chain.Overrides
+// — so that expanding the copy can never bleed back into the caller's
+// original *Overrides. Mirrors expandOverrides' field-for-field walk; keep
+// the two in sync.
+func copyOverridesForExpand(o *Overrides) *Overrides {
 	if o == nil {
 		return nil
 	}
@@ -204,7 +228,13 @@ func ExpandOverrideLayer(o *Overrides, taskDir string, extras map[string]string)
 	cp.Params = append(ParamOverrides(nil), o.Params...)
 	cp.Fs = append([]FSEntry(nil), o.Fs...)
 	cp.Env = append([]EnvEntry(nil), o.Env...)
-	expandOverrides(&cp, builtinVars(taskDir, extras))
+	if o.Trigger != nil && o.Trigger.Chain != nil {
+		chainCp := *o.Trigger.Chain
+		chainCp.Overrides = copyOverridesForExpand(o.Trigger.Chain.Overrides)
+		triggerCp := *o.Trigger
+		triggerCp.Chain = &chainCp
+		cp.Trigger = &triggerCp
+	}
 	return &cp
 }
 
