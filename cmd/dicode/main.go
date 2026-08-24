@@ -49,6 +49,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -137,7 +139,7 @@ func main() {
 		return
 	}
 
-	dataDir := defaultDataDir()
+	dataDir := cliDataDir()
 	socketPath := filepath.Join(dataDir, "daemon.sock")
 	tokenPath := filepath.Join(dataDir, "daemon.token")
 
@@ -1536,11 +1538,30 @@ func ensureDaemon(socketPath string) error {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
-	// Log daemon stderr to dataDir/daemon.log so startup failures are diagnosable.
-	logPath := filepath.Join(filepath.Dir(socketPath), "daemon.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		logFile = nil // non-fatal: proceed without log capture
+	// Capture the background daemon's stdout+stderr to dataDir/daemon.log:
+	// it is the only record of startup failures, and of the first-run
+	// dashboard passphrase, which pkg/webui's ensurePassphrase prints once
+	// and then keeps only as a bcrypt hash. 0o700 because of that
+	// passphrase; MkdirAll because on a first run nothing has created the
+	// data dir yet, and an unopenable log means the passphrase is generated
+	// into a discarded stdout and lost for good.
+	logDir := filepath.Dir(socketPath)
+	logPath := filepath.Join(logDir, "daemon.log")
+	var logFile *os.File
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "dicode: cannot create %s: %v\n", logDir, err)
+	} else if logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err != nil {
+		logFile = nil
+		fmt.Fprintf(os.Stderr, "dicode: cannot write %s: %v\n", logPath, err)
+	}
+	if logFile == nil {
+		fmt.Fprintln(os.Stderr, "dicode: the background daemon's output will be discarded, "+
+			"including any first-run dashboard passphrase — start it with `dicode daemon` "+
+			"in the foreground instead, or recover with `dicode auth reset-passphrase`")
+	} else {
+		fmt.Fprintf(os.Stderr, "dicode: starting the daemon in the background; its output — "+
+			"including the first-run dashboard passphrase, which is shown only once — "+
+			"is written to %s\n", logPath)
 	}
 
 	cmd := exec.Command(self, "daemon")
@@ -1578,6 +1599,82 @@ func isDaemonRunning(socketPath string) bool {
 	}
 	conn.Close()
 	return true
+}
+
+// cliDataDir resolves the directory holding the control socket, its token,
+// and the background daemon's log. It must land on the same directory the
+// daemon picks: the CLI dials whatever socket sits at that path and sends the
+// subcommand's request over it, so a path the daemon is not listening on is
+// at best a dead command and at worst a stranger's listener.
+//
+// Resolution order: DICODE_DATA_DIR, then an owned ./dicode.yaml, then
+// $HOME/.dicode. Where the config decides, data_dir is expanded exactly as
+// pkg/config's applyDefaults expands it, and an absent data_dir defaults the
+// same way applyDefaults defaults it, so both sides name one directory.
+//
+// The config is only honoured when the calling user owns it. dicode.yaml is
+// read from the working directory, which the user does not necessarily
+// control — a config planted in a shared directory would otherwise choose
+// where this process creates directories, appends the daemon log (which
+// carries the first-run passphrase in plaintext), and sends request payloads
+// such as `dicode secrets set`. Ownership is what separates "my project
+// directory" from "somewhere I happened to cd into".
+//
+// DICODE_DATA_DIR outranks the config entirely. The config is discovered from
+// wherever the process happens to be standing, whereas the env var is someone
+// stating which daemon they mean — including callers who run the CLI from an
+// unrelated directory that has a dicode.yaml of its own.
+func cliDataDir() string {
+	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
+		return d
+	}
+
+	const configPath = "dicode.yaml" // matches `dicode daemon`'s own default
+
+	fi, err := os.Lstat(configPath)
+	if err != nil || !fi.Mode().IsRegular() || !ownedByCurrentUser(fi) {
+		return defaultDataDir()
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return defaultDataDir()
+	}
+	var probe struct {
+		DataDir string `yaml:"data_dir"`
+	}
+	// A malformed config is the daemon's error to report, not this
+	// function's: fall through to the default so the command still runs far
+	// enough to surface it.
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return defaultDataDir()
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return defaultDataDir()
+	}
+	// applyDefaults discards this error rather than failing, so a data_dir
+	// needing no home expansion still resolves when $HOME is unset.
+	home, _ := os.UserHomeDir()
+	if dir := expandConfigDataDir(probe.DataDir, home, wd); dir != "" {
+		return dir
+	}
+	return home + "/.dicode"
+}
+
+// expandConfigDataDir applies the expansion pkg/config's applyDefaults
+// performs on data_dir: ~ and the ${HOME}/${CONFIGDIR} variables, in a
+// document where ${DATADIR} is not yet bound. An unrecognised variable is
+// left standing, because that is what the daemon does with it — substituting
+// or rejecting one here would point the two sides at different directories.
+func expandConfigDataDir(value, home, configDir string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "~/") && home != "" {
+		value = home + value[1:]
+	}
+	value = strings.ReplaceAll(value, "${HOME}", home)
+	return strings.ReplaceAll(value, "${CONFIGDIR}", configDir)
 }
 
 func defaultDataDir() string {

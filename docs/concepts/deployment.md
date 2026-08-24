@@ -20,6 +20,12 @@ dicode list
 
 On first run (no `dicode.yaml` in the working directory), the onboarding wizard runs. It picks a surface automatically: a non-TTY session (systemd, Docker, CI) gets a silent default config, a TTY with no display (`$DISPLAY`/`$WAYLAND_DISPLAY` unset) gets the CLI wizard, and a TTY with a display prompts you to choose browser or CLI (default: browser). Set `DICODE_ONBOARDING=silent|cli|browser` to force a surface.
 
+### Auto-started daemons and the first-run passphrase
+
+Any CLI subcommand auto-starts the daemon in the background if one isn't already running. That daemon has no terminal, so its output — including the first-run dashboard passphrase, which `server.auth` generates once and thereafter keeps only as a bcrypt hash — is captured to `<data_dir>/daemon.log`. The command that triggered the start prints that path. If you missed it, read the log; if the log is gone, `dicode auth reset-passphrase` issues a new one (restart the daemon afterwards for it to take effect).
+
+The CLI locates the control socket, its token, and that log under the `data_dir` from `./dicode.yaml`, falling back to `$DICODE_DATA_DIR` and then `$HOME/.dicode` when no config is present — the same resolution the daemon performs, so both sides always agree on where the socket lives. This is what lets CLI commands work inside a `dicode init` directory, whose `data_dir` is `${CONFIGDIR}/.dicode` rather than a path under `$HOME`.
+
 To run dicode under a process supervisor (systemd, launchd, a Docker restart policy, etc.), point it at `dicode daemon --config <path>` — there is no built-in service-install command.
 
 ---
@@ -36,14 +42,18 @@ git add -A && git commit -m "init"
 git push -u origin main
 ```
 
+On a terminal, `dicode init` runs the same setup wizard as first-run onboarding — which curated tasksets to enable, the tasks and data directories, the port, and an optional dashboard passphrase — seeded with defaults suited to a committable directory rather than the wizard's home-relative ones. When stdin is not a terminal (a pipe, a CI step, a `RUN` line in a Dockerfile) those defaults are taken as-is and nothing is asked, so existing automation keeps working unchanged. `DICODE_ONBOARDING=cli` or `=silent` forces either behaviour; there is no browser surface for `init`.
+
+Answers that give up what this command exists to provide are called out under a "Before you push" heading at the end of the run — a tasks directory outside the scaffolded repo (a clone elsewhere will not find it), a data directory inside it that could not be excluded, or a passphrase typed into `server.secret`. They are warnings, not refusals: the choice is yours to make knowingly.
+
 `dicode init <path>` (path defaults to `.`) creates:
 
 - `<path>/dicode.yaml` — with every path field written as `${CONFIGDIR}`-relative (e.g. `${CONFIGDIR}/tasks`, `${CONFIGDIR}/.dicode`) instead of home-relative. `${CONFIGDIR}` always resolves to "the directory containing this dicode.yaml", so the same file works unmodified after a fresh `git clone` regardless of whose home directory it lands in.
-- `<path>/tasks/taskset.yaml` plus a `<path>/tasks/hello/` example task (manual-trigger, `runtime: deno`) — a starting point you edit or delete.
-- `<path>/.gitignore` — pre-populated with `.dicode/`, the generated data dir, so `git add -A` never sweeps up the SQLite run database or the generated dashboard passphrase.
+- `<path>/tasks/taskset.yaml` plus a `<path>/tasks/hello/` example task (manual-trigger, `runtime: deno`) — a starting point you edit or delete. Answering `skip` at the tasks-directory prompt omits both the directory and the `local` source entry.
+- `<path>/.gitignore` — pre-populated with the data dir (`.dicode/` by default), so `git add -A` never sweeps up the SQLite run database or the generated dashboard passphrase. A data directory relocated elsewhere inside the repo is excluded under its own name instead; one outside the repo needs no rule and none is written.
 - a `.git` repository (via `go-git`, not the `git` binary — consistent with the rest of dicode's git integration), so the directory is ready for `git remote add` immediately. If `<path>` is already a git repo, this step is a no-op.
 
-Unlike the first-run wizard, `dicode init` does **not** bake a dashboard passphrase into `dicode.yaml` — that file is meant to be committed and pushed, and `server.secret` is a plaintext, precedence-winning credential (see [Security](security.md)), so shipping a real one to a git remote would hand out a working login to anyone who can read the repo. Instead, the passphrase is generated the first time you run `dicode daemon` (or `make run`) in the directory: it's hashed and stored locally (outside git, in the gitignored data dir) and printed once to that terminal — copy it then. `dicode init` refuses to run if `<path>/dicode.yaml` already exists, so it will never clobber a config you're already using.
+Unlike the first-run wizard, `dicode init` does **not** generate a dashboard passphrase into `dicode.yaml` — that file is meant to be committed and pushed, and `server.secret` is a plaintext, precedence-winning credential (see [Security](security.md)), so shipping a real one to a git remote would hand out a working login to anyone who can read the repo. Instead, the passphrase is generated the first time you run `dicode daemon` (or `make run`) in the directory: it's hashed and stored locally (outside git, in the gitignored data dir) and printed once to that terminal — copy it then. The wizard does offer a passphrase prompt, but leaving it empty is the default and the safe answer; typing one stores it verbatim and earns the warning above. `dicode init` refuses to run if `<path>/dicode.yaml` already exists, so it will never clobber a config you're already using.
 
 ---
 

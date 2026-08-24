@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,5 +267,320 @@ func TestCmdInit_DefaultPathIsCurrentDir(t *testing.T) {
 func TestCmdInit_TooManyArgs(t *testing.T) {
 	if err := cmdInit([]string{"a", "b"}); err == nil {
 		t.Fatal("expected error for more than one positional arg")
+	}
+}
+
+// wizardStdin builds stdin for the init wizard: one line per prompt, in
+// order — one per curated taskset, the local tasks dir, the advanced y/N
+// (plus data dir and port when that is "y"), and finally the passphrase.
+func wizardStdin(lines ...string) *strings.Reader {
+	return strings.NewReader(strings.Join(lines, "\n") + "\n")
+}
+
+// runInitInteractive drives runInit through the wizard with scripted answers
+// and returns everything it printed.
+func runInitInteractive(t *testing.T, dir string, answers ...string) string {
+	t.Helper()
+	var out strings.Builder
+	err := runInit([]string{dir}, wizardStdin(answers...), &out, &out, true,
+		func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	return out.String()
+}
+
+// TestRunInit_NonTTYKeepsSilentDefaults pins the contract that keeps `dicode
+// init` usable from a script: a pipe, a CI step or a Dockerfile RUN gets the
+// full scaffold with no prompt and no blocking read.
+func TestRunInit_NonTTYKeepsSilentDefaults(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	if err := runInit([]string{dir}, strings.NewReader(""), &out, &out, false,
+		func(string) string { return "" }); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	if strings.Contains(out.String(), "first-run setup") {
+		t.Errorf("wizard ran without a TTY:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Before you push") {
+		t.Errorf("default answers must not warn:\n%s", out.String())
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "dicode.yaml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Server.Secret != "" {
+		t.Errorf("Server.Secret = %q; want empty so nothing is committed", cfg.Server.Secret)
+	}
+	for _, f := range []string{"tasks/taskset.yaml", "tasks/hello/task.yaml", ".gitignore"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("missing %s: %v", f, err)
+		}
+	}
+}
+
+// TestRunInit_WizardDisablesPreset: an answer given at the prompt has to
+// reach the generated dicode.yaml.
+func TestRunInit_WizardDisablesPreset(t *testing.T) {
+	dir := t.TempDir()
+	out := runInitInteractive(t, dir,
+		"y", // buildin
+		"n", // examples off
+		"y", // auth
+		"",  // local tasks dir default
+		"",  // advanced? no
+		"",  // passphrase: auto-generate
+	)
+	if !strings.Contains(out, "first-run setup") {
+		t.Fatalf("wizard did not run:\n%s", out)
+	}
+
+	body := readFile(t, filepath.Join(dir, "dicode.yaml"))
+	if strings.Contains(body, "tasks/examples/taskset.yaml") {
+		t.Errorf("examples preset was declined but still rendered:\n%s", body)
+	}
+	if !strings.Contains(body, "tasks/buildin/taskset.yaml") {
+		t.Errorf("buildin preset was accepted but is missing:\n%s", body)
+	}
+}
+
+// TestRunInit_EmptyPassphraseStaysEmpty guards the default that keeps this
+// directory safe to push: pressing enter at the passphrase prompt must leave
+// server.secret absent, not generate one the way the daemon's wizard does.
+func TestRunInit_EmptyPassphraseStaysEmpty(t *testing.T) {
+	dir := t.TempDir()
+	out := runInitInteractive(t, dir, "", "", "", "", "", "")
+
+	cfg, err := config.Load(filepath.Join(dir, "dicode.yaml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Server.Secret != "" {
+		t.Errorf("Server.Secret = %q; want empty", cfg.Server.Secret)
+	}
+	if strings.Contains(out, "Before you push") {
+		t.Errorf("default answers must not warn:\n%s", out)
+	}
+}
+
+// TestRunInit_PassphraseIsStoredAndWarned covers the "ask everything, warn on
+// unsafe answers" contract: the operator may knowingly bake a passphrase in,
+// but must be told that pushing the repo then publishes a working login.
+func TestRunInit_PassphraseIsStoredAndWarned(t *testing.T) {
+	dir := t.TempDir()
+	out := runInitInteractive(t, dir, "", "", "", "", "", "hunter2-hunter2")
+
+	cfg, err := config.Load(filepath.Join(dir, "dicode.yaml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Server.Secret != "hunter2-hunter2" {
+		t.Errorf("Server.Secret = %q; want the entered passphrase", cfg.Server.Secret)
+	}
+	if !strings.Contains(out, "Before you push") || !strings.Contains(out, "server.secret") {
+		t.Errorf("entering a passphrase must warn:\n%s", out)
+	}
+}
+
+// TestRunInit_RelocatedDataDirIsGitignored: the data dir holds the SQLite
+// database (passphrase hash, task KV, encrypted secrets), so wherever the
+// operator moves it inside the repo, "git add -A" must not sweep it up.
+func TestRunInit_RelocatedDataDirIsGitignored(t *testing.T) {
+	dir := t.TempDir()
+	out := runInitInteractive(t, dir,
+		"", "", "", // presets
+		"",                   // local tasks dir default
+		"y",                  // advanced
+		"${CONFIGDIR}/state", // data dir
+		"",                   // port default
+		"",                   // passphrase
+	)
+
+	got := readFile(t, filepath.Join(dir, ".gitignore"))
+	if !strings.HasSuffix(got, "state/\n") {
+		t.Errorf(".gitignore = %q; want it to end with %q", got, "state/\n")
+	}
+	if strings.Contains(out, "Before you push") {
+		t.Errorf("a relocated but ignorable data dir must not warn:\n%s", out)
+	}
+}
+
+// TestRunInit_DataDirOutsideRepoIsNotIgnored: nothing to exclude when the
+// data dir is not under the repo at all, so .gitignore stays unwritten.
+func TestRunInit_DataDirOutsideRepoIsNotIgnored(t *testing.T) {
+	dir := t.TempDir()
+	runInitInteractive(t, dir,
+		"", "", "",
+		"",                              // local tasks dir default
+		"y",                             // advanced
+		filepath.Join(t.TempDir(), "d"), // data dir elsewhere
+		"",                              // port
+		"",                              // passphrase
+	)
+
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("stat .gitignore: got %v; want it not to exist", err)
+	}
+}
+
+// TestRunInit_TasksDirOutsideRepoWarns: a tasks dir outside the scaffold
+// still gets created, but a clone elsewhere will not find it.
+func TestRunInit_TasksDirOutsideRepoWarns(t *testing.T) {
+	dir := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "my-tasks")
+	out := runInitInteractive(t, dir,
+		"", "", "",
+		elsewhere, // local tasks dir
+		"",        // advanced no
+		"",        // passphrase
+	)
+
+	if _, err := os.Stat(filepath.Join(elsewhere, "taskset.yaml")); err != nil {
+		t.Errorf("scaffold did not follow the chosen tasks dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tasks")); !os.IsNotExist(err) {
+		t.Errorf("stat tasks/: got %v; want the default location unused", err)
+	}
+	if !strings.Contains(out, "outside this directory") {
+		t.Errorf("a tasks dir outside the repo must warn:\n%s", out)
+	}
+}
+
+// TestRunInit_SkipLocalDirScaffoldsNothing: "skip" omits the local source
+// from dicode.yaml, so there is no directory to scaffold either.
+func TestRunInit_SkipLocalDirScaffoldsNothing(t *testing.T) {
+	dir := t.TempDir()
+	runInitInteractive(t, dir, "", "", "", "skip", "", "")
+
+	if _, err := os.Stat(filepath.Join(dir, "tasks")); !os.IsNotExist(err) {
+		t.Errorf("stat tasks/: got %v; want it not to exist", err)
+	}
+	if body := readFile(t, filepath.Join(dir, "dicode.yaml")); strings.Contains(body, "    local:") {
+		t.Errorf("skipped local dir still rendered a local entry:\n%s", body)
+	}
+}
+
+func TestShouldRunWizard(t *testing.T) {
+	tests := []struct {
+		name  string
+		isTTY bool
+		env   string
+		want  bool
+	}{
+		{"tty prompts", true, "", true},
+		{"no tty stays silent", false, "", false},
+		{"env silent beats tty", true, "silent", false},
+		{"env cli beats no tty", false, "cli", true},
+		{"browser downgrades to cli", false, "BROWSER", true},
+		{"unknown value falls through to tty", false, "wat", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldRunWizard(tc.isTTY, func(string) string { return tc.env }, io.Discard)
+			if got != tc.want {
+				t.Errorf("shouldRunWizard = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDataDirIgnoreEntry(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name    string
+		dataDir string
+		want    string
+	}{
+		{"default", "${CONFIGDIR}/.dicode", ".dicode/\n"},
+		{"nested", "${CONFIGDIR}/var/state", "var/state/\n"},
+		{"absolute inside", filepath.Join(root, "inside"), "inside/\n"},
+		{"outside", filepath.Join(t.TempDir(), "d"), ""},
+		{"repo root itself", "${CONFIGDIR}", ""},
+		{"unresolvable variable", "${DATADIR}/x", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := dataDirIgnoreEntry(root, tc.dataDir)
+			if err != nil {
+				t.Fatalf("dataDirIgnoreEntry: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("dataDirIgnoreEntry(%q) = %q; want %q", tc.dataDir, got, tc.want)
+			}
+		})
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// TestRunInit_UnresolvableTasksDirWarns: ${DATADIR} is only known to the
+// daemon once it has loaded the config, so init cannot create the directory.
+// Saying nothing would leave a config whose local source has no taskset.yaml
+// and no explanation.
+func TestRunInit_UnresolvableTasksDirWarns(t *testing.T) {
+	dir := t.TempDir()
+	out := runInitInteractive(t, dir,
+		"", "", "",
+		"${DATADIR}/tasks", // local tasks dir
+		"",                 // advanced no
+		"",                 // passphrase
+	)
+	if !strings.Contains(out, "only the daemon can expand") {
+		t.Errorf("want an unresolvable-tasks-dir warning:\n%s", out)
+	}
+	if strings.Contains(out, "outside this directory") {
+		t.Errorf("unresolvable is not the same as outside:\n%s", out)
+	}
+}
+
+// TestRunInit_AbsolutePathInsideRepoWarns: sitting inside the scaffold is not
+// the same as travelling with it. An absolute path is committed verbatim and
+// resolves, on another machine, to a directory that has nothing to do with
+// where the clone landed.
+func TestRunInit_AbsolutePathInsideRepoWarns(t *testing.T) {
+	dir := t.TempDir()
+	inside := filepath.Join(dir, "tasks")
+	out := runInitInteractive(t, dir,
+		"", "", "",
+		inside, // local tasks dir, absolute but inside the scaffold
+		"",     // advanced no
+		"",     // passphrase
+	)
+	if !strings.Contains(out, "written into dicode.yaml verbatim") {
+		t.Errorf("an absolute in-repo tasks dir must warn about portability:\n%s", out)
+	}
+	if strings.Contains(out, "outside this directory") {
+		t.Errorf("the path is inside the scaffold; that warning is wrong:\n%s", out)
+	}
+}
+
+func TestMachineSpecific(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"${CONFIGDIR}/tasks", false},
+		{"tasks", false},
+		{"/home/someone/tasks", true},
+		{"~/tasks", true},
+		{"${HOME}/tasks", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.value, func(t *testing.T) {
+			if got := machineSpecific(tc.value); got != tc.want {
+				t.Errorf("machineSpecific(%q) = %v; want %v", tc.value, got, tc.want)
+			}
+		})
 	}
 }
