@@ -18,7 +18,8 @@ await setupHarness(import.meta.url);
 // Loaded AFTER setupHarness patches globalThis.fetch — a static import would
 // evaluate task.ts's `npm:openai` dependency before the patch, so the client
 // the task builds would bind the real fetch and skip the http mocks.
-const { steps } = await import("./task.ts") as {
+const { default: main, steps } = await import("./task.ts") as {
+  default: (sdk: unknown) => Promise<unknown>;
   steps: { turn: (ctx: unknown) => Promise<unknown> };
 };
 
@@ -36,18 +37,46 @@ function recordSuspend(): Array<Record<string, unknown>> {
 }
 
 // Drive one chat turn through steps.turn with the harness mocks, mirroring how
-// the runner dispatches a resume.
+// the runner dispatches a resume. `output` defaults to a no-op json() stub —
+// callers that need to inspect what a terminal failure published pass their
+// own spy (see runFailing below).
 // deno-lint-ignore no-explicit-any
-function runTurnStep(input: unknown, state: unknown): Promise<any> {
+function runTurnStep(input: unknown, state: unknown, output: Record<string, unknown> = { json: async () => {} }): Promise<any> {
   return steps.turn({
     params,
     kv,
     input,
     state,
     dicode,
-    output: {},
+    output,
     mcp: {},
   }) as Promise<Record<string, unknown>>;
+}
+
+// runFailing invokes a task entry (main() one-shot, or a steps.turn call via
+// runTurnStep) expecting the terminal-failure path: a turn that cannot run
+// publishes an error envelope via output.json — which a webhook caller still
+// receives, over HTTP 500, since the daemon captures structured output before
+// the non-zero exit — and then throws, which is what makes the engine record
+// a failed run instead of a green one carrying an error string as its reply.
+// Returns the published envelope and the thrown error.
+// deno-lint-ignore no-explicit-any
+async function runFailing(fn: (output: Record<string, unknown>) => Promise<unknown>): Promise<{ envelope: any; error: Error }> {
+  const published: unknown[] = [];
+  const output = { json: (v: unknown) => { published.push(v); return Promise.resolve(); } };
+  let thrown: unknown;
+  let returned = false;
+  try {
+    await fn(output);
+    returned = true;
+  } catch (e) {
+    thrown = e;
+  }
+  if (returned) {
+    throw new Error("expected the failed turn to throw — a returned error envelope settles the run as a success");
+  }
+  assert.equal(published.length, 1);
+  return { envelope: published[0], error: thrown as Error };
 }
 
 // Minimal OpenAI chat completion response body.
@@ -85,22 +114,31 @@ function useOpenAI() {
   params.set("api_key_env", "OPENAI_API_KEY");
 }
 
-test("returns not_configured when no provider params are set", async () => {
+test("one-shot: not_configured turn publishes the envelope and throws instead of settling as a successful run (#750)", async () => {
   params.set("prompt", "hello");
   // intentionally no model / base_url / api_key_env
 
-  const result = await runTask();
+  // Before the fix, main() bare-returned this envelope: the run recorded as
+  // a success carrying the misconfiguration as prose in `reply`, which is
+  // exactly what WaitRunSettled, chained triggers and the dashboard would
+  // read as "it worked". runFailing asserts it now throws instead.
+  const { envelope, error } = await runFailing((output) =>
+    main({ params, kv, input: undefined, dicode, output, mcp: { list_tools: async () => [], call: async () => ({}) } })
+  );
 
-  assert.equal(result.error, "not_configured");
+  assert.equal(envelope.error, "not_configured");
   // Non-empty and descriptive: a pipeline stage reading ${input.output.reply}
   // fails its dispatch on a null field, which would replace the hint with the
   // resolver's own error.
-  assert.ok(result.reply.includes("model"));
-  assert.ok(result.caller_context);
-  assert.ok(result.session_id);
+  assert.ok(envelope.reply.includes("model"));
+  assert.ok(envelope.caller_context);
+  assert.ok(envelope.session_id);
   // Should list model and base_url as missing at minimum
-  assert.ok(result.missing.includes("model"));
-  assert.ok(result.missing.includes("base_url"));
+  assert.ok(envelope.missing.includes("model"));
+  assert.ok(envelope.missing.includes("base_url"));
+  // The thrown message is what the engine records against the run — it must
+  // carry the same detail the published envelope does, not a generic code.
+  assert.equal(error.message, envelope.reply);
 });
 
 test("first turn auto-generates a session_id and returns reply", async () => {
@@ -412,17 +450,22 @@ test("chat turn: a blank message ends the chat (returns, no OpenAI call)", async
   assert.httpNotCalled("POST", "http://localhost:11434/v1/chat/completions");
 });
 
-test("chat turn surfaces not_configured when no provider is set", async () => {
-  // No useLocal(): model/base_url unset. The turn returns a failure the envelope
-  // hands back verbatim instead of suspending onward.
+test("chat turn: not_configured turn publishes the envelope and throws instead of settling as a successful run (#750)", async () => {
+  // No useLocal(): model/base_url unset. Before the fix, chatTurn handed the
+  // provider's { ok: false, ... } envelope back as the step's own result:
+  // no throw, so the engine recorded a *successful* run carrying the
+  // misconfiguration as prose instead of a reply. It must now be terminal.
   const calls = recordSuspend();
 
-  const result = await runTurnStep({ message: "hi" }, { messages: [] });
+  const { envelope, error } = await runFailing((output) =>
+    runTurnStep({ message: "hi" }, { messages: [] }, output)
+  );
 
-  assert.equal(result.ok, false);
-  assert.equal(result.error, "not_configured");
-  assert.ok(result.missing.includes("model"));
-  assert.equal(calls.length, 0);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error, "not_configured");
+  assert.ok(envelope.missing.includes("model"));
+  assert.equal(error.message, "not_configured");
+  assert.equal(calls.length, 0); // never suspended onward
 });
 
 // ─── capability-gated built-in tools (#735) ──────────────────────────────

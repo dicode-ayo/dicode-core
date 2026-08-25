@@ -9,7 +9,7 @@
 // session id + workdir key; for the OpenAI loop it is the cumulative
 // {messages, summary}. The envelope never looks inside it.
 
-import type { Dicode, JSONSchema } from "../../sdk.ts";
+import type { Dicode, JSONSchema, Output } from "../../sdk.ts";
 
 // SAFE_SKILL_NAME caps skill filenames to a flat identifier so a `skills` param
 // can't traverse out of skills_dir via "../" or absolute paths (the "/" is
@@ -112,8 +112,19 @@ export function chatStart(dicode: Dicode, initialState: unknown, banner: string)
 // back to `turn` with the new state and the reply as the next banner. onEnd
 // defaults to a bare end marker; providers that carry an identity in `state`
 // (e.g. a session id) shape their own end result.
+//
+// A turn a provider could not run at all (`ok: false`) is terminal — nothing
+// downstream (a webhook caller, WaitRunSettled, a chained trigger, the
+// dashboard) should read it as a successful run carrying an error string in
+// place of a reply. So this — not each provider — owns the terminality
+// decision: publish the envelope via output.json (a webhook caller still
+// receives it, over HTTP 500, because the daemon captures structured output
+// before the non-zero exit) and throw, which is what makes the engine record
+// a failed run. A provider that wants this behavior just returns
+// `{ ok: false, ... }`; one that already throws its own terminal failures
+// (e.g. ai-agent-claude-cli's fail()) never reaches this branch.
 export async function chatTurn(
-    ctx: { input: unknown; state?: unknown; dicode: Dicode },
+    ctx: { input: unknown; state?: unknown; dicode: Dicode; output: Output },
     runTurn: RunTurn,
     onEnd: (state: unknown) => unknown = () => ({ ok: true, reply: "(chat ended)" }),
 ): Promise<unknown> {
@@ -121,7 +132,11 @@ export async function chatTurn(
     if (isChatEnd(message)) return onEnd(ctx.state);
 
     const turn = await runTurn({ message, state: ctx.state });
-    if (!turn.ok) return turn;
+    if (!turn.ok) {
+        await ctx.output.json(turn);
+        const reason = typeof turn.error === "string" ? turn.error : "chat turn failed";
+        throw new Error(reason);
+    }
 
     await ctx.dicode.suspend({
         to: "turn",
