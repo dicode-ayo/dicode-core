@@ -486,6 +486,35 @@ func (cs *ControlServer) SetAuthoringService(a AuthoringService) { cs.authoring 
 // Must be called before Start.
 func (cs *ControlServer) SetTestGuard(g func(taskID string) error) { cs.testGuard = g }
 
+// runFailureError builds the error handleTaskEdit/handleAI return for a
+// non-successful WaitRunSettled result. A task that fails via the
+// output.json(envelope)+throw terminal-failure pattern (every ai-agent
+// preset's shared chatTurn envelope, ai-agent-core/chat.ts) never bare-returns,
+// but its envelope still reaches ReturnValue — buildRunResult
+// (pkg/trigger/run.go) falls back to the run's structured OutputContent when
+// there is no bare return. Surface the envelope's reply/error/hint here
+// instead of just the run id, so a `dicode ai` caller sees the same detail a
+// webhook caller gets over HTTP 500, rather than only "see dicode logs".
+func runFailureError(run RunResult) error {
+	detail := ""
+	if m, ok := run.ReturnValue.(map[string]any); ok {
+		if s, ok := m["reply"].(string); ok && s != "" {
+			detail = s
+		} else if s, ok := m["error"].(string); ok && s != "" {
+			detail = s
+			if h, ok := m["hint"].(string); ok && h != "" {
+				detail += ". " + h
+			}
+		}
+	}
+	if detail == "" {
+		return fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
+			run.RunID, run.Status, run.RunID)
+	}
+	return fmt.Errorf("task run %s finished with status %s: %s — see 'dicode logs %s'",
+		run.RunID, run.Status, detail, run.RunID)
+}
+
 func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (TaskCreateResult, error) {
 	if cs.authoring == nil {
 		return TaskCreateResult{}, errors.New("authoring service not configured")
@@ -647,11 +676,10 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		return out, nil
 	}
 	if run.Status != "success" {
-		// Surface the run id in the error so the CLI user can jump straight to
-		// `dicode logs <run-id>` — the dispatch loop only serialises `out` when
-		// err == nil, mirroring handleAI's equivalent failure path.
-		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
-			run.RunID, run.Status, run.RunID)
+		// Surface the run id (and, when available, the run's own detail) in
+		// the error so the CLI user isn't left with only a generic status —
+		// mirrors handleAI's equivalent failure path.
+		return out, runFailureError(run)
 	}
 
 	// Extract reply + session_id from the return value — same envelope
@@ -1106,12 +1134,12 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 		return out, nil
 	}
 	if run.Status != "success" {
-		// Surface the run id in the error so the CLI user can jump straight
-		// to `dicode logs <run-id>` — the control-socket dispatch loop only
-		// serialises `out` when err == nil, so TaskID/RunID on out would
-		// otherwise be dropped on failure.
-		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
-			run.RunID, run.Status, run.RunID)
+		// Surface the run id (and, when available, the run's own detail) in
+		// the error so the CLI user isn't left with only a generic status —
+		// the control-socket dispatch loop only serialises `out` when
+		// err == nil, so TaskID/RunID on out would otherwise be dropped on
+		// failure.
+		return out, runFailureError(run)
 	}
 
 	// Extract reply + session_id from the return value. Accept both the full

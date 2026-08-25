@@ -196,6 +196,9 @@ Two surfaces read this setting:
   `--task` to override for a single invocation; use `--session-id` to continue
   an existing conversation. The first turn's generated session id is printed
   to stderr as `session: <id>` so it doesn't pollute reply-consuming pipes.
+  A failed turn (e.g. `not_configured`) prints the run's own `reply`/`error`/`hint`
+  detail alongside the run id, not just a bare "finished with status failure" —
+  the CLI reads it off the same structured output a webhook caller gets.
 
 ---
 
