@@ -93,3 +93,31 @@ func TestBuildRunResult_BareReturnValueTakesPrecedenceOverOutputContent(t *testi
 		t.Errorf("ReturnValue = %#v, want the bare return value to win", res.ReturnValue)
 	}
 }
+
+// The OutputContent fallback is scoped to a non-successful run. A successful
+// run that calls output.json() purely for display (e.g. a report task) and
+// bare-returns nothing must keep getting a nil ReturnValue, exactly like
+// before this fix — widening what counts as "the return value" for every
+// other task's dicode.run_task()/pipeline-chain callers on success would be
+// an untested, surprising behavior change unrelated to the failed-run bug
+// this fallback exists for.
+func TestBuildRunResult_SuccessfulRun_DoesNotFallBackToOutputContent(t *testing.T) {
+	eng, reg := waitEnv(t)
+	ctx := context.Background()
+
+	runID, err := reg.StartRun(ctx, "some/report-task", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := reg.FinishRunWithResult(ctx, runID, registry.StatusSuccess, "" /* no bare return */, "application/json", `{"display":"only"}`); err != nil {
+		t.Fatalf("FinishRunWithResult: %v", err)
+	}
+
+	res, err := eng.WaitRunSettled(ctx, runID)
+	if err != nil {
+		t.Fatalf("WaitRunSettled: %v", err)
+	}
+	if res.ReturnValue != nil {
+		t.Errorf("ReturnValue = %#v, want nil — a successful run's display-only output.json() must not become its return value", res.ReturnValue)
+	}
+}

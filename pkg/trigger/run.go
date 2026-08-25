@@ -213,11 +213,19 @@ func (e *Engine) resumeContinuationID(ctx context.Context, parentRunID string) (
 // A task that fails via `output.json(envelope); throw ...` (the terminal-failure
 // pattern shared by every ai-agent preset — see ai-agent-core/chat.ts) never
 // bare-returns, so returnJSON and the cache are both empty even though the
-// caller-facing detail exists on OutputContent. Fall back to it, gated on
-// content type so a text/html/image/file output.* call is never misparsed as
-// JSON — mirrors how the webhook response (pkg/trigger/webhook.go) already
-// prefers OutputContent over ReturnValue, so `dicode ai`/control-socket
-// callers see the same detail a webhook caller gets over HTTP 500.
+// caller-facing detail exists on OutputContent. Fall back to it for a non-
+// successful run, gated on content type so a text/html/image/file output.*
+// call is never misparsed as JSON — mirrors how the webhook response
+// (pkg/trigger/webhook.go) already prefers OutputContent over ReturnValue on
+// a failed run, so `dicode ai`/control-socket callers see the same detail a
+// webhook caller gets over HTTP 500. Scoped to non-success (rather than
+// applied unconditionally like the webhook path): a successful run's
+// ReturnValue is a stable, load-bearing contract for dicode.run_task()/
+// pipeline-chain callers reading ${input.output.<field>} across every other
+// task in the repo, most of which call output.html()/output.json() purely
+// for display alongside an unrelated (or absent) bare return — widening what
+// counts as "the return value" there would be a surprising, untested
+// behavior change unrelated to the bug this fixes.
 func (e *Engine) buildRunResult(runID string, run *registry.Run) ipc.RunResult {
 	returnJSON := run.ReturnValue
 	if returnJSON == "" {
@@ -225,7 +233,8 @@ func (e *Engine) buildRunResult(runID string, run *registry.Run) ipc.RunResult {
 			returnJSON, _ = v.(string)
 		}
 	}
-	if returnJSON == "" && run.OutputContent != "" && isJSONContentType(run.OutputContentType) {
+	if returnJSON == "" && run.Status != registry.StatusSuccess &&
+		run.OutputContent != "" && isJSONContentType(run.OutputContentType) {
 		returnJSON = run.OutputContent
 	}
 	var returnValue interface{}
