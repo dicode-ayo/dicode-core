@@ -170,7 +170,7 @@ func TestControl_TaskCreate_NoService(t *testing.T) {
 
 func TestControl_TaskCreate_Plain(t *testing.T) {
 	m := &mockAuthoring{createResult: AuthoringCreateResult{
-		TaskID: "ai-scratch/hello", Source: "ai-scratch", Files: []string{"task.yaml", "task.js"},
+		TaskID: "ai-scratch/hello", Source: "ai-scratch", Files: []string{"task.yaml", "task.ts"},
 	}}
 	cs := newAuthoringControl(m)
 	res, err := cs.handleTaskCreate(context.Background(), Request{TaskName: "hello", Source: "ai-scratch"})

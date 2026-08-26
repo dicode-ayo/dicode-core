@@ -1,7 +1,7 @@
 /**
  * task-create-registers.spec.ts
  *
- * POST /api/task/create scaffolds task.yaml + task.js into a source. Those
+ * POST /api/task/create scaffolds task.yaml + task.ts into a source. Those
  * files alone do not make a task: a source resolves through its taskset's
  * spec.entries and nothing scans the directory tree, so an unlisted directory
  * stays invisible to the daemon and the returned task id refers to nothing.
@@ -74,7 +74,7 @@ test.describe('Task create registration', () => {
     expect((await created.json() as { task_id: string }).task_id).toBe(TASK_ID);
 
     expect(fs.existsSync(path.join(taskDir(), 'task.yaml'))).toBe(true);
-    expect(fs.existsSync(path.join(taskDir(), 'task.js'))).toBe(true);
+    expect(fs.existsSync(path.join(taskDir(), 'task.ts'))).toBe(true);
     expect(fs.readFileSync(tasksetPath(), 'utf8')).toContain(`./${TASK_NAME}/task.yaml`);
 
     await waitFor(() => taskListed(request), `${TASK_ID} to appear in /api/tasks`);

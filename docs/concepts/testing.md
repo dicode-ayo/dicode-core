@@ -387,7 +387,7 @@ dicode:
 
 ## AI-generated tests
 
-When the AI generator creates `task.js`, it also generates `task.test.js`. Both are shown in the diff before the user confirms. The AI retry loop (max 3 attempts) fixes test files too if they fail validation.
+When the AI generator creates `task.ts`, it also generates `task.test.ts`. Both are shown in the diff before the user confirms. The AI retry loop (max 3 attempts) fixes test files too if they fail validation.
 
 Rule of thumb: if the AI can't generate passing tests for a task it just wrote, it's a signal the task logic is wrong.
 

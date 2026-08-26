@@ -118,8 +118,8 @@ func TestAPITaskCreate_HappyPath(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "my-cool-task", "task.yaml")); err != nil {
 		t.Errorf("task.yaml not found on disk: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "my-cool-task", "task.js")); err != nil {
-		t.Errorf("task.js not found on disk: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "my-cool-task", "task.ts")); err != nil {
+		t.Errorf("task.ts not found on disk: %v", err)
 	}
 }
 
@@ -157,9 +157,9 @@ func TestAPITaskCreate_ExistingTaskConflicts(t *testing.T) {
 		t.Fatalf("first create status = %d, want 201; body: %s", w.Code, w.Body.String())
 	}
 	// Rewrite the script so a clobbering second create would be visible.
-	scriptPath := filepath.Join(dir, "regcheck", "task.js")
+	scriptPath := filepath.Join(dir, "regcheck", "task.ts")
 	if err := os.WriteFile(scriptPath, []byte("// authored\n"), 0o644); err != nil {
-		t.Fatalf("write task.js: %v", err)
+		t.Fatalf("write task.ts: %v", err)
 	}
 
 	w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"})
@@ -168,10 +168,10 @@ func TestAPITaskCreate_ExistingTaskConflicts(t *testing.T) {
 	}
 	script, err := os.ReadFile(scriptPath)
 	if err != nil {
-		t.Fatalf("read task.js: %v", err)
+		t.Fatalf("read task.ts: %v", err)
 	}
 	if string(script) != "// authored\n" {
-		t.Errorf("task.js was overwritten: %q", script)
+		t.Errorf("task.ts was overwritten: %q", script)
 	}
 }
 

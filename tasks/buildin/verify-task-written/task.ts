@@ -1,8 +1,16 @@
 import type { DicodeSdk } from "../../sdk.ts";
 
-// The boilerplate CreateTask scaffolds. A directory still holding exactly this
-// is a directory no agent has written to, whatever the reply says.
-const SCAFFOLD_BODY = 'export default async function main({ dicode }) {\n  console.log("Hello from " + dicode.task_id);\n}\n';
+// The boilerplate CreateTask scaffolds. A directory still holding exactly one
+// of these is a directory no agent has written to, whatever the reply says.
+// Keeps the pre-#741 task.js body too: a task directory scaffolded before
+// that fix still holds the untyped body verbatim until someone opens an edit
+// session on it, and that untouched legacy scaffold must still fail
+// verification, not silently pass because it no longer matches the current
+// (typed, task.ts) scaffold string.
+const SCAFFOLD_BODIES = new Set([
+  'export default async function main({ dicode }: DicodeSdk) {\n  console.log("Hello from " + dicode.task_id);\n}\n',
+  'export default async function main({ dicode }) {\n  console.log("Hello from " + dicode.task_id);\n}\n',
+]);
 
 // The caller's "I could not resolve a directory" value. Checking is skipped,
 // not failed: an unevaluated post-condition must never read as a negative one.
@@ -47,7 +55,7 @@ export async function verify(taskDir: string): Promise<string> {
       `no task.ts, task.js or task.py in ${taskDir} — the turn wrote a manifest with nothing to run`,
     );
   }
-  if (bodies.every((b) => b === SCAFFOLD_BODY)) {
+  if (bodies.every((b) => SCAFFOLD_BODIES.has(b))) {
     throw new VerificationFailed(
       `${taskDir} still holds only the scaffold — the turn changed nothing on disk, whatever its reply claims`,
     );
