@@ -161,6 +161,6 @@ server:
     // source's directory.
     const taskDir = path.join(tempDir, 'ai-tasks', 'fresh-install-e2e-task');
     expect(fs.existsSync(path.join(taskDir, 'task.yaml'))).toBe(true);
-    expect(fs.existsSync(path.join(taskDir, 'task.js'))).toBe(true);
+    expect(fs.existsSync(path.join(taskDir, 'task.ts'))).toBe(true);
   });
 });

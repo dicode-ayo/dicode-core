@@ -2,7 +2,7 @@ import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/asser
 import main, { verify, VerificationFailed } from "./task.ts";
 
 const SCAFFOLD_BODY =
-  'export default async function main({ dicode }) {\n  console.log("Hello from " + dicode.task_id);\n}\n';
+  'export default async function main({ dicode }: DicodeSdk) {\n  console.log("Hello from " + dicode.task_id);\n}\n';
 const REAL_YAML = "apiVersion: dicode/v1\nkind: Task\nname: zen\n";
 
 function sdk(params: Record<string, string>) {
@@ -28,7 +28,7 @@ async function withTaskDir(
 
 Deno.test("untouched_scaffold_fails_however_confident_the_reply", async () => {
   await withTaskDir(
-    { "task.yaml": REAL_YAML, "task.js": SCAFFOLD_BODY },
+    { "task.yaml": REAL_YAML, "task.ts": SCAFFOLD_BODY },
     async (dir) => {
       const err = await assertRejects(
         () => main(sdk({ task_dir: dir, reply: "I wrote all three files." })),

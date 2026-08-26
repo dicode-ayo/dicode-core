@@ -2,7 +2,7 @@ import type { DicodeSdk } from "../../sdk.ts";
 
 // The boilerplate CreateTask scaffolds. A directory still holding exactly this
 // is a directory no agent has written to, whatever the reply says.
-const SCAFFOLD_BODY = 'export default async function main({ dicode }) {\n  console.log("Hello from " + dicode.task_id);\n}\n';
+const SCAFFOLD_BODY = 'export default async function main({ dicode }: DicodeSdk) {\n  console.log("Hello from " + dicode.task_id);\n}\n';
 
 // The caller's "I could not resolve a directory" value. Checking is skipped,
 // not failed: an unevaluated post-condition must never read as a negative one.

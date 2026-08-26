@@ -662,7 +662,7 @@ Open the web UI and click **New Task**. Type what you want in plain English:
 
 dicode will:
 
-1. Ask your configured AI model to generate `task.yaml` + `task.js`
+1. Ask your configured AI model to generate `task.yaml` + `task.ts`
 2. Validate the generated code (syntax check, schema check)
 3. Show you the generated files in the browser
 4. Save to your local tasks directory immediately — the task goes live within ~100ms

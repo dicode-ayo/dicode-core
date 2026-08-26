@@ -91,7 +91,7 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 	// could have raced it into existence — so any failure past this point
 	// removes the whole directory rather than leaving a partial scaffold
 	// that would permanently 409 every retry of this name (a write failing
-	// after task.yaml landed but before task.js, or registration failing
+	// after task.yaml landed but before task.ts, or registration failing
 	// after both files landed, previously left exactly that trap). Success
 	// is the only path that must NOT clean up.
 	success := false
@@ -116,12 +116,17 @@ timeout: 30s
 
 	// The SDK reaches task code through the handler's ctx argument, not a
 	// global — boilerplate that reads a bare `dicode` throws on the first run.
-	taskJS := `export default async function main({ dicode }) {
+	// task.ts (not task.js): TypeScript is what the docs and every other task
+	// in tasks/ use, and the AI authoring system prompt always writes task.ts
+	// — scaffolding the same extension it is told to write into means "the
+	// directory already exists, write into it" is literally true instead of
+	// leaving a dead task.js next to the real task.ts (#741).
+	taskTS := `export default async function main({ dicode }: DicodeSdk) {
   console.log("Hello from " + dicode.task_id);
 }
 `
-	if err := os.WriteFile(filepath.Join(taskDir, "task.js"), []byte(taskJS), 0644); err != nil {
-		return ipc.AuthoringCreateResult{}, authErr(500, "write task.js: %v", err)
+	if err := os.WriteFile(filepath.Join(taskDir, "task.ts"), []byte(taskTS), 0644); err != nil {
+		return ipc.AuthoringCreateResult{}, authErr(500, "write task.ts: %v", err)
 	}
 
 	// Resolution walks spec.entries and never scans the source tree, so a
@@ -137,7 +142,7 @@ timeout: 30s
 	return ipc.AuthoringCreateResult{
 		TaskID: source + "/" + name,
 		Source: source,
-		Files:  []string{"task.yaml", "task.js"},
+		Files:  []string{"task.yaml", "task.ts"},
 	}, nil
 }
 
