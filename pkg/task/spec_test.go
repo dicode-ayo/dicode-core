@@ -949,6 +949,50 @@ func TestLoadDirWithVars_NeitherFilePresent(t *testing.T) {
 	}
 }
 
+// TestLoadDirWithVarsFile_LoadsExactFile verifies LoadDirWithVarsFile opens
+// exactly dir/filename, not a probed task.yaml — the resolver-facing entry
+// point that lets pkg/taskset/resolver.go load the same file it already
+// kind-detected instead of re-deriving a hardcoded task.yaml (#765
+// code-review follow-up).
+func TestLoadDirWithVarsFile_LoadsExactFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: wrong\nruntime: deno\ntrigger: { manual: true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "custom.yml"), []byte("name: right\nruntime: deno\ntrigger: { manual: true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVarsFile(dir, "custom.yml", nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVarsFile: %v", err)
+	}
+	if spec.Name != "right" {
+		t.Fatalf("spec.Name = %q, want %q (must load the named file, not task.yaml)", spec.Name, "right")
+	}
+}
+
+// TestLoadDirWithVarsFile_RejectsEscapingFilename guards the explicit
+// containment check in openTaskSpecFile: LoadDirWithVarsFile/
+// LoadPipelineDirFile are exported entry points, so a filename that isn't
+// pre-sanitized to a bare basename must be rejected rather than silently
+// escaping dir.
+func TestLoadDirWithVarsFile_RejectsEscapingFilename(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(dir, filepath.Join(outside, "secret.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadDirWithVarsFile(dir, rel, nil); err == nil {
+		t.Fatalf("LoadDirWithVarsFile(%q, %q, nil): expected an error for an escaping filename, got nil", dir, rel)
+	}
+}
+
 // TestLoadDir_ZeroTimeoutPreserved verifies that omitting timeout: in task.yaml
 // leaves spec.Timeout == 0 (no deadline) for both Deno and Python runtimes.
 // The old code coerced zero to 60s for non-container/non-daemon tasks, which

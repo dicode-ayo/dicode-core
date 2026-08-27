@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/internal/pathguard"
 	"gopkg.in/yaml.v3"
 )
 
@@ -716,6 +717,16 @@ func ManifestPath(dir string) (string, error) {
 func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 	if filename != "" {
 		p := filepath.Join(dir, filename)
+		// filename is expected to already be a bare basename (callers pass
+		// filepath.Base(...) of an already ref-resolution-validated path),
+		// but this is now an exported entry point (LoadDirWithVarsFile /
+		// LoadPipelineDirFile) — guard explicitly rather than trust every
+		// future caller to pre-sanitize, using the same lexical
+		// containment check (internal/pathguard.Within) the rest of the
+		// codebase's path-boundary guards share.
+		if ok, _ := pathguard.Within(dir, p); !ok {
+			return nil, p, fmt.Errorf("manifest filename %q escapes %s", filename, dir)
+		}
 		f, err := os.Open(p)
 		return f, p, err
 	}
