@@ -119,7 +119,7 @@ func loadPipelineDir(dir, filename string, extras map[string]string) (*PipelineT
 	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
 		return nil, fmt.Errorf("%s: legacy `notify` block detected. "+
 			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
-			"to fire a notification task on failure — see docs.", specPath)
+			"to fire a notification task on failure — see docs", specPath)
 	}
 
 	var p PipelineTask

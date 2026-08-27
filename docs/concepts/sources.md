@@ -35,7 +35,7 @@ spec:
 
 | Field | Default | Description |
 |---|---|---|
-| `path` | required (local) | Absolute path to `taskset.yaml`; `${CONFIGDIR}` and `${HOME}` expanded |
+| `path` | required (local) | Absolute path to this source's root `taskset.yaml`; `${CONFIGDIR}` and `${HOME}` expanded. Scoped to this root/source-level ref — a *nested* entry's `ref.path` inside a `taskset.yaml` (see below) may be relative and may target a task manifest or its containing directory instead. |
 | `url` | required (git) | HTTPS or SSH git URL |
 | `branch` | `main` | Branch to track (git only) |
 | `poll_interval` | `30s` | How often to fetch (git only) |
