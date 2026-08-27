@@ -34,6 +34,16 @@ func peekKind(dir string) (string, error) {
 // LoadKindedDir loads dir's task manifest as the appropriate kind. A missing
 // or "Task" kind loads a *Spec; "PipelineTask" loads a *PipelineTask. Any
 // other kind is an error.
+//
+// Its task.yml fallback (via peekKind → openTaskSpecFile) is currently
+// unreachable through this package's only production caller,
+// pkg/registry/reconciler.go, whose upstream ScanDir (pkg/task/hash.go)
+// still gates direct-scan discovery on task.yaml existing — a deliberate,
+// documented scope boundary (docs/concepts/sources.md), not an oversight.
+// It's kept here anyway so LoadKindedDir stays consistent with
+// LoadDirWithVars/LoadPipelineDir and doesn't reproduce the #765 symptom
+// for any future caller that reaches a task.yml-only directory a different
+// way.
 func LoadKindedDir(dir string, extras map[string]string) (Kinded, error) {
 	kind, err := peekKind(dir)
 	if err != nil {

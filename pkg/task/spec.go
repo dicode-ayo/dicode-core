@@ -787,13 +787,20 @@ func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 	if err == nil {
 		return f, specPath, nil
 	}
-	if !os.IsNotExist(err) {
-		return nil, specPath, err
-	}
+	// Try task.yml regardless of why task.yaml failed (not found, or some
+	// other error like permission-denied) — a readable task.yml should
+	// still load even if a stray, unreadable task.yaml sits alongside it.
 	ymlPath := filepath.Join(dir, "task.yml")
 	ymlFile, ymlErr := root.Open("task.yml")
 	if ymlErr == nil {
 		return ymlFile, ymlPath, nil
+	}
+	// Both failed: prefer surfacing whichever error isn't a plain "not
+	// found" (more actionable — e.g. a permission error) over the other's
+	// not-found, defaulting to task.yaml's error when both are equally
+	// uninformative not-found errors.
+	if !os.IsNotExist(err) {
+		return nil, specPath, err
 	}
 	if !os.IsNotExist(ymlErr) {
 		return nil, ymlPath, ymlErr

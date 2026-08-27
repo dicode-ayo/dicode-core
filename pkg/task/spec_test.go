@@ -1007,6 +1007,35 @@ func TestLoadDirWithVars_NeitherFilePresent(t *testing.T) {
 	}
 }
 
+// TestLoadDirWithVars_TaskYamlUnopenable_FallsBackToTaskYml verifies that
+// when task.yaml exists but fails to open for a reason other than
+// not-existing (a symlink escaping the task directory, which os.Root
+// rejects with a non-IsNotExist error — chosen over a permission-bits test
+// since permission checks don't apply to a root-run test process), a valid
+// sibling task.yml still loads rather than surfacing task.yaml's error.
+func TestLoadDirWithVars_TaskYamlUnopenable_FallsBackToTaskYml(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "secret.yaml"), filepath.Join(dir, "task.yaml")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	src := "name: from-yml\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars: %v", err)
+	}
+	if spec.Name != "from-yml" {
+		t.Fatalf("spec.Name = %q, want from-yml (task.yml must still load past an unopenable task.yaml)", spec.Name)
+	}
+}
+
 // TestLoadDirWithVarsFile_LoadsExactFile verifies LoadDirWithVarsFile opens
 // exactly dir/filename, not a probed task.yaml — the resolver-facing entry
 // point that lets pkg/taskset/resolver.go load the same file it already
