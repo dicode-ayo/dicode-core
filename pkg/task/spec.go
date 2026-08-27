@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dicode/dicode/internal/pathguard"
 	"gopkg.in/yaml.v3"
 )
 
@@ -716,30 +715,16 @@ func ManifestPath(dir string) (string, error) {
 // task.yaml-not-found error.
 func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 	if filename != "" {
-		p := filepath.Join(dir, filename)
-		// filename is expected to already be a bare basename (callers pass
-		// filepath.Base(...) of an already ref-resolution-validated path),
-		// but this is now an exported entry point (LoadDirWithVarsFile /
-		// LoadPipelineDirFile) — guard explicitly rather than trust every
-		// future caller to pre-sanitize, using the same lexical
-		// containment check (internal/pathguard.Within) the rest of the
-		// codebase's path-boundary guards share.
-		if ok, _ := pathguard.Within(dir, p); !ok {
-			return nil, p, fmt.Errorf("manifest filename %q escapes %s", filename, dir)
-		}
-		f, err := os.Open(p)
-		return f, p, err
+		return openInDir(dir, filename)
 	}
-	specPath := filepath.Join(dir, "task.yaml")
-	f, err := os.Open(specPath)
+	f, specPath, err := openInDir(dir, "task.yaml")
 	if err == nil {
 		return f, specPath, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, specPath, err
 	}
-	ymlPath := filepath.Join(dir, "task.yml")
-	ymlFile, ymlErr := os.Open(ymlPath)
+	ymlFile, ymlPath, ymlErr := openInDir(dir, "task.yml")
 	if ymlErr == nil {
 		return ymlFile, ymlPath, nil
 	}
@@ -747,6 +732,27 @@ func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 		return nil, ymlPath, ymlErr
 	}
 	return nil, specPath, err
+}
+
+// openInDir opens dir/name after confirming the cleaned, joined path is
+// dir itself or lies within it — name is expected to already be a bare
+// basename (openTaskSpecFile's probing branch passes the literals
+// "task.yaml"/"task.yml"; its filename branch passes a resolver-derived
+// filepath.Base(...) of an already ref-resolution-validated path), but this
+// backs an exported entry point (LoadDirWithVarsFile/LoadPipelineDirFile),
+// so it is checked explicitly rather than trusting every future caller to
+// pre-sanitize. The check is inlined here (Clean + HasPrefix against the
+// cleaned root) rather than delegated to a helper in another package, since
+// that is the containment idiom static analysis tooling for this class of
+// check (uncontrolled data in a path expression) recognizes as a sanitizer.
+func openInDir(dir, name string) (*os.File, string, error) {
+	p := filepath.Clean(filepath.Join(dir, name))
+	root := filepath.Clean(dir)
+	if p != root && !strings.HasPrefix(p, root+string(filepath.Separator)) {
+		return nil, p, fmt.Errorf("manifest filename %q escapes %s", name, dir)
+	}
+	f, err := os.Open(p)
+	return f, p, err
 }
 
 // LoadDirWithVars reads a task from its directory, expanding ${VAR} references
