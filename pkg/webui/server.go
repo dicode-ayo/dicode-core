@@ -1123,12 +1123,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 
 	// Read and parse the existing manifest (task.yaml, or task.yml — #765) as
 	// a generic map to preserve all other fields.
-	yamlPath, err := task.ManifestPath(spec.TaskDir)
-	if err != nil {
-		jsonErr(w, "read task manifest: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	raw, err := os.ReadFile(yamlPath)
+	yamlPath, raw, err := task.ReadManifest(spec.TaskDir)
 	if err != nil {
 		jsonErr(w, "read task manifest: "+err.Error(), http.StatusInternalServerError)
 		return

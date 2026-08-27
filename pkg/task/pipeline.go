@@ -92,8 +92,12 @@ func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error
 
 // LoadPipelineDirFile is LoadPipelineDir for a caller that already knows the
 // exact manifest filename to load — see LoadDirWithVarsFile's doc comment
-// for why this matters. filename must be non-empty.
+// for why this matters, including why filename must be non-empty and that
+// precondition is enforced rather than silently falling back to probing.
 func LoadPipelineDirFile(dir, filename string, extras map[string]string) (*PipelineTask, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("LoadPipelineDirFile: filename must be non-empty for %s (use LoadPipelineDir for probing)", dir)
+	}
 	return loadPipelineDir(dir, filename, extras)
 }
 
@@ -113,14 +117,14 @@ func loadPipelineDir(dir, filename string, extras map[string]string) (*PipelineT
 		Notify any `yaml:"notify"`
 	}
 	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
-		return nil, fmt.Errorf("task.yaml in %s: legacy `notify` block detected. "+
+		return nil, fmt.Errorf("%s: legacy `notify` block detected. "+
 			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
-			"to fire a notification task on failure — see docs.", dir)
+			"to fire a notification task on failure — see docs.", specPath)
 	}
 
 	var p PipelineTask
 	if err := yaml.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("parse %s: %w", specPath, err)
 	}
 
 	// Set ID before Validate: PipelineTask.Validate's self-reference check

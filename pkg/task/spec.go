@@ -680,19 +680,25 @@ func LoadDir(dir string) (*Spec, error) {
 	return LoadDirWithVars(dir, nil)
 }
 
-// ManifestPath returns the path to dir's task manifest file — task.yaml,
-// falling back to task.yml (see openTaskSpecFile) — without opening or
-// parsing it. Callers that need to read-modify-write a task's on-disk
-// manifest directly (e.g. pkg/webui's trigger-editing endpoint) use this
-// instead of hardcoding task.yaml, so a task.yml-only task (#765) can still
-// be edited rather than hitting a spurious "no such file" error.
-func ManifestPath(dir string) (string, error) {
+// ReadManifest returns the path and raw content of dir's task manifest file
+// — task.yaml, falling back to task.yml (see openTaskSpecFile) — as a
+// single open+read, not a path lookup a caller then reopens (which would
+// double the syscalls and open a TOCTOU window against a concurrent source
+// sync). Callers that need to read-modify-write a task's on-disk manifest
+// directly (e.g. pkg/webui's trigger-editing endpoint) use this instead of
+// hardcoding task.yaml, so a task.yml-only task (#765) can still be edited
+// rather than hitting a spurious "no such file" error.
+func ReadManifest(dir string) (path string, data []byte, err error) {
 	f, specPath, err := openTaskSpecFile(dir, "")
 	if err != nil {
-		return "", fmt.Errorf("open %s: %w", specPath, err)
+		return "", nil, fmt.Errorf("open %s: %w", specPath, err)
 	}
-	f.Close()
-	return specPath, nil
+	defer f.Close()
+	data, err = io.ReadAll(f)
+	if err != nil {
+		return "", nil, fmt.Errorf("read %s: %w", specPath, err)
+	}
+	return specPath, data, nil
 }
 
 // openTaskSpecFile opens a task manifest in dir. When filename is non-empty,
@@ -744,6 +750,13 @@ func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 // backs an exported entry point (LoadDirWithVarsFile/LoadPipelineDirFile),
 // so containment is enforced explicitly rather than trusting every future
 // caller to pre-sanitize.
+//
+// This intentionally does not go through internal/pathguard — dicode's
+// usual single audited containment check — despite the duplication: a
+// static-analysis pass over this exact code flagged the equivalent
+// pathguard.Within call (and, after that, an inlined filepath.Rel-based
+// check) as an unrecognized barrier and kept alerting on the os.Open below,
+// where os.Root's stdlib-native sandboxing is what it accepted.
 func openInDir(dir, name string) (*os.File, string, error) {
 	p := filepath.Join(dir, name)
 	root, err := os.OpenRoot(dir)
@@ -779,8 +792,14 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 // opens dir/filename directly, with no task.yaml/task.yml probing, so the
 // file actually loaded is always the same file the kind-detection/security
 // check already vetted, never a same-directory sibling with different
-// content. filename must be non-empty.
+// content. filename must be non-empty — pass it through LoadDirWithVars
+// instead of "" to get the probing behavior; that distinction is enforced,
+// not silently interchangeable, so an accidental empty filename can't
+// reintroduce the sibling-manifest mismatch this function exists to close.
 func LoadDirWithVarsFile(dir, filename string, extras map[string]string) (*Spec, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("LoadDirWithVarsFile: filename must be non-empty for %s (use LoadDirWithVars for probing)", dir)
+	}
 	return loadDirWithVars(dir, filename, extras)
 }
 
@@ -803,14 +822,14 @@ func loadDirWithVars(dir, filename string, extras map[string]string) (*Spec, err
 		Notify any `yaml:"notify"`
 	}
 	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
-		return nil, fmt.Errorf("task.yaml in %s: legacy `notify` block detected. "+
+		return nil, fmt.Errorf("%s: legacy `notify` block detected. "+
 			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
-			"to fire a notification task on failure — see docs.", dir)
+			"to fire a notification task on failure — see docs.", specPath)
 	}
 
 	var spec Spec
 	if err := yaml.Unmarshal(data, &spec); err != nil {
-		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("parse %s: %w", specPath, err)
 	}
 
 	if err := spec.validate(); err != nil {
