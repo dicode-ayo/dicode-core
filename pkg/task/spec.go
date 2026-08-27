@@ -734,25 +734,24 @@ func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 	return nil, specPath, err
 }
 
-// openInDir opens dir/name after confirming name does not resolve outside
-// dir — name is expected to already be a bare basename (openTaskSpecFile's
-// probing branch passes the literals "task.yaml"/"task.yml"; its filename
-// branch passes a resolver-derived filepath.Base(...) of an already
-// ref-resolution-validated path), but this backs an exported entry point
-// (LoadDirWithVarsFile/LoadPipelineDirFile), so it is checked explicitly
-// rather than trusting every future caller to pre-sanitize. The check is
-// inlined here — filepath.Rel(dir, joined) rejected if it climbs outside
-// dir (a ".." component or an absolute result) — rather than delegated to a
-// helper in another package, since that is the containment idiom static
-// analysis tooling for this class of check (uncontrolled data in a path
-// expression) recognizes as a sanitizer.
+// openInDir opens dir/name via os.Root — the standard library's own
+// sandboxed file-access API (Go 1.24+), which rejects a name that would
+// resolve outside dir (including through a symlink) at the OS level rather
+// than via a hand-rolled string check. name is expected to already be a
+// bare basename (openTaskSpecFile's probing branch passes the literals
+// "task.yaml"/"task.yml"; its filename branch passes a resolver-derived
+// filepath.Base(...) of an already ref-resolution-validated path), but this
+// backs an exported entry point (LoadDirWithVarsFile/LoadPipelineDirFile),
+// so containment is enforced explicitly rather than trusting every future
+// caller to pre-sanitize.
 func openInDir(dir, name string) (*os.File, string, error) {
 	p := filepath.Join(dir, name)
-	rel, relErr := filepath.Rel(dir, p)
-	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, p, fmt.Errorf("manifest filename %q escapes %s", name, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, p, err
 	}
-	f, err := os.Open(p)
+	defer root.Close()
+	f, err := root.Open(name)
 	return f, p, err
 }
 
