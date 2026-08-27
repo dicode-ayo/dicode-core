@@ -85,6 +85,8 @@ trigger:
   manual: true
 ```
 
+`ref.path` may point at either the manifest file directly (as above) or at its containing directory (e.g. `path: ./backend`) — a directory-valued ref is probed for `taskset.yaml`, then `task.yaml`, then `task.yml`, and resolves onto whichever it finds. `task.yaml` and `task.yml` are accepted interchangeably as the manifest filename for a `ref`-resolved `Task`/`PipelineTask` entry (unlike a task discovered directly in a source's root directory, which still requires `task.yaml`).
+
 **Namespace-scoped task IDs** — task IDs are built from the path of TaskSet names:
 - Root entry `buildin` + inner entry `relay-client` → ID `buildin/relay-client`
 - Nested entry `buildin` > `platform` + inner entry `nginx-start` → ID `buildin/platform/nginx-start`

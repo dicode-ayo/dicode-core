@@ -890,6 +890,65 @@ notify:
 	}
 }
 
+// TestLoadDirWithVars_TaskYmlFallback verifies that a directory containing
+// only task.yml (no task.yaml) still loads. Before this fix, LoadDirWithVars
+// hardcoded the task.yaml basename, so a ref that legitimately resolved to a
+// task.yml-only directory (#765) — e.g. via pkg/taskset/resolver.go's
+// resolveYAMLPath, which accepts task.yml — would pass resolution and
+// kind-detection but then fail here with "open task.yaml ...: no such file
+// or directory", silently never registering.
+func TestLoadDirWithVars_TaskYmlFallback(t *testing.T) {
+	dir := t.TempDir()
+	src := "name: yml-only-task\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars with only task.yml present: %v", err)
+	}
+	if spec.Name != "yml-only-task" {
+		t.Fatalf("spec.Name = %q, want yml-only-task", spec.Name)
+	}
+}
+
+// TestLoadDirWithVars_TaskYamlPreferredOverTaskYml verifies that when both
+// task.yaml and task.yml are present, the conventional task.yaml wins.
+func TestLoadDirWithVars_TaskYamlPreferredOverTaskYml(t *testing.T) {
+	dir := t.TempDir()
+	yaml := "name: from-yaml\nruntime: deno\ntrigger: { manual: true }\n"
+	yml := "name: from-yml\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars: %v", err)
+	}
+	if spec.Name != "from-yaml" {
+		t.Fatalf("spec.Name = %q, want from-yaml (task.yaml must win over task.yml)", spec.Name)
+	}
+}
+
+// TestLoadDirWithVars_NeitherFilePresent verifies the error still names
+// task.yaml (the conventional name) when neither file exists, rather than
+// regressing to a confusing or blank message.
+func TestLoadDirWithVars_NeitherFilePresent(t *testing.T) {
+	dir := t.TempDir()
+	_, err := LoadDirWithVars(dir, nil)
+	if err == nil {
+		t.Fatal("LoadDirWithVars on empty dir: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "task.yaml") {
+		t.Errorf("error = %v; want it to mention task.yaml", err)
+	}
+}
+
 // TestLoadDir_ZeroTimeoutPreserved verifies that omitting timeout: in task.yaml
 // leaves spec.Timeout == 0 (no deadline) for both Deno and Python runtimes.
 // The old code coerced zero to 60s for non-container/non-daemon tasks, which

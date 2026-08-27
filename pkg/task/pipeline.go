@@ -3,7 +3,6 @@ package task
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -85,8 +84,7 @@ func (t PipelineTrigger) count() int {
 // LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml. The caller
 // is responsible for having already determined the kind (see LoadKindedDir).
 func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error) {
-	specPath := filepath.Join(dir, "task.yaml")
-	f, err := os.Open(specPath)
+	f, _, err := openTaskSpecFile(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
 	}

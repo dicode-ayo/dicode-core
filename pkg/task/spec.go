@@ -680,6 +680,31 @@ func LoadDir(dir string) (*Spec, error) {
 	return LoadDirWithVars(dir, nil)
 }
 
+// openTaskSpecFile opens a task manifest in dir, accepting task.yaml and
+// task.yml interchangeably — the same pair pkg/taskset/resolver.go's
+// isTaskFileName and resolveYAMLPath recognize when resolving a ref. Without
+// this fallback, a ref that resolves onto a bare task.yml (#765) passes
+// resolver kind-detection but then fails to load here with a confusing
+// "open task.yaml ...: no such file or directory", since the ref's resolved
+// file is discarded in favor of re-deriving a hardcoded task.yaml path from
+// its parent directory. task.yaml is tried first and preferred on ties (a
+// directory with both is not expected, but favors the conventional name).
+func openTaskSpecFile(dir string) (*os.File, string, error) {
+	specPath := filepath.Join(dir, "task.yaml")
+	f, err := os.Open(specPath)
+	if err == nil {
+		return f, specPath, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, specPath, err
+	}
+	ymlPath := filepath.Join(dir, "task.yml")
+	if f, ymlErr := os.Open(ymlPath); ymlErr == nil {
+		return f, ymlPath, nil
+	}
+	return nil, specPath, err
+}
+
 // LoadDirWithVars reads a task from its directory, expanding ${VAR} references
 // in the spec using built-in variables merged with the caller-supplied extras.
 // Pass nil for extras when loading a task outside of a source context.
@@ -692,8 +717,7 @@ func LoadDir(dir string) (*Spec, error) {
 // See pkg/task/template.go and docs/task-template-vars.md for the full
 // variable set and resolution rules.
 func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
-	specPath := filepath.Join(dir, "task.yaml")
-	f, err := os.Open(specPath)
+	f, _, err := openTaskSpecFile(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
 	}

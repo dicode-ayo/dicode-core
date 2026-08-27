@@ -43,6 +43,14 @@ spec:
     load-error-target:
       ref:
         path: FIXTURES_TASKS_DIR/load-error-target/task.yaml
+    # Regression fixture for #765: this ref is directory-valued (not a
+    # specific file), and the directory holds only task.yml (no task.yaml).
+    # Before the fix, this entry resolved (resolveYAMLPath's directory probe
+    # already accepted task.yml) but then failed to load, so the task never
+    # registered — see task-yml-manifest.spec.ts.
+    yml-manifest-target:
+      ref:
+        path: FIXTURES_TASKS_DIR/yml-manifest-target
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

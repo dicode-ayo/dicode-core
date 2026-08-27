@@ -953,6 +953,58 @@ spec:
 	}
 }
 
+// TestResolver_RefResolvesToTaskYmlOnlyDirectory is the end-to-end regression
+// for #765: a directory-valued ref whose directory holds only task.yml (no
+// task.yaml) must actually load, not merely pass resolution/kind-detection.
+// resolveYAMLPath's candidate probe (taskset.yaml, task.yaml, task.yml) and
+// isTaskFileName both already accept task.yml, but the loaders downstream —
+// task.LoadDirWithVars — re-derived a hardcoded task.yaml path from the
+// resolved file's parent directory, discarding which file actually matched
+// and failing with "open task.yaml ...: no such file or directory".
+func TestResolver_RefResolvesToTaskYmlOnlyDirectory(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "ymltask")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	taskYAML := `kind: Task
+apiVersion: dicode/v1
+name: ymltask
+runtime: deno
+trigger:
+  manual: true
+`
+	writeFile(t, taskDir, "task.yml", taskYAML)
+	writeFile(t, taskDir, "task.js", "// task")
+
+	tsContent := `kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: infra
+spec:
+  entries:
+    ymltask:
+      ref:
+        path: ` + taskDir + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("want 0 failures, got %d: %+v", len(failures), failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if got, want := rtSpec(results[0]).Name, "ymltask"; got != want {
+		t.Errorf("spec.Name = %q, want %q", got, want)
+	}
+}
+
 // Caller-supplied extraVars override the resolver's TASK_SET_DIR
 // derivation. Useful for tests or for future source types that want to
 // override the "root taskset dir" convention.
