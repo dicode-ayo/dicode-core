@@ -935,6 +935,64 @@ func TestLoadDirWithVars_TaskYamlPreferredOverTaskYml(t *testing.T) {
 	}
 }
 
+// TestLoadDirWithVars_SetsManifestFile verifies LoadDirWithVars records which
+// manifest name it actually loaded on Spec.ManifestFile, so a caller that
+// later needs to read-modify-write the on-disk manifest (e.g. pkg/webui's
+// trigger-editing endpoint) can target the exact file this spec came from
+// instead of re-probing and potentially hitting a different sibling
+// manifest with different content (#765 code-review follow-up).
+func TestLoadDirWithVars_SetsManifestFile(t *testing.T) {
+	cases := []struct {
+		name         string
+		manifestName string
+	}{
+		{"task.yaml", "task.yaml"},
+		{"task.yml", "task.yml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := "name: t\nruntime: deno\ntrigger: { manual: true }\n"
+			if err := os.WriteFile(filepath.Join(dir, tc.manifestName), []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			spec, err := LoadDirWithVars(dir, nil)
+			if err != nil {
+				t.Fatalf("LoadDirWithVars: %v", err)
+			}
+			if spec.ManifestFile != tc.manifestName {
+				t.Errorf("spec.ManifestFile = %q, want %q", spec.ManifestFile, tc.manifestName)
+			}
+		})
+	}
+}
+
+// TestReadManifestFile_TargetsExactFile_NotASibling guards the webui
+// read-modify-write path: given spec.ManifestFile from a task actually
+// loaded from task.yml, ReadManifestFile must read that task.yml — never a
+// sibling task.yaml with different content, which ReadManifest's probing
+// would have silently preferred instead.
+func TestReadManifestFile_TargetsExactFile_NotASibling(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: sibling-yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte("name: actual-yml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, data, err := ReadManifestFile(dir, "task.yml")
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	if filepath.Base(path) != "task.yml" {
+		t.Errorf("path = %q, want basename task.yml", path)
+	}
+	if !strings.Contains(string(data), "actual-yml") {
+		t.Errorf("data = %q, want content from task.yml, not the sibling task.yaml", data)
+	}
+}
+
 // TestLoadDirWithVars_NeitherFilePresent verifies the error still names
 // task.yaml (the conventional name) when neither file exists, rather than
 // regressing to a confusing or blank message.

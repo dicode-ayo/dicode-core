@@ -1122,8 +1122,21 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read and parse the existing manifest (task.yaml, or task.yml — #765) as
-	// a generic map to preserve all other fields.
-	yamlPath, raw, err := task.ReadManifest(spec.TaskDir)
+	// a generic map to preserve all other fields. Prefer the exact filename
+	// this spec was actually loaded from (spec.ManifestFile) over re-probing
+	// the directory — a stray sibling manifest with different content in
+	// the same directory must not silently get edited instead of the file
+	// backing the registered, running task. Probing is only a fallback for
+	// a spec somehow missing that field (e.g. constructed outside the
+	// loader).
+	var yamlPath string
+	var raw []byte
+	var err error
+	if spec.ManifestFile != "" {
+		yamlPath, raw, err = task.ReadManifestFile(spec.TaskDir, spec.ManifestFile)
+	} else {
+		yamlPath, raw, err = task.ReadManifest(spec.TaskDir)
+	}
 	if err != nil {
 		jsonErr(w, "read task manifest: "+err.Error(), http.StatusInternalServerError)
 		return

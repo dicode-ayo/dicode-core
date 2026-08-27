@@ -619,6 +619,16 @@ type Spec struct {
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
+	// ManifestFile is the basename of the manifest actually loaded from
+	// TaskDir — "task.yaml" or "task.yml" (not stored in YAML). Set by
+	// loadDirWithVars so a caller that later needs to read-modify-write the
+	// on-disk manifest (e.g. pkg/webui's trigger-editing endpoint) targets
+	// the exact file this spec came from, rather than re-probing TaskDir and
+	// risking a same-directory sibling manifest with different content
+	// (#765). Empty for a Spec constructed without going through the
+	// loader (e.g. directly in a test); callers should fall back to
+	// ReadManifest's probing in that case.
+	ManifestFile string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
 	// Warnings holds non-fatal config-load warnings emitted during validate().
@@ -689,7 +699,24 @@ func LoadDir(dir string) (*Spec, error) {
 // hardcoding task.yaml, so a task.yml-only task (#765) can still be edited
 // rather than hitting a spurious "no such file" error.
 func ReadManifest(dir string) (path string, data []byte, err error) {
-	f, specPath, err := openTaskSpecFile(dir, "")
+	return readManifest(dir, "")
+}
+
+// ReadManifestFile is ReadManifest for a caller that already knows the exact
+// manifest filename to read (e.g. spec.ManifestFile, as recorded by the
+// loader that produced spec) — it reads dir/filename directly, with no
+// task.yaml/task.yml probing, so a read-modify-write cycle always targets
+// the same file the spec was actually loaded from, never a same-directory
+// sibling with different content (#765). filename must be non-empty.
+func ReadManifestFile(dir, filename string) (path string, data []byte, err error) {
+	if filename == "" {
+		return "", nil, fmt.Errorf("ReadManifestFile: filename must be non-empty for %s (use ReadManifest for probing)", dir)
+	}
+	return readManifest(dir, filename)
+}
+
+func readManifest(dir, filename string) (path string, data []byte, err error) {
+	f, specPath, err := openTaskSpecFile(dir, filename)
 	if err != nil {
 		return "", nil, fmt.Errorf("open %s: %w", specPath, err)
 	}
@@ -719,18 +746,52 @@ func ReadManifest(dir string) (path string, data []byte, err error) {
 // fails to open for a reason other than not-existing (e.g. a permission
 // error), that error is returned rather than silently falling back to the
 // task.yaml-not-found error.
+//
+// filename (when non-empty) is expected to already be a bare basename — the
+// resolver passes filepath.Base(...) of an already ref-resolution-validated
+// path — but this backs an exported entry point (LoadDirWithVarsFile/
+// LoadPipelineDirFile), so containment is enforced explicitly via os.Root
+// (Go 1.24+) — the standard library's own sandboxed file-access API, which
+// rejects a name that would resolve outside dir (including through a
+// symlink) at the OS level — rather than trusting every future caller to
+// pre-sanitize.
+//
+// This intentionally does not go through internal/pathguard — dicode's
+// usual single audited containment check — despite the duplication: a
+// static-analysis pass over this exact code flagged the equivalent
+// pathguard.Within call (and, after that, an inlined filepath.Rel-based
+// check) as an unrecognized barrier and kept alerting on the os.Open sink,
+// where os.Root's stdlib-native sandboxing is what it accepted. One Root is
+// opened per call and shared across both probe candidates (rather than one
+// os.OpenRoot per candidate) to avoid a redundant directory-open syscall on
+// the common task.yml-only path.
 func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
-	if filename != "" {
-		return openInDir(dir, filename)
+	hint := filename
+	if hint == "" {
+		hint = "task.yaml"
 	}
-	f, specPath, err := openInDir(dir, "task.yaml")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, filepath.Join(dir, hint), err
+	}
+	defer root.Close()
+
+	if filename != "" {
+		p := filepath.Join(dir, filename)
+		f, err := root.Open(filename)
+		return f, p, err
+	}
+
+	specPath := filepath.Join(dir, "task.yaml")
+	f, err := root.Open("task.yaml")
 	if err == nil {
 		return f, specPath, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, specPath, err
 	}
-	ymlFile, ymlPath, ymlErr := openInDir(dir, "task.yml")
+	ymlPath := filepath.Join(dir, "task.yml")
+	ymlFile, ymlErr := root.Open("task.yml")
 	if ymlErr == nil {
 		return ymlFile, ymlPath, nil
 	}
@@ -738,34 +799,6 @@ func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
 		return nil, ymlPath, ymlErr
 	}
 	return nil, specPath, err
-}
-
-// openInDir opens dir/name via os.Root — the standard library's own
-// sandboxed file-access API (Go 1.24+), which rejects a name that would
-// resolve outside dir (including through a symlink) at the OS level rather
-// than via a hand-rolled string check. name is expected to already be a
-// bare basename (openTaskSpecFile's probing branch passes the literals
-// "task.yaml"/"task.yml"; its filename branch passes a resolver-derived
-// filepath.Base(...) of an already ref-resolution-validated path), but this
-// backs an exported entry point (LoadDirWithVarsFile/LoadPipelineDirFile),
-// so containment is enforced explicitly rather than trusting every future
-// caller to pre-sanitize.
-//
-// This intentionally does not go through internal/pathguard — dicode's
-// usual single audited containment check — despite the duplication: a
-// static-analysis pass over this exact code flagged the equivalent
-// pathguard.Within call (and, after that, an inlined filepath.Rel-based
-// check) as an unrecognized barrier and kept alerting on the os.Open below,
-// where os.Root's stdlib-native sandboxing is what it accepted.
-func openInDir(dir, name string) (*os.File, string, error) {
-	p := filepath.Join(dir, name)
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, p, err
-	}
-	defer root.Close()
-	f, err := root.Open(name)
-	return f, p, err
 }
 
 // LoadDirWithVars reads a task from its directory, expanding ${VAR} references
@@ -837,6 +870,7 @@ func loadDirWithVars(dir, filename string, extras map[string]string) (*Spec, err
 	}
 
 	spec.TaskDir = dir
+	spec.ManifestFile = filepath.Base(specPath)
 	spec.ID = filepath.Base(dir)
 	// Default Enabled to true; the taskset resolver may flip it to false if
 	// an override or entry-level `enabled: false` is in effect.
