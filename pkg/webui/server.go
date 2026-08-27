@@ -1121,16 +1121,21 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read and parse existing task.yaml as a generic map to preserve all other fields.
-	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	// Read and parse the existing manifest (task.yaml, or task.yml — #765) as
+	// a generic map to preserve all other fields.
+	yamlPath, err := task.ManifestPath(spec.TaskDir)
+	if err != nil {
+		jsonErr(w, "read task manifest: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	raw, err := os.ReadFile(yamlPath)
 	if err != nil {
-		jsonErr(w, "read task.yaml: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "read task manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		jsonErr(w, "parse task.yaml: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "parse task manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1187,7 +1192,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.WriteFile(yamlPath, out, 0644); err != nil {
-		jsonErr(w, "write task.yaml: "+err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "write task manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.log.Info("trigger saved", zap.String("task", id), zap.String("type", body.Type))

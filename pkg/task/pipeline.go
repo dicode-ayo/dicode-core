@@ -81,17 +81,31 @@ func (t PipelineTrigger) count() int {
 	return n
 }
 
-// LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml. The caller
-// is responsible for having already determined the kind (see LoadKindedDir).
+// LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml (or
+// task.yml — see openTaskSpecFile). The caller is responsible for having
+// already determined the kind (see LoadKindedDir). Use LoadPipelineDirFile
+// instead when the caller already knows the exact manifest filename a prior
+// kind-detection pass vetted.
 func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error) {
-	f, _, err := openTaskSpecFile(dir)
+	return loadPipelineDir(dir, "", extras)
+}
+
+// LoadPipelineDirFile is LoadPipelineDir for a caller that already knows the
+// exact manifest filename to load — see LoadDirWithVarsFile's doc comment
+// for why this matters. filename must be non-empty.
+func LoadPipelineDirFile(dir, filename string, extras map[string]string) (*PipelineTask, error) {
+	return loadPipelineDir(dir, filename, extras)
+}
+
+func loadPipelineDir(dir, filename string, extras map[string]string) (*PipelineTask, error) {
+	f, specPath, err := openTaskSpecFile(dir, filename)
 	if err != nil {
-		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("open %s: %w", specPath, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, fmt.Errorf("read task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("read %s: %w", specPath, err)
 	}
 
 	// Probe for the removed `notify:` block before decoding (mirrors LoadDirWithVars).

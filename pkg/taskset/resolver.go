@@ -348,7 +348,12 @@ func (r *Resolver) resolveBody(
 		case KindTask:
 			taskDir := filepath.Dir(localPath)
 			extras := r.withDataDir(extraVars)
-			spec, err := task.LoadDirWithVars(taskDir, extras)
+			// Load the exact file DetectKind/mustBeTask just vetted above —
+			// never re-derive a hardcoded task.yaml and risk loading a
+			// different sibling manifest (e.g. a stray task.yaml alongside
+			// the task.yml this ref actually resolved to and was checked
+			// against).
+			spec, err := task.LoadDirWithVarsFile(taskDir, filepath.Base(localPath), extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
 					zap.String("entry", fullID), zap.Error(err))
@@ -385,7 +390,9 @@ func (r *Resolver) resolveBody(
 		case KindPipelineTask:
 			taskDir := filepath.Dir(localPath)
 			extras := r.withDataDir(extraVars)
-			p, err := task.LoadPipelineDir(taskDir, extras)
+			// Same reasoning as the KindTask branch above: load exactly the
+			// file that was just kind-detected, not a re-derived task.yaml.
+			p, err := task.LoadPipelineDirFile(taskDir, filepath.Base(localPath), extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load pipeline",
 					zap.String("entry", fullID), zap.Error(err))

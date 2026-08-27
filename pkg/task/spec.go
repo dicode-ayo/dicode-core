@@ -680,16 +680,45 @@ func LoadDir(dir string) (*Spec, error) {
 	return LoadDirWithVars(dir, nil)
 }
 
-// openTaskSpecFile opens a task manifest in dir, accepting task.yaml and
-// task.yml interchangeably — the same pair pkg/taskset/resolver.go's
-// isTaskFileName and resolveYAMLPath recognize when resolving a ref. Without
-// this fallback, a ref that resolves onto a bare task.yml (#765) passes
-// resolver kind-detection but then fails to load here with a confusing
-// "open task.yaml ...: no such file or directory", since the ref's resolved
-// file is discarded in favor of re-deriving a hardcoded task.yaml path from
-// its parent directory. task.yaml is tried first and preferred on ties (a
-// directory with both is not expected, but favors the conventional name).
-func openTaskSpecFile(dir string) (*os.File, string, error) {
+// ManifestPath returns the path to dir's task manifest file — task.yaml,
+// falling back to task.yml (see openTaskSpecFile) — without opening or
+// parsing it. Callers that need to read-modify-write a task's on-disk
+// manifest directly (e.g. pkg/webui's trigger-editing endpoint) use this
+// instead of hardcoding task.yaml, so a task.yml-only task (#765) can still
+// be edited rather than hitting a spurious "no such file" error.
+func ManifestPath(dir string) (string, error) {
+	f, specPath, err := openTaskSpecFile(dir, "")
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", specPath, err)
+	}
+	f.Close()
+	return specPath, nil
+}
+
+// openTaskSpecFile opens a task manifest in dir. When filename is non-empty,
+// it opens exactly dir/filename — no probing — for callers (the taskset
+// resolver) that already know which manifest name a prior kind-detection
+// pass vetted, so the file actually loaded is always the same file that was
+// checked, never a different sibling. When filename is empty, it probes
+// task.yaml then task.yml, accepting them interchangeably — the same pair
+// pkg/taskset/resolver.go's isTaskFileName and resolveYAMLPath recognize —
+// for callers (LoadDir, ScanDir-discovered sources) that only have a bare
+// directory. Without this fallback, a ref that resolves onto a bare
+// task.yml (#765) passed resolver kind-detection but then failed to load
+// here with a confusing "open task.yaml ...: no such file or directory",
+// since the ref's resolved file was discarded in favor of re-deriving a
+// hardcoded task.yaml path from its parent directory. In probe mode,
+// task.yaml is tried first and preferred on ties (a directory with both is
+// not expected, but favors the conventional name); if task.yml exists but
+// fails to open for a reason other than not-existing (e.g. a permission
+// error), that error is returned rather than silently falling back to the
+// task.yaml-not-found error.
+func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
+	if filename != "" {
+		p := filepath.Join(dir, filename)
+		f, err := os.Open(p)
+		return f, p, err
+	}
 	specPath := filepath.Join(dir, "task.yaml")
 	f, err := os.Open(specPath)
 	if err == nil {
@@ -699,8 +728,12 @@ func openTaskSpecFile(dir string) (*os.File, string, error) {
 		return nil, specPath, err
 	}
 	ymlPath := filepath.Join(dir, "task.yml")
-	if f, ymlErr := os.Open(ymlPath); ymlErr == nil {
-		return f, ymlPath, nil
+	ymlFile, ymlErr := os.Open(ymlPath)
+	if ymlErr == nil {
+		return ymlFile, ymlPath, nil
+	}
+	if !os.IsNotExist(ymlErr) {
+		return nil, ymlPath, ymlErr
 	}
 	return nil, specPath, err
 }
@@ -708,6 +741,9 @@ func openTaskSpecFile(dir string) (*os.File, string, error) {
 // LoadDirWithVars reads a task from its directory, expanding ${VAR} references
 // in the spec using built-in variables merged with the caller-supplied extras.
 // Pass nil for extras when loading a task outside of a source context.
+// Probes for task.yaml then task.yml (see openTaskSpecFile) — use
+// LoadDirWithVarsFile instead when the caller already knows the exact
+// manifest filename a prior kind-detection pass vetted.
 //
 // Typical extras:
 //   - TASK_SET_DIR: directory of the root taskset.yaml for taskset sources,
@@ -717,14 +753,29 @@ func openTaskSpecFile(dir string) (*os.File, string, error) {
 // See pkg/task/template.go and docs/task-template-vars.md for the full
 // variable set and resolution rules.
 func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
-	f, _, err := openTaskSpecFile(dir)
+	return loadDirWithVars(dir, "", extras)
+}
+
+// LoadDirWithVarsFile is LoadDirWithVars for a caller that already knows the
+// exact manifest filename to load (e.g. pkg/taskset/resolver.go, after its
+// own DetectKind/mustBeTask check already read that specific file) — it
+// opens dir/filename directly, with no task.yaml/task.yml probing, so the
+// file actually loaded is always the same file the kind-detection/security
+// check already vetted, never a same-directory sibling with different
+// content. filename must be non-empty.
+func LoadDirWithVarsFile(dir, filename string, extras map[string]string) (*Spec, error) {
+	return loadDirWithVars(dir, filename, extras)
+}
+
+func loadDirWithVars(dir, filename string, extras map[string]string) (*Spec, error) {
+	f, specPath, err := openTaskSpecFile(dir, filename)
 	if err != nil {
-		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("open %s: %w", specPath, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, fmt.Errorf("read task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("read %s: %w", specPath, err)
 	}
 
 	// Probe for the removed `notify:` block before decoding. yaml.v3's
