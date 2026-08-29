@@ -416,7 +416,7 @@ permissions:
     sources_set_dev_mode: true      # clone the source onto a fix branch
     tasks_test: true
     git_commit_push: true
-    tasks: ["git-pr"]               # call buildin/git-pr to open PRs
+    tasks: ["buildin/git-pr"]       # the allowlist compares the namespaced id
 ```
 
 `runs_get_input` is gated by a lineage check: the auto-fix run can only read inputs of runs whose ID matches its own `parent_run_id` (the failed run that fired it) OR runs of its own task. Users can grant `runs_get_input: true` to other tasks to build their own replayer / fixer / auditor — the redaction layer (deny-listed fields are never persisted) is what bounds the surface.

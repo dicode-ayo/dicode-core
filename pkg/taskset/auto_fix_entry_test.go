@@ -45,14 +45,21 @@ func TestAutoFixEntry_HasExpectedDicodePerms(t *testing.T) {
 		}
 	}
 
-	// Tasks union must include git-pr.
+	// Tasks union must include git-pr, named the way taskAllowed actually
+	// compares it: the namespaced id ("buildin/git-pr"), not the bare entry
+	// name. A bare "git-pr" can never match the id dicode.run_task is called
+	// with, so it silently relies on the base ai-agent's "*" wildcard instead
+	// of the restriction this list is meant to express (#742).
 	hasGitPR := false
 	for _, taskID := range d.Tasks {
 		if taskID == "git-pr" {
+			t.Errorf(`auto-fix tasks slice has bare "git-pr", which taskAllowed can never match against the namespaced call id; want "buildin/git-pr"`)
+		}
+		if taskID == "buildin/git-pr" {
 			hasGitPR = true
 		}
 	}
 	if !hasGitPR {
-		t.Errorf("auto-fix tasks slice missing git-pr; got %v", d.Tasks)
+		t.Errorf("auto-fix tasks slice missing buildin/git-pr; got %v", d.Tasks)
 	}
 }

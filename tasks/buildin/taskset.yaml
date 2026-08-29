@@ -223,7 +223,7 @@ spec:
           list_tasks:            true
           get_runs:              true
           tasks:
-            - "git-pr"
+            - "buildin/git-pr"
         fs:
           # overrides REPLACE permissions.fs, so the base ai-agent grant on
           # the skills directory has to be restated here or every skill this
@@ -368,7 +368,7 @@ spec:
           list_tasks:            true
           get_runs:              true
           tasks:
-            - "git-pr"
+            - "buildin/git-pr"
             - "buildin/write-task-file"
         fs:
           # overrides REPLACE permissions.fs, so the base ai-agent grant on

@@ -221,7 +221,7 @@ auto-fix-claude:
     params:
       ai_task: "ai-agent-claude-cli"
     dicode:
-      tasks: ["ai-agent-claude-cli", "git-pr"]
+      tasks: ["ai-agent-claude-cli", "buildin/git-pr"]
 ```
 
 Then point `on_failure_chain` at `buildin/auto-fix-claude` instead of
