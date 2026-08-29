@@ -139,7 +139,7 @@ func (m *SourceManager) deleteLocal(taskID, sourceName string, spec *task.Spec, 
 	// directory resolves as a load failure on every sync, so the task would
 	// stay visible as broken instead of gone. RemoveTaskEntry matches the ref
 	// against taskDir, which must still exist for that comparison.
-	if err := m.removeTasksetEntry(taskID, sourceName, taskDir, src); err != nil {
+	if _, _, err := m.removeTasksetEntry(taskID, sourceName, taskDir, src); err != nil {
 		return ipc.TaskDeleteOutcome{}, err
 	}
 	if err := os.RemoveAll(taskDir); err != nil {
@@ -153,24 +153,29 @@ func (m *SourceManager) deleteLocal(taskID, sourceName string, spec *task.Spec, 
 // removeTasksetEntry drops the deleted task's key from the source's root
 // taskset file. Only a task listed directly by that file is handled: a deeper
 // id names an entry inside a nested taskset, which the nested file owns.
-func (m *SourceManager) removeTasksetEntry(taskID, sourceName, taskDir string, src *taskset.Source) error {
+//
+// It returns the taskset file's absolute path (even when nothing needed
+// removing, as long as one governs this source) and whether an entry was
+// actually removed, so a git-mode caller can stage the file alongside the
+// deleted task directory in the same commit.
+func (m *SourceManager) removeTasksetEntry(taskID, sourceName, taskDir string, src *taskset.Source) (tsPath string, removed bool, err error) {
 	key := strings.TrimPrefix(taskID, sourceName+"/")
 	if key == "" || key == taskID || strings.Contains(key, "/") {
-		return nil
+		return "", false, nil
 	}
-	tsPath := src.RootTaskSetPath()
+	tsPath = src.RootTaskSetPath()
 	if tsPath == "" {
-		return nil
+		return "", false, nil
 	}
-	removed, err := taskset.RemoveTaskEntry(tsPath, key, taskDir)
+	removed, err = taskset.RemoveTaskEntry(tsPath, key, taskDir)
 	if err != nil {
-		return fmt.Errorf("remove taskset entry: %w", err)
+		return tsPath, false, fmt.Errorf("remove taskset entry: %w", err)
 	}
 	if removed {
 		m.log.Info("taskset entry removed",
 			zap.String("task", taskID), zap.String("source", sourceName), zap.String("taskset", tsPath))
 	}
-	return nil
+	return tsPath, removed, nil
 }
 
 // deleteGit clones the source repo, removes the task directory, and pushes the
@@ -210,6 +215,19 @@ func (m *SourceManager) deleteGit(ctx context.Context, taskID, sourceName string
 	if err != nil {
 		return ipc.TaskDeleteOutcome{}, err
 	}
+
+	// Drop the taskset entry before removing the directory: RemoveTaskEntry
+	// matches the ref against taskDir, which must still exist for that
+	// comparison (mirrors deleteLocal). Left dangling, the merged commit would
+	// carry an entry pointing at a directory that no longer exists, which
+	// resolves as a load failure on every sync from then on.
+	var tsPath string
+	var tsEntryRemoved bool
+	tsPath, tsEntryRemoved, err = m.removeTasksetEntry(taskID, sourceName, cloneTaskDir, src)
+	if err != nil {
+		return ipc.TaskDeleteOutcome{}, err
+	}
+
 	if err = os.RemoveAll(cloneTaskDir); err != nil {
 		return ipc.TaskDeleteOutcome{}, fmt.Errorf("remove task in clone: %w", err)
 	}
@@ -219,14 +237,25 @@ func (m *SourceManager) deleteGit(ctx context.Context, taskID, sourceName string
 		authToken = os.Getenv(ref.Auth.TokenEnv)
 	}
 
-	// Stage only the removed task path: go-git records a deleted worktree file as
-	// a staged removal when its tracked path is Add-ed. An empty Files would stage
-	// every change in the clone, including unrelated artifacts.
+	// Stage the removed task path plus the taskset file when the entry removal
+	// touched it: go-git records a deleted worktree file as a staged removal
+	// when its tracked path is Add-ed. An empty Files would stage every change
+	// in the clone, including unrelated artifacts.
+	files := []string{rel}
+	if tsEntryRemoved {
+		var tsRel string
+		tsRel, err = filepath.Rel(clonePath, tsPath)
+		if err != nil || strings.HasPrefix(tsRel, "..") {
+			return ipc.TaskDeleteOutcome{}, fmt.Errorf("taskset file %q is outside clone %q", tsPath, clonePath)
+		}
+		files = append(files, tsRel)
+	}
+
 	if _, err = gitSource.CommitPush(ctx, clonePath, gitSource.CommitPushOptions{
 		Message:      fmt.Sprintf("Delete task %s", taskID),
 		Branch:       branch,
 		BranchPrefix: deleteBranchPrefix,
-		Files:        []string{rel},
+		Files:        files,
 		Author:       deleteCommitAuthor,
 		AuthToken:    authToken,
 	}); err != nil {

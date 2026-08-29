@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,6 +338,23 @@ func TestDeleteTaskFromSource_Git_ClonePushesDeleteBranch(t *testing.T) {
 	}
 	if _, err := tree.File("keep-task/task.yaml"); err != nil {
 		t.Fatalf("keep-task/task.yaml should still exist: %v", err)
+	}
+
+	// The merged commit must be self-consistent: a taskset entry left pointing
+	// at the now-removed directory would load-fail on every sync forever.
+	tsFile, err := tree.File("taskset.yaml")
+	if err != nil {
+		t.Fatalf("taskset.yaml should still exist on the delete branch: %v", err)
+	}
+	tsContent, err := tsFile.Contents()
+	if err != nil {
+		t.Fatalf("read taskset.yaml contents: %v", err)
+	}
+	if strings.Contains(tsContent, "my-task:") {
+		t.Fatalf("taskset.yaml on the delete branch still references my-task:\n%s", tsContent)
+	}
+	if !strings.Contains(tsContent, "keep-task:") {
+		t.Fatalf("taskset.yaml on the delete branch lost the unrelated keep-task entry:\n%s", tsContent)
 	}
 }
 
