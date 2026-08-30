@@ -1,5 +1,5 @@
 # Use Microsoft's maintained devcontainer Go image — regularly patched for CVEs
-FROM mcr.microsoft.com/devcontainers/go:1.25-bookworm
+FROM mcr.microsoft.com/devcontainers/go:1.26-bookworm
 
 # Install Podman + rootless container dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
