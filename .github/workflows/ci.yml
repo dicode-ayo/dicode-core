@@ -76,7 +76,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "0.7.3"
+          version: "0.12.7"
 
       # Python's Layer-2 harness (#159 Phase 2): tasks/examples/hello-python
       # ships the one Python task.test.py in this repo today. Each
