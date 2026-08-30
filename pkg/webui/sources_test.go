@@ -613,7 +613,6 @@ func TestApiAddSource_SharedPathWithExistingSource_RemoveDoesNotOrphanNames(t *t
 		"e2e-tests": {Ref: &taskset.Ref{Path: tsPath, Watch: &watchTrue}},
 	}
 	srv, rec, _ := newTestServerWithReconciler(t, cfg)
-	<-rec.Ready() // Run's goroutine must set rc.runCtx before AddSource below.
 
 	preexisting := taskset.NewSource(
 		taskset.SourceID("e2e-tests", cfg.Spec.Entries["e2e-tests"].Ref),
@@ -778,6 +777,14 @@ func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *re
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = rec.Run(ctx) }()
+	// Run's goroutine must set rc.runCtx before any caller drives AddSource —
+	// without this wait, a caller that races the goroutine's startup can hit
+	// "reconciler not yet running" (pkg/registry/reconciler.go's startSource),
+	// which was flaky enough to intermittently fail TestApiAddSource_* (#752).
+	// The reconciler is always constructed with zero sources here, so Ready()
+	// closes as soon as Run sets rc.runCtx — see Reconciler.Run's zero-source
+	// branch — making this a precise, non-flaky gate rather than a sleep.
+	<-rec.Ready()
 
 	sourceMgr := NewSourceManager(cfg, nil, reg, t.TempDir(), zap.NewNop())
 
@@ -834,6 +841,39 @@ func (b *blockingSource) Start(ctx context.Context) (<-chan source.Event, error)
 }
 
 func (b *blockingSource) Sync(context.Context) error { return nil }
+
+// TestNewTestServerWithReconciler_AddSourceNeverRacesReconcilerStart is a
+// regression test for #752: newTestServerWithReconciler used to return as
+// soon as `go rec.Run(ctx)` was launched, without waiting for that goroutine
+// to actually set rc.runCtx. A caller that immediately drove
+// reconciler.AddSource — exactly what TestApiAddSource_ConcurrentRemove_NoOrphan
+// and TestApiAddSource_ABA_ReAddDuringSlowAddSource_NoStaleClobber do — could
+// then race the goroutine's startup and observe "reconciler not yet running"
+// (pkg/registry/reconciler.go's startSource), reported failing about 1 run in
+// 5. The helper now blocks on <-rec.Ready() before returning, so every caller
+// gets an already-running reconciler.
+//
+// This drives that same immediate-AddSource pattern in a tight loop with no
+// extra synchronization of its own, so it exercises exactly the ordering the
+// helper is responsible for. Before the fix this failed intermittently within
+// a small number of iterations (matching the issue's observed flake rate);
+// with the fix it is deterministic, since Ready() closing is guaranteed to
+// happen-after rc.runCtx is set for a reconciler with zero configured sources
+// (Reconciler.Run's zero-source branch runs both under the same mutex
+// section, before the goroutine can be observed by any other goroutine).
+func TestNewTestServerWithReconciler_AddSourceNeverRacesReconcilerStart(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+		cfg.Spec.Entries = map[string]*taskset.Entry{}
+		_, rec, _ := newTestServerWithReconciler(t, cfg)
+
+		bs := newBlockingSource(fmt.Sprintf("ready-check-%d", i))
+		close(bs.unblock) // Start returns immediately; only startup ordering is under test.
+		if err := rec.AddSource(bs); err != nil {
+			t.Fatalf("iteration %d: AddSource immediately after newTestServerWithReconciler returned: %v", i, err)
+		}
+	}
+}
 
 // TestApiAddSource_ConcurrentRemove_NoOrphan is a regression test for the
 // race the 3fafc3f atomic-claim fix introduced between apiAddSource and
