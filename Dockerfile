@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.26
 
 # Build args (overridable from CI):
 #   GO_VERSION     — keep in sync with go.mod's `go` directive
