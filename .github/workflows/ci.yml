@@ -40,7 +40,7 @@ jobs:
       # t.Skip's silently and SDK regressions go uncaught. See issue #39.
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.14'
 
       - name: Run tests
         run: go test -timeout 300s -race ./...
