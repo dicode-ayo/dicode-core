@@ -58,7 +58,7 @@
   "features": {
     // Installs Docker CLI + buildx + compose, configures group permissions for the socket
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
-    // Installs Node.js 22 via nvm (avoids stale apt-cache issues with nodesource scripts)
-    "ghcr.io/devcontainers/features/node:1": { "version": "24" }
+    // Installs Node.js via nvm (avoids stale apt-cache issues with nodesource scripts)
+    "ghcr.io/devcontainers/features/node:2": { "version": "24" }
   }
 }
