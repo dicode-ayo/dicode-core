@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/alexedwards/scs/v2 v2.9.0
 	github.com/bep/debounce v1.2.1
-	github.com/cenkalti/backoff/v4 v4.3.0
+	github.com/cenkalti/backoff/v7 v7.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.8.1
