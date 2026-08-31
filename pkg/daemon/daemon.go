@@ -1131,8 +1131,12 @@ func buildRuntimes(
 	denoRT.SetSecretsManager(secretsMgr)
 	// Issue #119: engine implements envresolve.ProviderRunner so the
 	// runtimes' env resolvers can spawn provider tasks back through it.
-	// SetDenoRuntime/SetPythonRuntime let the engine swap the runtime's
-	// per-run secretOutputCh for each provider invocation.
+	// SetDenoRuntime/SetPythonRuntime just let the engine confirm a runtime
+	// is actually wired before firing a provider task on it, so an
+	// unconfigured runtime fails with a clear error instead of a dispatch
+	// panic or a silent timeout; the per-run secret-output channel itself is
+	// threaded through runtime.RunOptions (issue #719), not swapped onto the
+	// runtime here.
 	eng.SetDenoRuntime(denoRT)
 	denoRT.SetProviderRunner(eng)
 	// Issue #242: share a single env resolver across all task launches so

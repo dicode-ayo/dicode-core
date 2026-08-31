@@ -27,7 +27,12 @@ import (
 //
 //   - Construction-time fields (Registry, SecretsChain, DB, Log, IPCSecret)
 //     are set by each runtime's New and snapshotted into per-version
-//     executors by NewExecutor.
+//     executors by NewExecutor. The provider secret-output channel used to
+//     live here too, but shared mutable state on this struct made it
+//     invisible to any executor built via NewExecutor (it was always
+//     snapshotted before the first provider invocation ever set it) and
+//     unsafe to share across concurrent provider runs; it now flows per-run
+//     through runtime.RunOptions.SecretOutputCh instead (issue #719).
 //   - Late-wired fields (InputStore, Replayer, SourceMgr, RepoResolver,
 //     TestGuard, ProtectedPaths, SharedResolver) are set by daemon.go after
 //     buildRuntimes returns. Per-version executors must therefore read them
@@ -46,10 +51,6 @@ type BridgeDeps struct {
 	IPCSecret []byte
 	Engine    ipc.EngineRunner
 	Gateway   *ipc.Gateway
-	// SecretOutputCh is opt-in: when set, every run wires it into the
-	// per-run IPC server so a provider task's dicode.output(..., secret)
-	// call is routed to the resolver awaiting it. Nil leaves the path inert.
-	SecretOutputCh chan map[string]string
 	// ProviderRunner is wired by the trigger engine at daemon startup so
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
@@ -82,12 +83,15 @@ type BridgeDeps struct {
 // capability wiring common to both socket-bridge runtimes.
 //
 // Construction-time dependencies (IPCSecret, Registry, DB, Log, Engine,
-// Gateway, SecretsManager, SecretOutputCh) are read from the receiver — the
-// snapshot each runtime's NewExecutor made. Late-wired capabilities
-// (InputStore, Replayer, SourceMgr, RepoResolver, TestGuard) are read from
-// live, which per-version executors point at the manager's BridgeDeps so
-// daemon wiring that happens after NewExecutor is still honored; the manager
-// passes itself.
+// Gateway, SecretsManager) are read from the receiver — the snapshot each
+// runtime's NewExecutor made. Late-wired capabilities (InputStore, Replayer,
+// SourceMgr, RepoResolver, TestGuard) are read from live, which per-version
+// executors point at the manager's BridgeDeps so daemon wiring that happens
+// after NewExecutor is still honored; the manager passes itself.
+//
+// The provider secret-output channel is NOT wired here: it is per-run state
+// (issue #719), so the caller wires it explicitly via srv.SetSecretOutput
+// after this returns, using the channel from that run's RunOptions.
 //
 // Runtime-specific capabilities are wired by the caller afterwards (Deno
 // adds SetCryptoHandler); all setters are inert until srv.Start.
@@ -103,9 +107,6 @@ func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[stri
 	}
 	if r := live.RepoResolver; r != nil {
 		srv.SetRepoResolver(r)
-	}
-	if d.SecretOutputCh != nil {
-		srv.SetSecretOutput(d.SecretOutputCh)
 	}
 	if g := live.TestGuard; g != nil {
 		srv.SetTestGuard(g)
@@ -182,13 +183,6 @@ func (d *BridgeDeps) SetProtectedPaths(paths []string) {
 		cleaned = append(cleaned, filepath.Clean(p))
 	}
 	d.ProtectedPaths = cleaned
-}
-
-// SetSecretOutputChannel wires the channel that receives provider tasks'
-// secret maps. Called by the trigger engine before firing a task in
-// "provider" mode.
-func (d *BridgeDeps) SetSecretOutputChannel(ch chan map[string]string) {
-	d.SecretOutputCh = ch
 }
 
 // SetProviderRunner wires the env-resolver's provider invocation. The

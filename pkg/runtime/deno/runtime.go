@@ -73,6 +73,14 @@ type RunOptions struct {
 	// Resumed marks this run as a resume continuation. It is the resume signal
 	// the SDK dispatches on; carried state may legitimately be null.
 	Resumed bool
+
+	// SecretOutputCh, when set, is wired into this run's IPC server so a
+	// provider task's dicode.output(map, { secret: true }) call routes to
+	// the caller awaiting it. Forwarded from the generic
+	// pkgruntime.RunOptions by Execute; nil for every non-provider run
+	// (issue #719 — see that field's doc for why this replaced shared
+	// BridgeDeps.SecretOutputCh state).
+	SecretOutputCh chan map[string]string
 }
 
 // RunResult is returned by Run.
@@ -264,6 +272,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := rt.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, rt.live())
+	// Per-run provider secret-output channel (issue #719): set only on the
+	// one run the trigger engine is actually firing as a provider.
+	if opts.SecretOutputCh != nil {
+		srv.SetSecretOutput(opts.SecretOutputCh)
+	}
 	// Crypto IPC is Deno-only; wired here rather than in the shared helper.
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
@@ -693,6 +706,7 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		Resumed:        opts.Resumed,
 		ResumeState:    opts.ResumeState,
 		ResumeInput:    opts.ResumeInput,
+		SecretOutputCh: opts.SecretOutputCh,
 	})
 	if err != nil {
 		return nil, err

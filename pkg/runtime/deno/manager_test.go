@@ -36,14 +36,20 @@ func newTestInputStore() *registry.InputStore {
 }
 
 // TestNewExecutor_PropagatesProviderFields pins the contract that
-// Runtime.NewExecutor must copy the provider fields to the new
+// Runtime.NewExecutor must copy the provider-runner field to the new
 // per-run Runtime. The trigger-engine dispatch path goes through
-// NewExecutor, so omitting these fields silently disables
-// secret-provider routing in production.
+// NewExecutor, so omitting it would silently disable secret-provider
+// routing in production.
+//
+// The secret-output channel is deliberately NOT covered here (issue #719):
+// it is no longer BridgeDeps state to snapshot — it flows per-run through
+// runtime.RunOptions.SecretOutputCh instead, so every executor (manager or
+// per-version) observes whatever channel the engine wired for the run
+// currently in flight. See TestRun_SecretOutputRoutedToChannel in
+// secret_output_test.go for the per-run routing coverage.
 func TestNewExecutor_PropagatesProviderFields(t *testing.T) {
 	parent := &Runtime{
 		BridgeDeps: pkgruntime.BridgeDeps{
-			SecretOutputCh: make(chan map[string]string, 1),
 			ProviderRunner: fakeProviderRunner{},
 		},
 	}
@@ -51,9 +57,6 @@ func TestNewExecutor_PropagatesProviderFields(t *testing.T) {
 	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
 	if !ok {
 		t.Fatalf("NewExecutor did not return *Runtime")
-	}
-	if exec.SecretOutputCh != parent.SecretOutputCh {
-		t.Errorf("SecretOutputCh not propagated: got %v, want %v", exec.SecretOutputCh, parent.SecretOutputCh)
 	}
 	if exec.ProviderRunner != parent.ProviderRunner {
 		t.Errorf("ProviderRunner not propagated: got %v, want %v", exec.ProviderRunner, parent.ProviderRunner)

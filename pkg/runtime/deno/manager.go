@@ -41,8 +41,8 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 
 // NewExecutor returns a new Deno Executor that uses the binary at binaryPath.
 // The new executor shares the registry, secrets, db, and logger with this
-// Runtime — and propagates the issue #119 provider channels so the
-// trigger-engine dispatch path actually sees the wired runner / sink.
+// Runtime — and propagates the issue #119 provider runner so the
+// trigger-engine dispatch path actually sees it wired.
 //
 // The executor holds a parent back-reference so that a late SetInputStore call
 // on the manager (which happens in daemon.go after buildRuntimes returns) is
@@ -51,18 +51,26 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // The copy list matches the Python runtime's NewExecutor field-for-field
 // (issue #718): both snapshot every construction-time BridgeDeps field —
 // Registry, SecretsChain, SecretsManager, DB, Log, IPCSecret, Engine,
-// Gateway, SecretOutputCh, ProviderRunner. Before #718 this list omitted
-// SecretsManager, IPCSecret, Engine, and Gateway, so a per-version Deno
-// executor (runtimes.deno.version pinned to an installed version) served
-// every run with those four fields nil: dicode.run_task failed with
-// "engine not available", dicode.http/secrets_set/secrets_delete were inert,
-// and — the security-relevant one — per-run IPC capability tokens were
-// minted and verified under a nil (empty) HMAC key instead of the daemon's
-// real IPCSecret. daemon.go always calls SetEngine/SetGateway/
-// SetSecretsManager on the manager before it calls NewExecutor for a pinned
-// version, and IPCSecret is set at construction in New(), so copying these
-// four here is sufficient — no field is genuinely unavailable at the time a
-// per-version executor is built.
+// Gateway, ProviderRunner. Before #718 this list omitted SecretsManager,
+// IPCSecret, Engine, and Gateway, so a per-version Deno executor
+// (runtimes.deno.version pinned to an installed version) served every run
+// with those four fields nil: dicode.run_task failed with "engine not
+// available", dicode.http/secrets_set/secrets_delete were inert, and — the
+// security-relevant one — per-run IPC capability tokens were minted and
+// verified under a nil (empty) HMAC key instead of the daemon's real
+// IPCSecret. daemon.go always calls SetEngine/SetGateway/SetSecretsManager
+// on the manager before it calls NewExecutor for a pinned version, and
+// IPCSecret is set at construction in New(), so copying these four here is
+// sufficient — no field is genuinely unavailable at the time a per-version
+// executor is built.
+//
+// The provider secret-output channel is deliberately NOT in this snapshot
+// (issue #719): it is per-run state that now flows through
+// runtime.RunOptions.SecretOutputCh instead of shared BridgeDeps, so every
+// executor — manager or per-version — observes the one channel the engine
+// wired for the run currently in flight, not a value frozen at construction
+// time (which was always nil, since NewExecutor runs at daemon boot before
+// any provider invocation).
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &Runtime{
 		parent: rt,
@@ -75,7 +83,6 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 			IPCSecret:      rt.IPCSecret,
 			Engine:         rt.Engine,
 			Gateway:        rt.Gateway,
-			SecretOutputCh: rt.SecretOutputCh,
 			ProviderRunner: rt.ProviderRunner,
 		},
 		denoPath: binaryPath,

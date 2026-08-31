@@ -9,7 +9,8 @@ import (
 
 // TestRun_SecretOutputRoutedToChannel runs a real Deno task that calls
 // `dicode.output({PG_URL:"postgres://x"}, { secret: true })` and asserts
-// the daemon's secret-output channel sees the map.
+// the per-run channel passed via RunOptions.SecretOutputCh (issue #719)
+// sees the map.
 //
 // Skipped in -short mode because it spawns an actual Deno subprocess.
 func TestRun_SecretOutputRoutedToChannel(t *testing.T) {
@@ -32,9 +33,8 @@ export default async function main({ output }) {
 	}
 
 	out := make(chan map[string]string, 1)
-	rt.SetSecretOutputChannel(out)
 
-	res, err := rt.Run(ctx, spec, RunOptions{RunID: "run-1"})
+	res, err := rt.Run(ctx, spec, RunOptions{RunID: "run-1", SecretOutputCh: out})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

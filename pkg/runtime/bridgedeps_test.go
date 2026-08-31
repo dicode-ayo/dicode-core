@@ -42,23 +42,6 @@ func TestBridgeDeps_SetProtectedPaths_AllEmpty(t *testing.T) {
 	}
 }
 
-// TestBridgeDeps_SetSecretOutputChannel_Clear covers a setter whose stored
-// value is consumed indirectly (no getter): the field must be exactly what
-// was passed, including nil to clear.
-func TestBridgeDeps_SetSecretOutputChannel_Clear(t *testing.T) {
-	var d BridgeDeps
-	ch := make(chan map[string]string, 1)
-	d.SetSecretOutputChannel(ch)
-	if d.SecretOutputCh != ch {
-		t.Fatal("SetSecretOutputChannel did not store the channel")
-	}
-	// The trigger engine clears the channel after each provider run.
-	d.SetSecretOutputChannel(nil)
-	if d.SecretOutputCh != nil {
-		t.Fatal("SetSecretOutputChannel(nil) did not clear the channel")
-	}
-}
-
 // TestBridgeDeps_SetEnvResolver pins the shared-resolver setter: the exact
 // instance must be stored (LiveResolver's precedence depends on identity),
 // and nil must clear it.

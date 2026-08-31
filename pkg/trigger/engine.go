@@ -199,10 +199,14 @@ type Engine struct {
 	runStartedHook   func(taskID, runID, triggerSource string)
 
 	// denoRuntime / pythonRuntime are typed runtime handles needed by the
-	// Engine's ProviderRunner implementation (issue #119). The engine swaps
-	// the per-runtime SecretOutputChannel per provider invocation. Wired in
-	// daemon.go via SetDenoRuntime / SetPythonRuntime to avoid an import
-	// cycle with the runtime packages.
+	// Engine's ProviderRunner implementation (issue #119): Run nil-checks
+	// them to reject a provider task on an unwired runtime with a clear
+	// error before dispatch, rather than a confusing timeout. They no
+	// longer carry any per-provider-invocation wiring — the secret-output
+	// channel flows per-run through runtime.RunOptions.SecretOutputCh
+	// instead (issue #719), so concurrent provider invocations need nothing
+	// serialized here. Wired in daemon.go via SetDenoRuntime /
+	// SetPythonRuntime to avoid an import cycle with the runtime packages.
 	denoRuntime   DenoRuntimeAPI
 	pythonRuntime PythonRuntimeAPI
 
@@ -210,12 +214,6 @@ type Engine struct {
 	// launches. The cache lives inside this instance, so cross-launch TTL
 	// hits work as intended (issue #242). Constructed lazily by Resolver().
 	envResolver *envresolve.Resolver
-
-	// providerRunMu serializes Engine.Run invocations so concurrent provider
-	// resolutions don't clobber each other's secretOutputCh on the runtime.
-	// MVP-quality: a per-run channel registry would allow parallelism but
-	// requires runtime changes; revisit when contention shows up.
-	providerRunMu sync.Mutex
 
 	// inputStore persists run inputs at run-start (Task 10). nil = disabled.
 	// Set via SetInputStore after the daemon has initialised secrets so the

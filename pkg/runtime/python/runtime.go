@@ -126,6 +126,13 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // (issue #718) — see that function's doc for why copying SecretsManager,
 // IPCSecret, Engine, and Gateway here (unlike the pre-#718 Deno list) is
 // both necessary and safe.
+//
+// The provider secret-output channel is deliberately NOT in this snapshot
+// (issue #719) — see the Deno NewExecutor's doc for why: it is per-run
+// state that flows through runtime.RunOptions.SecretOutputCh instead, so
+// this executor observes whatever channel the engine wired for the run
+// currently in flight rather than a value frozen (always nil) at
+// construction time.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
 		uvPath: binaryPath,
@@ -139,7 +146,6 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 			IPCSecret:      rt.IPCSecret,
 			Engine:         rt.Engine,
 			Gateway:        rt.Gateway,
-			SecretOutputCh: rt.SecretOutputCh,
 			ProviderRunner: rt.ProviderRunner,
 		},
 	}
@@ -236,6 +242,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
+	// Per-run provider secret-output channel (issue #719): set only on the
+	// one run the trigger engine is actually firing as a provider.
+	if opts.SecretOutputCh != nil {
+		srv.SetSecretOutput(opts.SecretOutputCh)
+	}
 	// Inject a resumed run's prior state + user input (#95); nil on first run.
 	srv.SetResume(opts.Resumed, opts.ResumeState, opts.ResumeInput)
 	socketPath, token, err := srv.Start(srvCtx)
