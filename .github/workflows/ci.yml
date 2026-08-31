@@ -184,6 +184,13 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          if ! go mod tidy -diff; then
+            echo "go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."
+            exit 1
+          fi
+
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)
