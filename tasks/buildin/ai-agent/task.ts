@@ -17,7 +17,7 @@
 //     rides in the suspend `state` blob (resume_state), not KV. A blank message
 //     ends it.
 import OpenAI from "npm:openai@4";
-import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import type { Dicode, DicodeSdk, Output } from "../../sdk.ts";
 import { chatStart, chatTurn, decideEntryMode, resolveSessionId } from "../ai-agent-core/chat.ts";
 
 type Role = "system" | "user" | "assistant" | "tool";
@@ -1001,7 +1001,7 @@ async function runAgentTurn(
   return last?.role === "assistant" ? last.content : "";
 }
 
-export default async function main({ params, dicode }: DicodeSdk) {
+export default async function main({ params, dicode, output }: DicodeSdk) {
   requireTaskId(dicode);
 
   const prompt = (await params.get("prompt")) ?? "";
@@ -1014,7 +1014,7 @@ export default async function main({ params, dicode }: DicodeSdk) {
     return; // unreachable — suspend() never returns
   }
 
-  return await oneShotTurn({ prompt, params, dicode });
+  return await oneShotTurn({ prompt, params, dicode, output });
 }
 
 // oneShotTurn runs a single stateless turn: it tags the run's group and returns
@@ -1022,10 +1022,11 @@ export default async function main({ params, dicode }: DicodeSdk) {
 // Multi-turn conversation lives on the chat loop (carried in resume_state), not
 // here — one-shot calls share no history.
 async function oneShotTurn(
-  { prompt, params, dicode }: {
+  { prompt, params, dicode, output }: {
     prompt: string;
     params: DicodeSdk["params"];
     dicode: Dicode;
+    output: Output;
   },
 ): Promise<unknown> {
   // Hybrid session id: use provided or auto-generate. A caller-supplied value
@@ -1043,12 +1044,13 @@ async function oneShotTurn(
 
   const resolved = await resolveAgentRuntime(params, dicode);
   if (!resolved.ok) {
-    // Same non-empty guarantee as the success path below, for the same
-    // reason: a downstream pipeline stage reads reply and caller_context
-    // through ${input.output.<field>}, which fails the dispatch on a null or
-    // absent field. Returning the misconfiguration as prose is also what lets the
-    // hint reach the caller at all — an input-reference error would replace
-    // it with the resolver's own message.
+    // A turn that cannot run at all is terminal, not a successful run whose
+    // reply happens to be an error string — see the same reasoning on
+    // chatTurn's ok:false branch (ai-agent-core/chat.ts), which the chat-loop
+    // path below shares. Publish the envelope via output.json (a webhook
+    // caller still receives it, over HTTP 500, since the daemon captures
+    // structured output before the non-zero exit) and throw, which is what
+    // makes the engine record a failed run instead of a green one.
     const response: NotConfiguredResponse = {
       session_id: sessionId,
       reply: `not configured — missing ${resolved.missing.join(", ")}. ${resolved.hint}`,
@@ -1057,7 +1059,8 @@ async function oneShotTurn(
       hint: resolved.hint,
       caller_context: await params.get("caller_context") || "unknown",
     };
-    return response;
+    await output.json(response);
+    throw new Error(response.reply);
   }
 
   const session: SessionState = {

@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -116,5 +117,64 @@ func TestHandleAI_Prompt_OneShotUnchanged(t *testing.T) {
 	}
 	if eng.firedParams["prompt"] != "hello" {
 		t.Errorf("prompt param = %q, want hello", eng.firedParams["prompt"])
+	}
+}
+
+// failedTurnEngine simulates a run that failed via the ai-agent terminal-failure
+// pattern (output.json(envelope); throw — see ai-agent-core/chat.ts): the run
+// settles with Status "failure" and ReturnValue populated from the run's
+// structured output (buildRunResult's OutputContent fallback, pkg/trigger/run.go),
+// not from a bare return.
+type failedTurnEngine struct {
+	mockEngine
+}
+
+func (e *failedTurnEngine) FireManual(_ context.Context, _ string, _ map[string]string) (string, error) {
+	return "run-failed-1", nil
+}
+
+func (e *failedTurnEngine) WaitRunSettled(_ context.Context, runID string) (RunResult, error) {
+	return RunResult{
+		RunID:  runID,
+		Status: "failure",
+		ReturnValue: map[string]any{
+			"error":   "not_configured",
+			"reply":   "not configured — missing model, base_url. This is the generic ai-agent buildin...",
+			"missing": []any{"model", "base_url"},
+			"hint":    "This is the generic ai-agent buildin...",
+		},
+	}, nil
+}
+
+// TestHandleAI_FailedRun_SurfacesEnvelopeDetail: a failed run's error must
+// carry the run's own reply/hint detail (from ReturnValue), not just the bare
+// run id and status — otherwise a `dicode ai` caller against an unconfigured
+// provider sees only "finished with status failure — see dicode logs", losing
+// exactly the actionable detail (which fields are missing) the fix in #750
+// worked to preserve for a webhook caller.
+func TestHandleAI_FailedRun_SurfacesEnvelopeDetail(t *testing.T) {
+	eng := &failedTurnEngine{}
+	cs := newAITestServer(t, eng)
+
+	_, err := cs.handleAI(context.Background(), Request{Method: "cli.ai", Prompt: "hello"})
+	if err == nil {
+		t.Fatal("handleAI: expected an error for a failed run, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing model, base_url") {
+		t.Errorf("handleAI error = %q, want it to include the envelope's reply detail", err.Error())
+	}
+	if !strings.Contains(err.Error(), "run-failed-1") {
+		t.Errorf("handleAI error = %q, want it to still name the run id", err.Error())
+	}
+}
+
+// TestRunFailureError_NoEnvelope_FallsBackToGenericMessage: a failed run whose
+// ReturnValue isn't a map[string]any (nil, or a task that failed some other
+// way with no structured output) must still get the generic status message,
+// not a panic or an empty error.
+func TestRunFailureError_NoEnvelope_FallsBackToGenericMessage(t *testing.T) {
+	err := runFailureError(RunResult{RunID: "run-2", Status: "failure", ReturnValue: nil})
+	if err == nil || !strings.Contains(err.Error(), "run-2") || !strings.Contains(err.Error(), "failure") {
+		t.Errorf("runFailureError(nil ReturnValue) = %v, want a generic run-id/status message", err)
 	}
 }

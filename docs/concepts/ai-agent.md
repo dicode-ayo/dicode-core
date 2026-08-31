@@ -57,12 +57,12 @@ Response:
 }
 ```
 
-When the buildin is called without a configured provider, it returns a structured error instead of throwing, so the UI can render a clear message:
+When the buildin is called without a configured provider, the turn is terminal: it fails the run (HTTP 500) rather than settling as a successful one carrying the misconfiguration as prose in `reply`. The structured envelope is still delivered as the response body — the daemon captures it via `output.json` before the non-zero exit — so a webhook caller and the chat UI can both render a clear message instead of reading a green run:
 
 ```json
 {
   "session_id": "e4b9f3a2-...",
-  "reply": null,
+  "reply": "not configured — missing model, base_url. This is the generic ai-agent buildin...",
   "error": "not_configured",
   "missing": ["model", "base_url"],
   "hint": "This is the generic ai-agent buildin. It has no provider configured..."
@@ -196,12 +196,15 @@ Two surfaces read this setting:
   `--task` to override for a single invocation; use `--session-id` to continue
   an existing conversation. The first turn's generated session id is printed
   to stderr as `session: <id>` so it doesn't pollute reply-consuming pipes.
+  A failed turn (e.g. `not_configured`) prints the run's own `reply`/`error`/`hint`
+  detail alongside the run id, not just a bare "finished with status failure" —
+  the CLI reads it off the same structured output a webhook caller gets.
 
 ---
 
 ## Provider presets
 
-The buildin ships **maximally restrictive**: empty `permissions.net`, no provider env vars, no defaults for `model` / `base_url` / `api_key_env`. On its own, hitting `/hooks/ai` returns `not_configured`. This keeps the buildin generic and safe — provider-specific policy (which hosts to reach, which env vars to read) lives with the provider-specific task.
+The buildin ships **maximally restrictive**: empty `permissions.net`, no provider env vars, no defaults for `model` / `base_url` / `api_key_env`. On its own, hitting `/hooks/ai` fails the run with a `not_configured` envelope (see above). This keeps the buildin generic and safe — provider-specific policy (which hosts to reach, which env vars to read) lives with the provider-specific task.
 
 Three ready-to-use presets live in `tasks/examples/taskset.yaml`:
 
