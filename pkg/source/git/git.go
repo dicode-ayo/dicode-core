@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v7"
 	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
@@ -172,24 +172,26 @@ func (g *GitSource) cloneOrPull(ctx context.Context) error {
 	bo.MaxInterval = 5 * time.Second
 	bo.RandomizationFactor = 0.2
 	bo.Multiplier = 2
-	bo.MaxElapsedTime = cloneRetryMaxElapsed
-	bo.Reset()
 
-	bctx := backoff.WithContext(bo, ctx)
-
-	return backoff.Retry(func() error {
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
 		err := op(ctx)
 		if err == nil {
-			return nil
+			return struct{}{}, nil
 		}
 		// Don't burn cycles retrying broken config: auth failures and
 		// "repo not found" are operator errors, not transient ones.
-		// Wrap in backoff.Permanent so Retry surfaces them immediately.
 		if isPermanentGitError(err) {
-			return backoff.Permanent(err)
+			return struct{}{}, backoff.Permanent(err)
 		}
-		return err
-	}, bctx)
+		return struct{}{}, err
+	}, backoff.WithBackOff(bo), backoff.WithMaxElapsedTime(cloneRetryMaxElapsed))
+
+	// Retry reports every failure as *backoff.RetryError; callers and logs
+	// want the underlying git error, not the retry machinery.
+	if re := backoff.AsRetryError(err); re != nil {
+		return re.LastErr
+	}
+	return err
 }
 
 // tryCloneOrPull executes a single clone-or-pull attempt against the remote.
