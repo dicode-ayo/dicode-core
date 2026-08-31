@@ -69,6 +69,17 @@ type RunOptions struct {
 	// authoritative resume signal the SDK dispatches on — carried state may be
 	// genuinely null, so presence of state cannot stand in for it.
 	Resumed bool
+
+	// SecretOutputCh, when set, is wired into this run's per-run IPC server so
+	// a provider task's dicode.output(map, { secret: true }) call routes its
+	// value to the caller awaiting it. Set only by the trigger engine's
+	// ProviderRunner (Engine.Run, issue #719) for the one run it is actually
+	// firing as a provider; nil for every other run. Threading the channel
+	// through per-run options (rather than shared runtime state) means a
+	// per-version executor built by NewExecutor observes it like any other
+	// per-run option, and two concurrent provider invocations never share a
+	// channel.
+	SecretOutputCh chan map[string]string
 }
 
 // RunResult is returned by every Executor.

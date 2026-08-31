@@ -23,7 +23,6 @@ import (
 // new field is treated as required until it is listed here.
 var optionalBridgeDeps = map[string]bool{
 	"InputStore":     true, // wireRunInputPersistence, only when a SubKeyDeriver exists
-	"SecretOutputCh": true, // swapped in per provider invocation by the trigger engine
 	"Replayer":       true, // wireRunInputPersistence
 	"SourceMgr":      true, // initSources
 	"RepoResolver":   true, // initSources

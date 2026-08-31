@@ -19,26 +19,31 @@ import (
 	"go.uber.org/zap"
 )
 
-// DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
-// ProviderRunner implementation depends on. Defined here (not imported)
-// to keep pkg/trigger free of pkg/runtime/deno; daemon.go wires the real
-// runtime via SetDenoRuntime.
-type DenoRuntimeAPI interface {
-	SetSecretOutputChannel(ch chan map[string]string)
-}
+// DenoRuntimeAPI marks that a Deno runtime is wired to the engine. Defined
+// here (not imported) to keep pkg/trigger free of pkg/runtime/deno;
+// daemon.go wires the real runtime via SetDenoRuntime.
+//
+// Before issue #719 this interface carried SetSecretOutputChannel, which
+// Engine.Run called to swap a shared channel onto the runtime's mutable
+// BridgeDeps state before firing a provider task. That channel now flows
+// per-run through runtime.RunOptions.SecretOutputCh instead (set directly
+// in the RunOptions literal fireAsync dispatches with), so the engine no
+// longer needs to reach into the runtime at all — this interface is now
+// just a typed marker Run nil-checks to give a friendly error ("deno
+// runtime not wired to engine") instead of a runtime dispatch failure when
+// no Deno runtime was ever wired.
+type DenoRuntimeAPI interface{}
 
-// PythonRuntimeAPI is the minimal subset of *python.Runtime the engine's
-// ProviderRunner implementation depends on. Mirrors DenoRuntimeAPI.
-type PythonRuntimeAPI interface {
-	SetSecretOutputChannel(ch chan map[string]string)
-}
+// PythonRuntimeAPI is the Python-runtime counterpart of DenoRuntimeAPI —
+// see its doc for why this is now an empty marker interface.
+type PythonRuntimeAPI interface{}
 
-// SetDenoRuntime wires the deno runtime so the engine can act as a
-// ProviderRunner — swapping the per-run SecretOutputChannel before
-// firing a provider task and clearing it after.
+// SetDenoRuntime records that a Deno runtime is available so Run can fire
+// deno-runtime provider tasks; nil (the default) makes Run reject them with
+// a clear "deno runtime not wired to engine" error.
 func (e *Engine) SetDenoRuntime(r DenoRuntimeAPI) { e.denoRuntime = r }
 
-// SetPythonRuntime wires the python runtime; mirror of SetDenoRuntime.
+// SetPythonRuntime is the Python counterpart of SetDenoRuntime.
 func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
 
 // Resolver returns the daemon-scoped env resolver, constructing it lazily on
@@ -58,14 +63,21 @@ func (e *Engine) Resolver() *envresolve.Resolver {
 
 // Run satisfies envresolve.ProviderRunner. It spawns the provider task
 // synchronously and waits for it to finish; the secret map is collected
-// over the IPC channel pre-wired into the runtime by SetSecretOutputChannel.
+// over a channel passed to this one run via RunOptions.SecretOutputCh
+// (issue #719) — not shared runtime state, so concurrent Run calls for
+// different provider tasks (or the same one) never share a channel and
+// need no serialization between them.
 //
-// Concurrency: serialized through providerRunMu because the runtime's
-// secretOutputCh is single-slot global state. MVP-quality — see
-// providerRunMu doc on the Engine struct.
+// Only deno and python runtimes have an IPC-secret-output surface (docker
+// and podman tasks have no dicode.output(..., {secret:true}) IPC method at
+// all), so the runtime is validated up front and rejected with a clear
+// error rather than left to silently time out waiting on a channel no
+// executor will ever write to.
 //
 // Errors:
 //   - ctx.Err() if the caller context expires
+//   - error if the provider's runtime can't produce secret output, or its
+//     runtime isn't wired to the engine
 //   - error if the spawn fails or the run errors out
 //   - error if the run finished without sending a map (provider didn't
 //     call output(..., {secret: true}))
@@ -75,28 +87,24 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 		return nil, fmt.Errorf("provider task %q not registered", providerID)
 	}
 
-	e.providerRunMu.Lock()
-	defer e.providerRunMu.Unlock()
-
-	ch := make(chan map[string]string, 1)
 	switch spec.Runtime {
 	case task.RuntimeDeno, "", "js":
 		if e.denoRuntime == nil {
 			return nil, fmt.Errorf("deno runtime not wired to engine")
 		}
-		e.denoRuntime.SetSecretOutputChannel(ch)
-		defer e.denoRuntime.SetSecretOutputChannel(nil)
-	default:
+	case task.Runtime("python"):
 		if e.pythonRuntime == nil {
 			return nil, fmt.Errorf("python runtime not wired to engine (runtime=%q)", spec.Runtime)
 		}
-		e.pythonRuntime.SetSecretOutputChannel(ch)
-		defer e.pythonRuntime.SetSecretOutputChannel(nil)
+	default:
+		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output (only deno and python runtimes support dicode.output(..., {secret: true}) over IPC)", providerID, spec.Runtime)
 	}
 
+	ch := make(chan map[string]string, 1)
 	reqJSON, _ := json.Marshal(reqs)
 	runID, err := e.fireAsync(ctx, spec, pkgruntime.RunOptions{
-		Params: map[string]string{"requests": string(reqJSON)},
+		Params:         map[string]string{"requests": string(reqJSON)},
+		SecretOutputCh: ch,
 	}, "provider")
 	if err != nil {
 		return nil, fmt.Errorf("fire provider %q: %w", providerID, err)

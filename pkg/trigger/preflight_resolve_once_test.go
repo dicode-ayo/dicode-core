@@ -14,33 +14,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// fakeDenoRuntimeForChannel is the minimal DenoRuntimeAPI the engine's
-// ProviderRunner method needs: it captures whatever SetSecretOutputChannel
-// is given so the test can publish the provider's secret map into it.
-type fakeDenoRuntimeForChannel struct {
-	ch atomic.Pointer[chan map[string]string]
-}
-
-func (f *fakeDenoRuntimeForChannel) SetSecretOutputChannel(c chan map[string]string) {
-	if c == nil {
-		f.ch.Store(nil)
-		return
-	}
-	f.ch.Store(&c)
-}
+// fakeDenoRuntimeForChannel satisfies DenoRuntimeAPI, which (as of issue
+// #719) is an empty marker interface Run only nil-checks before dispatch —
+// it carries no methods since the secret-output channel now flows per-run
+// through RunOptions.SecretOutputCh rather than being swapped onto the
+// runtime. Kept as a distinct type (rather than reusing struct{}) so the
+// SetDenoRuntime call site here reads the same as production wiring.
+type fakeDenoRuntimeForChannel struct{}
 
 // providerCountingExecutor counts how many times each task ID is dispatched.
 // When the provider task is dispatched, it pushes the canned secret map onto
-// the channel the engine wired into the (fake) deno runtime. Consumer task
-// dispatches are recorded too — and the most recent opts.PreResolvedEnv is
-// captured so the test can verify the engine threaded it through.
+// opts.SecretOutputCh — the per-run channel the engine's ProviderRunner
+// (Engine.Run) now passes directly via RunOptions (issue #719), mimicking
+// the IPC-server-side behaviour of a real provider task's
+// dicode.output(map, { secret: true }) call. Consumer task dispatches are
+// recorded too — and the most recent opts.PreResolvedEnv is captured so the
+// test can verify the engine threaded it through.
 //
 // Real runtimes mark the run finished via FinishRunWithResult called by dispatch;
 // this mock just returns and lets dispatch handle it.
 type providerCountingExecutor struct {
 	providerID  string
 	providerVal map[string]string
-	denoRT      *fakeDenoRuntimeForChannel
 
 	providerCalls           atomic.Int64
 	consumerCalls           atomic.Int64
@@ -51,16 +46,17 @@ func (p *providerCountingExecutor) Execute(_ context.Context, spec *task.Spec, o
 	if spec.ID == p.providerID {
 		p.providerCalls.Add(1)
 		// Mimic the IPC-server-side behaviour: when the provider task calls
-		// dicode.output(map, { secret: true }), the runtime's secretOutputCh
-		// receives the map. The engine's ProviderRunner blocks on that
-		// channel; we publish to it here so its WaitRun unblocks cleanly.
-		if chPtr := p.denoRT.ch.Load(); chPtr != nil {
+		// dicode.output(map, { secret: true }), the per-run secretOut
+		// channel receives the map. The engine's ProviderRunner blocks on
+		// that channel; we publish to it here so its WaitRun unblocks
+		// cleanly.
+		if opts.SecretOutputCh != nil {
 			select {
-			case (*chPtr) <- p.providerVal:
+			case opts.SecretOutputCh <- p.providerVal:
 			default:
 				// Channel was unbuffered or full — fall back to a goroutine
 				// so we don't deadlock the executor goroutine.
-				go func(c chan map[string]string) { c <- p.providerVal }(*chPtr)
+				go func(c chan map[string]string) { c <- p.providerVal }(opts.SecretOutputCh)
 			}
 		}
 		return &pkgruntime.RunResult{RunID: opts.RunID}, nil
@@ -91,16 +87,14 @@ func TestPreflight_ProviderFiresOnceAcrossPreflightAndDispatch(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
 
-	denoRT := &fakeDenoRuntimeForChannel{}
 	exec := &providerCountingExecutor{
 		providerID:  "doppler",
 		providerVal: map[string]string{"PG_URL": "postgres://x"},
-		denoRT:      denoRT,
 	}
 
 	eng := New(reg, exec, zap.NewNop())
 	eng.SetSecrets(secrets.Chain{}) // non-nil so preflightEnv doesn't short-circuit
-	eng.SetDenoRuntime(denoRT)
+	eng.SetDenoRuntime(&fakeDenoRuntimeForChannel{})
 
 	provider := &task.Spec{
 		ID:       "doppler",
