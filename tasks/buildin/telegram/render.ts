@@ -47,7 +47,13 @@ export function escapeHtml(s: string): string {
 }
 
 function cut(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  if (s.length <= max) return s;
+  let end = max - 1;
+  // Slicing between a surrogate pair emits a lone surrogate, which reaches
+  // Telegram as an escaped fragment rather than the character.
+  const last = s.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return s.slice(0, end) + "…";
 }
 
 function stringify(v: unknown): string {

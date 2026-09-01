@@ -84,8 +84,13 @@ export default async function main({ params, input }: DicodeSdk) {
       token,
     );
     if (!isRetryableStatus(res.status) || attempt === MAX_ATTEMPTS) break;
+    const delay = backoffDelayMs(attempt, payload?.parameters?.retry_after);
+    if (delay === null) {
+      lastError += ` (retry_after ${payload?.parameters?.retry_after}s exceeds the task budget)`;
+      break;
+    }
     console.log(`telegram send attempt ${attempt} failed, retrying: ${lastError}`);
-    await sleep(backoffDelayMs(attempt, payload?.parameters?.retry_after));
+    await sleep(delay);
   }
 
   if (!sent) {

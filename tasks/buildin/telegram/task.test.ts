@@ -269,10 +269,31 @@ test("does not retry a 400 — the follow-up mock is never reached", async () =>
   await assert.throws(() => runTask(), /chat not found/);
 });
 
-test("backoff honors Telegram's retry_after over the curve, still capped", () => {
+test("backoff honors Telegram's retry_after, and gives up when it cannot", () => {
   assert.equal(backoffDelayMs(1), 500);
   assert.equal(backoffDelayMs(1, 3), 3000);
-  assert.equal(backoffDelayMs(1, 600), 8000);
+  // Waiting less than the server asked spends an attempt on a certain second
+  // 429, so a hint the task cannot absorb means stop, not retry early.
+  assert.equal(backoffDelayMs(1, 20), null);
+});
+
+test("a retry_after longer than the budget fails without a second attempt", async () => {
+  http.mockOnce("POST", SEND, {
+    status: 429,
+    body: { ok: false, description: "Too Many Requests", parameters: { retry_after: 20 } },
+  });
+  http.mock("POST", SEND, { status: 200, body: { ok: true, result: { message_id: 2 } } });
+  env.set("TELEGRAM_BOT_TOKEN", "123:ABC");
+  params.set("chat_id", "-1");
+  params.set("title", "hello");
+
+  await assert.throws(() => runTask(), /retry_after 20s exceeds the task budget/);
+});
+
+test("cut() never leaves a lone surrogate at the truncation point", () => {
+  const { text } = render({ title: "\u{1F600}".repeat(300) });
+  assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(text), false, "lone high surrogate");
+  assert.equal(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text), false, "lone low surrogate");
 });
 
 test("stripToken keeps the bot token out of error text", () => {

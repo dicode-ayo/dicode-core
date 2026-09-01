@@ -76,9 +76,12 @@ token.
 
 ## Retries
 
-Up to three attempts, backing off 500ms then 1s. A `429` honors the
-`retry_after` the API returns; anything 5xx or a connection-level failure is
-retried on the curve. Every other `4xx` is a rejected message — a bad
+Up to three attempts, backing off 500ms then 1s, each attempt bounded by its
+own 8s timeout so one hung connection cannot consume the whole task budget. A
+`429` honors the `retry_after` the API returns — and gives up rather than
+retrying early when that hint is longer than the budget can absorb, since
+retrying sooner than Telegram asked only spends an attempt on a certain second
+`429`. Anything 5xx or a connection-level failure is retried on the curve. Every other `4xx` is a rejected message — a bad
 `chat_id`, malformed HTML — and fails immediately, since resending reproduces
 the rejection.
 

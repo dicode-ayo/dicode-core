@@ -16,11 +16,15 @@ export function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-/** Delay before the attempt following `attempt` (1-based). Telegram's 429 body
- *  carries the server's own wait hint, which overrides the backoff curve. */
-export function backoffDelayMs(attempt: number, retryAfterSec?: number): number {
+/** Delay before the attempt following `attempt` (1-based), or null when there
+ *  is no delay worth waiting. Telegram's 429 body carries the server's own wait
+ *  hint; retrying earlier than it asked spends an attempt on a certain second
+ *  429, so a hint longer than the task can absorb means stop rather than
+ *  retry early. */
+export function backoffDelayMs(attempt: number, retryAfterSec?: number): number | null {
   if (retryAfterSec && retryAfterSec > 0) {
-    return Math.min(retryAfterSec * 1000, MAX_DELAY_MS);
+    const wait = retryAfterSec * 1000;
+    return wait > MAX_DELAY_MS ? null : wait;
   }
   return Math.min(BASE_DELAY_MS * 2 ** (attempt - 1), MAX_DELAY_MS);
 }
