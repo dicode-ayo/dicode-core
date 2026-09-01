@@ -51,7 +51,12 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/mcp/client` | Generic JSON-RPC 2.0 MCP client used by the dicode SDK's `mcp.list_tools` / `mcp.call` to reach external MCP servers |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |
-| `pkg/relay` | WebSocket tunnel for public webhook URLs |
+
+There is no `pkg/relay`. The relay — a WebSocket tunnel giving webhooks a public URL — is a pair of
+tasks, not a Go package: `tasks/buildin/relay-client` (the daemon-side tunnel, built on the pinned
+`npm:dicode-relay`) and `tasks/buildin/relay-server` (an optional in-process broker). It forwards
+`/hooks/*` and `/dicode.js` only, and strips credential headers in both directions — see
+`docs/concepts/webhook-relay.md`.
 
 ## Task Format
 
@@ -64,7 +69,18 @@ tasks/my-task/
 └── task.test.js   # optional unit tests with mocked globals
 ```
 
-Task SDK surface (Deno `dicode` global / Python `dicode` module): `kv`, `log`, `params`, `env`, `output`, `mcp`. Deno tasks also get the platform's native `fetch`; Python tasks use stdlib (`urllib`, `requests`, etc.) — there is no HTTP helper on the `dicode` module itself. See `pkg/runtime/deno/sdk/shim.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` for the authoritative shapes.
+The two runtimes do not expose the same SDK surface, and the difference bites when a task is
+ported between them:
+
+- **Deno** — the handler receives `{ params, kv, input, state, output, mcp, dicode }` (the
+  `DicodeSdk` interface). There is **no `env` and no `log`**: read configuration with
+  `Deno.env.get`, bounded by `permissions.env`, and write to the run log with `console.log`, which
+  the runtime streams through a secrets redactor. Deno tasks also get the platform's native `fetch`.
+- **Python** — the `dicode` module exposes `kv`, `log`, `params`, `env`, `input`, `output`, `mcp`.
+  Use stdlib (`urllib`, `requests`, …) for HTTP; there is no HTTP helper on the module.
+
+See `pkg/runtime/deno/sdk/sdk.d.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` for the
+authoritative shapes.
 
 ## Key Design Constraints
 
