@@ -12,6 +12,14 @@ spec:
       ref:
         path: ./notify/task.yaml
 
+    # ─── telegram: outbound notification delivery over the Bot API ─────────
+    # Opt-in alternative to the desktop `notifications` entry for headless
+    # hosts. Nothing points here by default; see ./telegram/README.md for the
+    # wiring and the TELEGRAM_BOT_TOKEN / chat_id contract.
+    telegram:
+      ref:
+        path: ./telegram/task.yaml
+
     alert:
       ref:
         path: ./alert/task.yaml
