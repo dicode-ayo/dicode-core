@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.2](https://github.com/dicode-ayo/dicode-core/compare/v0.5.1...v0.5.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* **ai-agent:** a not_configured turn settles as a successful run ([#770](https://github.com/dicode-ayo/dicode-core/issues/770)) ([22b6a5e](https://github.com/dicode-ayo/dicode-core/commit/22b6a5e41cd2a7cdf7c9303f4f070dc29a9cd0e8))
+* **authoring:** deleteGit removes the taskset entry, not just the directory ([#774](https://github.com/dicode-ayo/dicode-core/issues/774)) ([2c3fbe4](https://github.com/dicode-ayo/dicode-core/commit/2c3fbe4afdfd63da65e51123152e246128a27c2b))
+* **authoring:** refuse a session whose sandbox the write tool cannot accept ([#769](https://github.com/dicode-ayo/dicode-core/issues/769)) ([10eef22](https://github.com/dicode-ayo/dicode-core/commit/10eef2216ea815850d8b7253833be5163b4e5b2f))
+* **authoring:** scaffold task.ts instead of task.js ([#771](https://github.com/dicode-ayo/dicode-core/issues/771)) ([96d2313](https://github.com/dicode-ayo/dicode-core/commit/96d2313326c1f44e49dc9258282a0bfe967eb268))
+* **cli:** run onboarding from init, and stop losing the first-run passphrase ([c57021d](https://github.com/dicode-ayo/dicode-core/commit/c57021def7866a4a9fbce896a68d99acd317399f))
+* **deps:** update module github.com/cenkalti/backoff/v4 to v7 ([#791](https://github.com/dicode-ayo/dicode-core/issues/791)) ([653ebc8](https://github.com/dicode-ayo/dicode-core/commit/653ebc82989b7b6208b5ca01971f026a4988c2e5))
+* **runtime:** route provider secret-output channel through per-run RunOptions ([#792](https://github.com/dicode-ayo/dicode-core/issues/792)) ([02bd870](https://github.com/dicode-ayo/dicode-core/commit/02bd870e3348e6e18c6d749f368b1d0613c1fa45))
+* **taskset:** use the namespaced buildin/git-pr id in the agents' allowlist ([#773](https://github.com/dicode-ayo/dicode-core/issues/773)) ([f0cf3c1](https://github.com/dicode-ayo/dicode-core/commit/f0cf3c1b74840468f74226acc78d401088d97e6e))
+* **webui:** wait for the reconciler to start before driving AddSource in tests ([#775](https://github.com/dicode-ayo/dicode-core/issues/775)) ([1344958](https://github.com/dicode-ayo/dicode-core/commit/134495844d86db1a200967909a67a4a54199734a))
+
 ## [0.5.1](https://github.com/dicode-ayo/dicode-core/compare/v0.5.0...v0.5.1) (2026-08-24)
 
 
