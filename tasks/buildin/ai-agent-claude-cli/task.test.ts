@@ -201,6 +201,34 @@ JSON`,
     assertEquals(await seenToken("token-b"), "[token-b]");
 });
 
+Deno.test("withStubClaude restores a token that was already set before the call, not just absence (#745 follow-up)", async () => {
+    // The isolation test above only ever starts from an unset ambient token
+    // (nothing outside this file sets CLAUDE_CODE_OAUTH_TOKEN before it runs),
+    // so it can't tell "restores to unset" apart from "restores to whatever
+    // was there" — a real gap: origToken capture must also cover the case
+    // where some outer caller already had a token in the environment (e.g. a
+    // developer's shell, or CI secret injection) before withStubClaude ever
+    // ran, and expects it back afterward, not wiped.
+    const ambient = Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN");
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "pre-existing-ambient-token");
+    try {
+        await withStubClaude(
+            `cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+            () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
+            "stub",
+        );
+        assertEquals(Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN"), "pre-existing-ambient-token");
+    } finally {
+        if (ambient === undefined) {
+            Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
+        } else {
+            Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", ambient);
+        }
+    }
+});
+
 Deno.test("happy path returns reply + session_id", async () => {
     const result: any = await withStubClaude(
         `cat <<'JSON'
