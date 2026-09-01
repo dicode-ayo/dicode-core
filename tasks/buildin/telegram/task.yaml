@@ -1,0 +1,78 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Telegram Notification"
+description: >
+  Delivers a dicode notification to a Telegram chat via the Bot API
+  sendMessage endpoint. Serves all three notification sources; outbound
+  only — see README.md for the field contract and the wiring.
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  chat_id:
+    type: string
+    default: ""
+    description: >
+      Target chat, channel or user ID (e.g. -1001234567890). Falls back to the
+      TELEGRAM_CHAT_ID secret when empty.
+
+  # Every field below is optional: the approval hook sends only task_id / hash /
+  # approve_url, so a message is composed from whatever fields arrive.
+  title:
+    type: string
+    default: ""
+    description: "Message headline. Derived from event/status when empty."
+  body:
+    type: string
+    default: ""
+    description: "Message text. Derived from the structured fields when empty."
+  priority:
+    type: string
+    default: "default"
+    description: "min | low | default | high | urgent. min and low are sent silently."
+  event:
+    type: string
+    default: ""
+    description: "suspended | ended, from the suspend hook."
+  status:
+    type: string
+    default: ""
+    description: "Terminal run status: success | failure | cancelled."
+  task_id:
+    type: string
+    default: ""
+    description: "Task the notification is about."
+  run_id:
+    type: string
+    default: ""
+    description: "Run the notification is about."
+  hash:
+    type: string
+    default: ""
+    description: "Content hash of a task held pending approval."
+  approve_url:
+    type: string
+    default: ""
+    description: "Single-use approve link minted by the approval gate."
+  resume_url:
+    type: string
+    default: ""
+    description: "WebUI link that answers a suspended run."
+
+permissions:
+  # Both optional so the task reaches its own actionable error instead of a
+  # secret-resolution failure, and so a chat_id param works without the secret.
+  env:
+    - name: TELEGRAM_BOT_TOKEN
+      secret: TELEGRAM_BOT_TOKEN
+      optional: true
+    - name: TELEGRAM_CHAT_ID
+      secret: TELEGRAM_CHAT_ID
+      optional: true
+
+  net:
+    - api.telegram.org
+
+timeout: 30s

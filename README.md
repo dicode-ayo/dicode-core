@@ -910,13 +910,16 @@ Tasks without explicit `secrets:` entries continue to use the provider chain —
 
 ## Notifications
 
-Notifications are delivered by **tasks**, not a daemon-side subsystem. Point `defaults.on_failure_chain` (or any per-task `on_failure_chain`) at a task that emits the alert — desktop, ntfy, Slack, Discord, email, anything you can reach over HTTP.
+Notifications are delivered by **tasks**, not a daemon-side subsystem. Three settings point at a delivery task: `ai.notify_task` (a run suspended awaiting your reply), `approval.notify_task` (the approval gate held a task), and `defaults.on_failure_chain` (a run failed). Point any of them at a task that emits the alert — desktop, Telegram, ntfy, Slack, Discord, email, anything you can reach over HTTP.
+
+The three do not hand the delivery task the same fields: the suspend hook sends a rendered `title` and `body`, the approval hook sends only `task_id`/`hash`/`approve_url`, and the failure chain delivers through `input` rather than params. A task serving more than one of them has to compose its own text when none arrives — see `tasks/buildin/telegram/` for a worked example.
 
 ### Buildins
 
 | Task | Surface | Notes |
 |---|---|---|
 | `buildin/notifications` | Native OS desktop (`notify-send` / `osascript` / `powershell`) | No external service. Works offline. |
+| `buildin/telegram` | Telegram Bot API `sendMessage` | Reaches a headless host. Opt-in: needs a `TELEGRAM_BOT_TOKEN` secret. See [the task README](tasks/buildin/telegram/README.md). |
 | `buildin/alert` | Wrapper that calls `buildin/notifications` via `dicode.run_task` | Demonstrates the chain pattern; copy and adapt for ntfy / Slack / etc. |
 
 Wire it up:
