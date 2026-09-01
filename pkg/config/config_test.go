@@ -1392,22 +1392,27 @@ server:
 }
 
 // TestLoad_PublicURL_RejectsMalformed covers the shape rules: scheme must be
-// http/https, a host is required, and anything beyond the authority is
-// refused. The web UI serves root-relative URLs, so a subpath mount would
-// produce a link that resolves into a broken dashboard.
+// http/https, a host is required, and anything beyond the bare authority is
+// refused rather than carried into a link.
 func TestLoad_PublicURL_RejectsMalformed(t *testing.T) {
 	for _, bad := range []string{
-		"dicode.example.com",              // no scheme
-		"ftp://dicode.example.com",        // non-http scheme
-		"wss://dicode.example.com",        // websocket scheme
-		"https://",                        // missing host
-		"https://dicode.example.com/sub",  // path prefix
-		"https://dicode.example.com/?a=b", // query
-		"https://dicode.example.com/#top", // fragment
+		"dicode.example.com",                       // no scheme
+		"ftp://dicode.example.com",                 // non-http scheme
+		"wss://dicode.example.com",                 // websocket scheme
+		"https://",                                 // missing host
+		"https://dicode.example.com/sub",           // path prefix
+		"https://dicode.example.com/?a=b",          // query
+		"https://dicode.example.com/#top",          // fragment
+		"https://alice:hunter2@dicode.example.com", // credentials
+		"https://alice@dicode.example.com",         // credentials, password omitted
 	} {
 		t.Run(bad, func(t *testing.T) {
-			if _, err := publicURLConfig(t, bad, true, false); err == nil {
-				t.Errorf("Load(public_url=%q): expected error, got nil", bad)
+			_, err := publicURLConfig(t, bad, true, false)
+			if err == nil {
+				t.Fatalf("Load(public_url=%q): expected error, got nil", bad)
+			}
+			if !strings.Contains(err.Error(), "server.public_url") {
+				t.Errorf("error %q does not name the offending setting", err)
 			}
 		})
 	}
@@ -1447,15 +1452,28 @@ func TestLoad_PublicURL_RequiresAuthOrProxy(t *testing.T) {
 	}
 }
 
-// TestLoad_PublicURL_TrimsTrailingSlash guards the join: callers append
-// "/approve/<token>" and "/?run=<id>" directly to this value.
-func TestLoad_PublicURL_TrimsTrailingSlash(t *testing.T) {
-	cfg, err := publicURLConfig(t, "https://dicode.example.com/", true, false)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got, want := cfg.Server.PublicURL, "https://dicode.example.com"; got != want {
-		t.Errorf("PublicURL = %q, want %q", got, want)
+// TestLoad_PublicURL_StoresBareAuthority guards the join: callers append
+// "/approve/<token>" and "/?run=<id>" straight onto this value, so an empty
+// trailing separator has to be gone by the time it is stored. url.Parse
+// reports a bare "?" as ForceQuery with an empty RawQuery and a bare "#" as an
+// empty Fragment, so neither is caught by inspecting the parsed parts.
+func TestLoad_PublicURL_StoresBareAuthority(t *testing.T) {
+	const want = "https://dicode.example.com"
+	for _, raw := range []string{
+		want,
+		want + "/",
+		want + "?",
+		want + "#",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			cfg, err := publicURLConfig(t, raw, true, false)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Server.PublicURL; got != want {
+				t.Errorf("PublicURL = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

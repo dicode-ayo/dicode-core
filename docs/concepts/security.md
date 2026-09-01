@@ -32,7 +32,7 @@ server:
   secret: ""                          # optional YAML override — see passphrase source priority below
   allowed_origins: []                 # empty = same-origin only
   trust_proxy: false                  # set true when behind nginx/Caddy
-  public_url: ""                      # scheme://host[:port] links in notifications use; requires auth or trust_proxy
+  public_url: ""                      # scheme://host[:port] that notification links are built from; requires auth or trust_proxy
   device_binding: off                 # off | warn | strict — bind trusted-device cookie to IP subnet + UA family
 ```
 
@@ -208,9 +208,13 @@ is served by a proxy on the same host — and `trust_proxy` is how that proxy is
 declared. Accepting it with neither flag would publish an unauthenticated
 dashboard, so config load fails instead.
 
-**A path, query or fragment is refused too.** The web UI serves root-relative
-URLs, so mounting it under a subpath would fix the notification link and break
-every page behind it.
+**Only a bare authority is accepted.** The web UI serves root-relative URLs, so
+mounting it under a subpath would fix the notification link and break every
+page behind it — a path, query or fragment is refused rather than carried.
+Credentials are refused for a blunter reason: this address is pasted verbatim
+into every notification, Telegram's servers included. An empty trailing `/`,
+`?` or `#` carries nothing and is dropped, since callers append
+`/approve/<token>` straight onto the stored value.
 
 **The two links are not equally usable remotely.** `/approve/{token}` is
 session-less by design — the single-use token in the path is the credential —
@@ -952,7 +956,7 @@ All security-relevant fields in `ServerConfig`:
 | `secret` | string | `""` | YAML passphrase override — highest priority; if omitted dicode auto-generates one on first boot and stores it in SQLite |
 | `allowed_origins` | []string | `[]` | CORS allowlist — empty = same-origin only |
 | `trust_proxy` | bool | `false` | Trust `X-Forwarded-For` (set when behind a reverse proxy) |
-| `public_url` | string | `""` | Address the daemon is reachable at from outside the machine; notification links are built from it. `scheme://host[:port]`, no path. Rejected unless `auth` or `trust_proxy` is set |
+| `public_url` | string | `""` | Address the daemon is reachable at from outside the machine; notification links are built from it. `scheme://host[:port]` — no path, query, fragment or credentials. Rejected unless `auth` or `trust_proxy` is set |
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
 | `bcrypt_cost` | int | `12` | bcrypt work factor for the stored passphrase hash; valid range 4–14 |
 | `device_binding` | string | `off` | Bind trusted-device cookie to issuing IP subnet (/24, /48) + UA family. `off` \| `warn` \| `strict` |

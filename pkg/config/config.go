@@ -437,11 +437,9 @@ type ServerConfig struct {
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
 	// PublicURL is the scheme://host[:port] at which this daemon is reachable
 	// from outside the machine; notification links are built from it, and an
-	// empty value falls back to the loopback form. Setting it asserts the
-	// daemon is exposed, so validate rejects it unless server.auth or
-	// server.trust_proxy is set. A path, query or fragment is rejected too:
-	// the web UI's own URLs are root-relative, so a subpath mount would
-	// resolve the link and break every page behind it.
+	// empty value falls back to the loopback form. Must be a bare authority —
+	// no path, query, fragment or credentials — and requires server.auth or
+	// server.trust_proxy; validate enforces both.
 	PublicURL string `yaml:"public_url,omitempty"`
 	// BcryptCost is the work factor used when hashing the stored auth
 	// passphrase. Valid range 4–14. 0 means "unset" → defaults to 12 in
@@ -707,6 +705,23 @@ func applyDefaults(cfg *Config, configDir string) {
 	// DataDir default is set earlier during variable expansion.
 }
 
+// parseHTTPURL parses a config value that must be an http(s) URL, prefixing
+// every error with the setting's own name so the operator is told which line
+// of dicode.yaml to fix.
+func parseHTTPURL(field, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%s: must use http:// or https://, got scheme %q", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%s: missing host in %q", field, raw)
+	}
+	return u, nil
+}
+
 func (cfg *Config) validate() error {
 	for name, entry := range cfg.Spec.Entries {
 		if entry == nil {
@@ -734,37 +749,27 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("spec.entries: %w", err)
 	}
 	if cfg.Relay.BrokerURL != "" {
-		u, err := url.Parse(cfg.Relay.BrokerURL)
-		if err != nil {
-			return fmt.Errorf("relay.broker_url: %w", err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("relay.broker_url: must use http:// or https://, got scheme %q", u.Scheme)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
+		if _, err := parseHTTPURL("relay.broker_url", cfg.Relay.BrokerURL); err != nil {
+			return err
 		}
 	}
 	if cfg.Server.PublicURL != "" {
-		u, err := url.Parse(cfg.Server.PublicURL)
+		u, err := parseHTTPURL("server.public_url", cfg.Server.PublicURL)
 		if err != nil {
-			return fmt.Errorf("server.public_url: %w", err)
+			return err
 		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("server.public_url: must use http:// or https://, got scheme %q", u.Scheme)
+		// Credentials would ride along in every notification this address is
+		// pasted into, Telegram's servers included.
+		if u.User != nil {
+			return fmt.Errorf("server.public_url: must not carry credentials, got user info in %q", cfg.Server.PublicURL)
 		}
-		if u.Host == "" {
-			return fmt.Errorf("server.public_url: missing host in %q", cfg.Server.PublicURL)
-		}
-		// Callers append "/approve/<token>" and "/?run=<id>" directly, so a
-		// bare trailing slash is normalised away rather than doubled up.
-		if u.Path == "/" && u.RawQuery == "" && u.Fragment == "" {
-			u.Path = ""
-			cfg.Server.PublicURL = u.String()
-		}
-		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("server.public_url: must be scheme://host[:port] with no path, query or fragment, got %q", cfg.Server.PublicURL)
 		}
+		// Callers append "/approve/<token>" and "/?run=<id>" straight onto
+		// this value, so only the bare authority is stored: a trailing "/",
+		// "?" or "#" carries nothing and would corrupt every joined link.
+		cfg.Server.PublicURL = u.Scheme + "://" + u.Host
 		// The daemon binds loopback only while auth is off (bindAddr,
 		// pkg/webui/server.go), so an off-host address is either unreachable
 		// or fronted by a proxy. trust_proxy is how that proxy is declared;

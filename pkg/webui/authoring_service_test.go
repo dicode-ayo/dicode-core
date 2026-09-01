@@ -81,8 +81,9 @@ func TestEditTask_ConcurrentSameTaskNoServerError(t *testing.T) {
 
 // TestWebUIBaseURL covers the precedence every outbound link depends on:
 // server.public_url wins outright, TLS only picks the scheme for the loopback
-// fallback. A notification that leaves the machine carries whatever this
-// returns, so a wrong answer here is a link the recipient cannot follow.
+// fallback. The auth and trust_proxy flags are inert here — WebUIBaseURL never
+// reads them — and are set only to keep each fixture one that config.validate
+// would admit.
 func TestWebUIBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
