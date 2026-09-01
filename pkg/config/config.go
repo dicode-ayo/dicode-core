@@ -435,6 +435,14 @@ type ServerConfig struct {
 	MCP            *bool    `yaml:"mcp,omitempty"`             // expose MCP endpoint at /mcp; nil → default true, explicit false opts out
 	TLSCertFile    string   `yaml:"tls_cert,omitempty"`        // path to TLS certificate (PEM); enables HTTPS when set with tls_key
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
+	// PublicURL is the scheme://host[:port] at which this daemon is reachable
+	// from outside the machine; notification links are built from it, and an
+	// empty value falls back to the loopback form. Setting it asserts the
+	// daemon is exposed, so validate rejects it unless server.auth or
+	// server.trust_proxy is set. A path, query or fragment is rejected too:
+	// the web UI's own URLs are root-relative, so a subpath mount would
+	// resolve the link and break every page behind it.
+	PublicURL string `yaml:"public_url,omitempty"`
 	// BcryptCost is the work factor used when hashing the stored auth
 	// passphrase. Valid range 4–14. 0 means "unset" → defaults to 12 in
 	// applyDefaults. Higher = slower login but stronger against offline attacks
@@ -735,6 +743,35 @@ func (cfg *Config) validate() error {
 		}
 		if u.Host == "" {
 			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
+		}
+	}
+	if cfg.Server.PublicURL != "" {
+		u, err := url.Parse(cfg.Server.PublicURL)
+		if err != nil {
+			return fmt.Errorf("server.public_url: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("server.public_url: must use http:// or https://, got scheme %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("server.public_url: missing host in %q", cfg.Server.PublicURL)
+		}
+		// Callers append "/approve/<token>" and "/?run=<id>" directly, so a
+		// bare trailing slash is normalised away rather than doubled up.
+		if u.Path == "/" && u.RawQuery == "" && u.Fragment == "" {
+			u.Path = ""
+			cfg.Server.PublicURL = u.String()
+		}
+		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.public_url: must be scheme://host[:port] with no path, query or fragment, got %q", cfg.Server.PublicURL)
+		}
+		// The daemon binds loopback only while auth is off (bindAddr,
+		// pkg/webui/server.go), so an off-host address is either unreachable
+		// or fronted by a proxy. trust_proxy is how that proxy is declared;
+		// without either flag the setting would publish an unauthenticated
+		// dashboard, so fail closed rather than hand out the link.
+		if !cfg.Server.Auth && !cfg.Server.TrustProxy {
+			return errors.New("server.public_url: requires server.auth: true, or server.trust_proxy: true when a reverse proxy fronts the daemon")
 		}
 	}
 	// server_url (single-instance shorthand) and server_urls (HA fan-out list)

@@ -1366,3 +1366,107 @@ container_security:
 		}
 	})
 }
+
+// publicURLConfig renders a dicode.yaml carrying a server block with the given
+// public_url and auth/trust_proxy flags, and Loads it.
+func publicURLConfig(t *testing.T, publicURL string, auth, trustProxy bool) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := fmt.Sprintf(`
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+server:
+  port: 8080
+  auth: %t
+  trust_proxy: %t
+  public_url: %q
+`, auth, trustProxy, publicURL)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(cfgPath)
+}
+
+// TestLoad_PublicURL_RejectsMalformed covers the shape rules: scheme must be
+// http/https, a host is required, and anything beyond the authority is
+// refused. The web UI serves root-relative URLs, so a subpath mount would
+// produce a link that resolves into a broken dashboard.
+func TestLoad_PublicURL_RejectsMalformed(t *testing.T) {
+	for _, bad := range []string{
+		"dicode.example.com",              // no scheme
+		"ftp://dicode.example.com",        // non-http scheme
+		"wss://dicode.example.com",        // websocket scheme
+		"https://",                        // missing host
+		"https://dicode.example.com/sub",  // path prefix
+		"https://dicode.example.com/?a=b", // query
+		"https://dicode.example.com/#top", // fragment
+	} {
+		t.Run(bad, func(t *testing.T) {
+			if _, err := publicURLConfig(t, bad, true, false); err == nil {
+				t.Errorf("Load(public_url=%q): expected error, got nil", bad)
+			}
+		})
+	}
+}
+
+// TestLoad_PublicURL_RequiresAuthOrProxy covers the fail-closed gate. The
+// daemon binds loopback while auth is off, so a public_url with neither auth
+// nor trust_proxy either points nowhere or publishes an open dashboard.
+func TestLoad_PublicURL_RequiresAuthOrProxy(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       bool
+		trustProxy bool
+		wantErr    bool
+	}{
+		{"neither", false, false, true},
+		{"auth", true, false, false},
+		{"trust_proxy", false, true, false},
+		{"both", true, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := publicURLConfig(t, "https://dicode.example.com", tc.auth, tc.trustProxy)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "server.public_url") {
+					t.Errorf("error %q does not name the offending setting", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoad_PublicURL_TrimsTrailingSlash guards the join: callers append
+// "/approve/<token>" and "/?run=<id>" directly to this value.
+func TestLoad_PublicURL_TrimsTrailingSlash(t *testing.T) {
+	cfg, err := publicURLConfig(t, "https://dicode.example.com/", true, false)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Server.PublicURL, "https://dicode.example.com"; got != want {
+		t.Errorf("PublicURL = %q, want %q", got, want)
+	}
+}
+
+// TestLoad_PublicURL_EmptyIsValid covers the default: an unset public_url is
+// not subject to the auth gate, since nothing is being published.
+func TestLoad_PublicURL_EmptyIsValid(t *testing.T) {
+	cfg, err := publicURLConfig(t, "", false, false)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.PublicURL != "" {
+		t.Errorf("PublicURL = %q, want empty", cfg.Server.PublicURL)
+	}
+}

@@ -32,6 +32,7 @@ server:
   secret: ""                          # optional YAML override — see passphrase source priority below
   allowed_origins: []                 # empty = same-origin only
   trust_proxy: false                  # set true when behind nginx/Caddy
+  public_url: ""                      # scheme://host[:port] links in notifications use; requires auth or trust_proxy
   device_binding: off                 # off | warn | strict — bind trusted-device cookie to IP subnet + UA family
 ```
 
@@ -187,6 +188,34 @@ func clientIP(r *http.Request, trustProxy bool) string {
 ```
 
 `X-Forwarded-For` is **only trusted** when `server.trust_proxy: true`. Without this flag, a direct client could supply a spoofed header and bypass the IP-based rate limiter on the login endpoint. Set this flag only when dicode sits behind a reverse proxy that sets (and strips client-supplied) `X-Forwarded-For`.
+
+### server.public_url — the address links are built from
+
+Every link dicode puts in an outbound notification comes from `WebUIBaseURL()`
+([authoring_service.go](../../pkg/webui/authoring_service.go)): the `resume_url`
+on the suspend hook and the `approve_url` on the approval hook. Without
+`public_url` these read `http://localhost:<port>/...`, which resolves to the
+recipient's own machine the moment the notification leaves the host — the
+operator learns something is waiting and cannot act on it.
+
+`public_url` records the address the daemon already answers on, whether that is
+a reverse proxy, a tailnet name or a LAN host. It does not make the daemon
+reachable; that stays the operator's problem.
+
+**It is refused unless `auth` or `trust_proxy` is set.** `bindAddr()` binds
+`127.0.0.1` while auth is off, so an off-host address either points nowhere or
+is served by a proxy on the same host — and `trust_proxy` is how that proxy is
+declared. Accepting it with neither flag would publish an unauthenticated
+dashboard, so config load fails instead.
+
+**A path, query or fragment is refused too.** The web UI serves root-relative
+URLs, so mounting it under a subpath would fix the notification link and break
+every page behind it.
+
+**The two links are not equally usable remotely.** `/approve/{token}` is
+session-less by design — the single-use token in the path is the credential —
+so it works from a phone. `resume_url` lands on the dashboard and still needs a
+login at the far end.
 
 #### Login rate limiter
 
@@ -923,6 +952,7 @@ All security-relevant fields in `ServerConfig`:
 | `secret` | string | `""` | YAML passphrase override — highest priority; if omitted dicode auto-generates one on first boot and stores it in SQLite |
 | `allowed_origins` | []string | `[]` | CORS allowlist — empty = same-origin only |
 | `trust_proxy` | bool | `false` | Trust `X-Forwarded-For` (set when behind a reverse proxy) |
+| `public_url` | string | `""` | Address the daemon is reachable at from outside the machine; notification links are built from it. `scheme://host[:port]`, no path. Rejected unless `auth` or `trust_proxy` is set |
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
 | `bcrypt_cost` | int | `12` | bcrypt work factor for the stored passphrase hash; valid range 4–14 |
 | `device_binding` | string | `off` | Bind trusted-device cookie to issuing IP subnet (/24, /48) + UA family. `off` \| `warn` \| `strict` |
