@@ -181,7 +181,13 @@ Deno.test("withStubClaude fully isolates CLAUDE_CODE_OAUTH_TOKEN across sequenti
     // non-parallel execution, but a real ordering bug in waiting. This test
     // makes the leak observable directly: three back-to-back calls, each
     // asking for a different token state, must each see only its own state,
-    // with nothing bleeding in from the call before it.
+    // with nothing bleeding in from the call before it. Each call sets its
+    // own desired state on entry regardless of what came before, so the
+    // in-stub assertions alone can't tell a working finally-restore from a
+    // broken one between calls — also assert the env is back to its
+    // pre-call value immediately after every call returns (CodeRabbit
+    // review on #795).
+    const originalToken = Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN");
     const seenToken = async (token: string | null) => {
         const sentinelDir = await Deno.makeTempDir();
         const sentinel = `${sentinelDir}/token-seen`;
@@ -193,6 +199,7 @@ JSON`,
             () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
             token,
         );
+        assertEquals(Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN"), originalToken);
         return (await Deno.readTextFile(sentinel)).trim();
     };
 
