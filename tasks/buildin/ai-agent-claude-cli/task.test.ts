@@ -72,9 +72,18 @@ async function runFailing(fn: (output: any) => Promise<unknown>): Promise<any> {
     return published[0];
 }
 
+// token controls CLAUDE_CODE_OAUTH_TOKEN for the duration of fn(): a string
+// sets it to that value, null deletes it (the "no token" / credential-file
+// fallback path), and omitting the argument defaults to "stub" — the value
+// nearly every caller wants. Whatever the var held on entry (set, or absent)
+// is restored in the same finally that already restores PATH/CLAUDE_CLI_PATH/
+// DICODE_DATA_DIR, so a test can no longer leak CLAUDE_CODE_OAUTH_TOKEN into
+// the next one by setting it outside this helper and forgetting to clean up
+// (#745).
 async function withStubClaude<T>(
     stubBody: string,
     fn: () => Promise<T>,
+    token: string | null = "stub",
 ): Promise<T> {
     const tmp = await Deno.makeTempDir();
     const stub = `${tmp}/claude`;
@@ -84,12 +93,18 @@ ${stubBody}
     await Deno.chmod(stub, 0o755);
     const origPath    = Deno.env.get("PATH") ?? "";
     const origDataDir = Deno.env.get("DICODE_DATA_DIR");
+    const origToken   = Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN");
     Deno.env.set("PATH", `${tmp}:${origPath}`);
     Deno.env.set("CLAUDE_CLI_PATH", stub);
     // DICODE_DATA_DIR drives the per-invocation .claude/ workdir in
     // task.ts. Pin it to the same per-test tempdir so workdirs are
     // created and cleaned up under our control.
     Deno.env.set("DICODE_DATA_DIR", tmp);
+    if (token === null) {
+        Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
+    } else {
+        Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
     try {
         return await fn();
     } finally {
@@ -100,11 +115,17 @@ ${stubBody}
         } else {
             Deno.env.set("DICODE_DATA_DIR", origDataDir);
         }
+        if (origToken === undefined) {
+            Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
+        } else {
+            Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", origToken);
+        }
     }
 }
 
 Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    // No withStubClaude here — chat-start suspends before task.ts ever reads
+    // CLAUDE_CODE_OAUTH_TOKEN, so this test never needed to set it (#745).
     const { calls, dicode } = makeSuspendDicode();
     let signalled = false;
     try {
@@ -127,12 +148,12 @@ Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", asy
 });
 
 Deno.test("no token: falls back to logged-in credentials (does not hard-fail)", async () => {
-    Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
     const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
         () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
+        null,
     );
     assertEquals(result.ok, true);
 });
@@ -140,7 +161,6 @@ JSON`,
 Deno.test("no token: does not inject an empty CLAUDE_CODE_OAUTH_TOKEN into claude env", async () => {
     // Setting the var to "" would override the $HOME/.claude credential-file
     // fallback with an invalid empty token — it must be absent, not empty.
-    Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/token-seen`;
     await withStubClaude(
@@ -149,12 +169,39 @@ cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
         () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
+        null,
     );
     assertEquals((await Deno.readTextFile(sentinel)).trim(), "[UNSET]");
 });
 
+Deno.test("withStubClaude fully isolates CLAUDE_CODE_OAUTH_TOKEN across sequential calls (#745)", async () => {
+    // Regression for #745: withStubClaude used to leave CLAUDE_CODE_OAUTH_TOKEN
+    // management entirely to the caller, who set it directly via Deno.env.set
+    // and never restored it — a leak invisible under deno test's sequential,
+    // non-parallel execution, but a real ordering bug in waiting. This test
+    // makes the leak observable directly: three back-to-back calls, each
+    // asking for a different token state, must each see only its own state,
+    // with nothing bleeding in from the call before it.
+    const seenToken = async (token: string | null) => {
+        const sentinelDir = await Deno.makeTempDir();
+        const sentinel = `${sentinelDir}/token-seen`;
+        await withStubClaude(
+            `printf '[%s]' "\${CLAUDE_CODE_OAUTH_TOKEN-UNSET}" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+            () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode, output: noopOutput }),
+            token,
+        );
+        return (await Deno.readTextFile(sentinel)).trim();
+    };
+
+    assertEquals(await seenToken("token-a"), "[token-a]");
+    assertEquals(await seenToken(null), "[UNSET]");
+    assertEquals(await seenToken("token-b"), "[token-b]");
+});
+
 Deno.test("happy path returns reply + session_id", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","subtype":"success","is_error":false,"result":"hello world","session_id":"sess-abc123","model":"claude-sonnet-4","total_cost_usd":0.001}
@@ -177,7 +224,6 @@ JSON`,
 });
 
 Deno.test("surfaces is_error: true responses", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","is_error":true,"result":"rate limited"}
@@ -198,7 +244,6 @@ JSON`,
 });
 
 Deno.test("surfaces non-zero exit code with stderr", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const result: any = await withStubClaude(
         `echo "auth failed: bad token" >&2
 exit 2`,
@@ -218,7 +263,6 @@ exit 2`,
 });
 
 Deno.test("redacts OAuth token if it leaks into stderr", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
     const result: any = await withStubClaude(
         `echo "diagnostic: token=supersecret-token-xyz failed" >&2
 exit 1`,
@@ -230,6 +274,7 @@ exit 1`,
                     output,
                 })
             ),
+        "supersecret-token-xyz",
     );
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
@@ -244,7 +289,6 @@ Deno.test("redacts every occurrence of the token, not just the first", async () 
     // Regression: String.replace only swaps the first match. If Claude
     // ever logs the OAuth token twice (or more), the trailing copies
     // would have leaked through. Use of replaceAll defends against that.
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
     const result: any = await withStubClaude(
         `echo "first: supersecret-token-xyz; second: supersecret-token-xyz" >&2
 exit 1`,
@@ -256,6 +300,7 @@ exit 1`,
                     output,
                 })
             ),
+        "supersecret-token-xyz",
     );
     assertEquals(result.ok, false);
     const err = String(result.error ?? "");
@@ -272,7 +317,6 @@ exit 1`,
 Deno.test("redacts token in an is_error response too", async () => {
     // The CLI reports auth failures through its own JSON envelope, not stderr —
     // a path that reaches the caller and the run log the same way.
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
     const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","is_error":true,"result":"auth failed for token supersecret-token-xyz"}
@@ -285,6 +329,7 @@ JSON`,
                     output,
                 })
             ),
+        "supersecret-token-xyz",
     );
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
@@ -296,7 +341,6 @@ JSON`,
 });
 
 Deno.test("redacts token in JSON-parse-failure path too", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
     const result: any = await withStubClaude(
         `echo "non-JSON output mentioning supersecret-token-xyz somehow"`,
         () =>
@@ -307,6 +351,7 @@ Deno.test("redacts token in JSON-parse-failure path too", async () => {
                     output,
                 })
             ),
+        "supersecret-token-xyz",
     );
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
@@ -315,7 +360,6 @@ Deno.test("redacts token in JSON-parse-failure path too", async () => {
 });
 
 Deno.test("writes .claude/mcp.json when DICODE_MCP_API_KEY is set", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     Deno.env.set("DICODE_MCP_API_KEY", "dck_test_mcp_key");
     // Stub records cwd into a sentinel file so we can read it back AFTER
     // the task's finally-block runs (which removes the workdir). The
@@ -344,7 +388,6 @@ JSON`,
 });
 
 Deno.test("skips MCP wiring when DICODE_MCP_API_KEY is empty", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     Deno.env.delete("DICODE_MCP_API_KEY");
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/mcp-exists`;
@@ -366,7 +409,6 @@ JSON`,
 });
 
 Deno.test("rejects path-traversal in skills param", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const skillsDir = await Deno.makeTempDir();
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/skills-listed`;
@@ -467,7 +509,6 @@ Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired",
     // The bug this guards: previously the config was written to
     // <cwd>/.claude/mcp.json with no flag, which the CLI never auto-loads, so
     // Claude ran with zero dicode tools. Assert the flags reach the binary.
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     Deno.env.set("DICODE_MCP_API_KEY", "dck_test_mcp_key");
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/args-recorded`;
@@ -549,7 +590,6 @@ Deno.test("steps.turn: a blank message ending the chat rejects an invalid carrie
 });
 
 Deno.test("steps.turn: a message runs one turn and suspends back with the reply", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { calls, dicode } = makeSuspendDicode();
     let signalled = false;
     await withStubClaude(
@@ -587,7 +627,6 @@ Deno.test("steps.turn: a failed turn throws instead of suspending onward", async
     // The chat loop's failure seam: chatTurn returns a provider's error
     // envelope verbatim, which would end the run — as a success — carrying
     // prose instead of a reply.
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { calls, dicode } = makeSuspendDicode();
     const envelope: any = await withStubClaude(
         `echo "auth failed: bad token" >&2
@@ -612,7 +651,6 @@ exit 2`,
 });
 
 Deno.test("steps.turn: resumes Claude's prior session via --resume, and chatId stays stable", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { calls, dicode } = makeSuspendDicode();
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/args-recorded`;
@@ -647,7 +685,6 @@ JSON`,
 });
 
 Deno.test("steps.turn: rejects a path-traversal chatId in resume state; falls back to a fresh UUID workdir", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { dicode } = makeSuspendDicode();
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/cwd-recorded`;
@@ -682,7 +719,6 @@ JSON`,
 });
 
 Deno.test("steps.turn: rejects a flag-shaped claudeSessionId in resume state; omits --resume entirely", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { dicode } = makeSuspendDicode();
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/args-recorded`;
@@ -722,7 +758,6 @@ Deno.test("steps.turn: an invalid chatId also drops a valid carried claudeSessio
     // cwd-scoped, so pairing a fresh workdir (minted because chatId was
     // off-shape) with the OLD claudeSessionId would make --resume fail
     // ("No conversation found") instead of gracefully starting fresh.
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { dicode } = makeSuspendDicode();
     const sentinelDir = await Deno.makeTempDir();
     const sentinel = `${sentinelDir}/args-recorded`;
@@ -762,7 +797,6 @@ body
 `;
 
 Deno.test("installs a skill as .claude/skills/<name>/SKILL.md", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const skillsDir = await Deno.makeTempDir();
     await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
     const sentinelDir = await Deno.makeTempDir();
@@ -788,7 +822,6 @@ JSON`,
 });
 
 Deno.test("drops a skill whose frontmatter name disagrees with its filename", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const skillsDir = await Deno.makeTempDir();
     await Deno.writeTextFile(
         `${skillsDir}/legit-skill.md`,
@@ -866,7 +899,6 @@ body
 });
 
 Deno.test("counts a skill named twice once", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const skillsDir = await Deno.makeTempDir();
     await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
     // The wired count reaches the operator only through the run log, so that
@@ -902,7 +934,6 @@ JSON`,
 });
 
 Deno.test("a skill dropped from a later turn is uninstalled from the shared workdir", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const skillsDir = await Deno.makeTempDir();
     await Deno.writeTextFile(`${skillsDir}/legit-skill.md`, SKILL_DOC);
     const sentinelDir = await Deno.makeTempDir();
