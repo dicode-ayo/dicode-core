@@ -194,9 +194,10 @@ func clientIP(r *http.Request, trustProxy bool) string {
 Every link dicode puts in an outbound notification comes from `WebUIBaseURL()`
 ([authoring_service.go](../../pkg/webui/authoring_service.go)): the `resume_url`
 on the suspend hook and the `approve_url` on the approval hook. Without
-`public_url` these read `http://localhost:<port>/...`, which resolves to the
-recipient's own machine the moment the notification leaves the host — the
-operator learns something is waiting and cannot act on it.
+`public_url` these read `localhost:<port>` — `https` when `tls_cert` and
+`tls_key` are both set, `http` otherwise — which resolves to the recipient's
+own machine the moment the notification leaves the host, so the operator learns
+something is waiting and cannot act on it.
 
 `public_url` records the address the daemon already answers on, whether that is
 a reverse proxy, a tailnet name or a LAN host. It does not make the daemon
@@ -215,6 +216,13 @@ Credentials are refused for a blunter reason: this address is pasted verbatim
 into every notification, Telegram's servers included. An empty trailing `/`,
 `?` or `#` carries nothing and is dropped, since callers append
 `/approve/<token>` straight onto the stored value.
+
+**`http://` is accepted.** The `/approve/{token}` link is a bearer credential in
+a URL, so a plaintext hop exposes it to anyone on the path. It is still allowed:
+the address is usually a tailnet or VPN name where the transport is encrypted
+below HTTP, and dicode requires TLS nowhere else. Prefer `https` — either
+`tls_cert`/`tls_key` here or termination at the proxy — whenever the hop is not
+already encrypted.
 
 **The two links are not equally usable remotely.** `/approve/{token}` is
 session-less by design — the single-use token in the path is the credential —

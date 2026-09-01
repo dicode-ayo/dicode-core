@@ -64,9 +64,9 @@ lines, so truncation can never split a tag. `priority: min` and `priority: low`
 send with `disable_notification` (no sound).
 
 `resume_url` and `approve_url` are included verbatim. They are built from
-`WebUIBaseURL()`, which reads `http://localhost:<port>/...` unless
-`server.public_url` is set — set it, or the link that arrives on your phone
-resolves to your phone. `approve_url` then works as-is, since its single-use
+`WebUIBaseURL()`, which reads `localhost:<port>` — over `https` only when the
+daemon terminates TLS itself — unless `server.public_url` is set. Set it, or
+the link that arrives on your phone resolves to your phone. `approve_url` then works as-is, since its single-use
 token is the credential; `resume_url` reaches the dashboard and still needs a
 login at the far end.
 
