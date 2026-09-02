@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -1106,5 +1107,96 @@ func TestWebhookAuthGuard_AnyMode(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("any unsigned POST to asset sub-path: expected guard 401, got %d", w.Code)
+	}
+}
+
+// TestRequireAuth_UnauthenticatedBrowserRedirectsToLogin covers #808: an
+// unauthenticated browser navigation must be sent to /login, not to "/". The
+// root is itself behind requireAuth, so redirecting there bounced back to
+// itself until the browser reported ERR_TOO_MANY_REDIRECTS — the login page
+// was unreachable at the root and at every deep link whenever
+// server.auth: true.
+func TestRequireAuth_UnauthenticatedBrowserRedirectsToLogin(t *testing.T) {
+	cases := []struct {
+		name     string
+		target   string
+		wantNext string
+	}{
+		{name: "root", target: "/", wantNext: "/"},
+		{name: "deep link", target: "/tasks/repo%2Fbuild", wantNext: "/tasks/repo%2Fbuild"},
+		{name: "deep link with query", target: "/runs?status=failed", wantNext: "/runs?status=failed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAuthServer(t, "hunter2").Handler()
+
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("User-Agent", chromeMac)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusSeeOther {
+				t.Fatalf("expected 303, got %d", w.Code)
+			}
+			loc, err := url.Parse(w.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location %q: %v", w.Header().Get("Location"), err)
+			}
+			if loc.Path != "/login" {
+				t.Errorf("expected redirect to /login, got %q", w.Header().Get("Location"))
+			}
+			if got := loc.Query().Get("next"); got != tc.wantNext {
+				t.Errorf("next = %q, want %q", got, tc.wantNext)
+			}
+			// The target must itself be reachable without a session, or the
+			// loop this test exists to prevent simply moves one hop along.
+			if !isPublicPath(loc.Path) {
+				t.Errorf("%q is not a public path — the redirect target is still gated", loc.Path)
+			}
+		})
+	}
+}
+
+// TestLoginRedirectTarget covers the two things the ?next= round-trip can get
+// wrong: useEncodedPath rewrites r.URL.Path to the escaped form, so reading
+// the target back off r.URL double-escapes a task ID's %2F; and a target
+// isSafeNextPath rejects must be dropped rather than handed to the login page.
+func TestLoginRedirectTarget(t *testing.T) {
+	cases := []struct {
+		name       string
+		requestURI string
+		want       string
+	}{
+		{name: "plain path", requestURI: "/runs", want: "/login?next=%2Fruns"},
+		{name: "query preserved", requestURI: "/runs?status=failed", want: "/login?next=%2Fruns%3Fstatus%3Dfailed"},
+		{name: "encoded task id escaped once", requestURI: "/tasks/repo%2Fbuild", want: "/login?next=%2Ftasks%2Frepo%252Fbuild"},
+		{name: "absolute-form dropped", requestURI: "http://evil.test/x", want: "/login"},
+		{name: "protocol-relative dropped", requestURI: "//evil.test/x", want: "/login"},
+		{name: "empty dropped", requestURI: "", want: "/login"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &http.Request{RequestURI: tc.requestURI}
+			if got := loginRedirectTarget(r); got != tc.want {
+				t.Errorf("loginRedirectTarget(%q) = %q, want %q", tc.requestURI, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRequireAuth_UnauthenticatedAPIStays401 pins the other half of the #808
+// fix: programmatic callers must keep getting a 401 rather than a redirect to
+// an HTML login page they cannot use.
+func TestRequireAuth_UnauthenticatedAPIStays401(t *testing.T) {
+	h := newAuthServer(t, "hunter2").Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for an unauthenticated API call, got %d", w.Code)
 	}
 }

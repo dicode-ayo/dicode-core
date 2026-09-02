@@ -174,8 +174,23 @@ func (s *Server) denyWebhook(w http.ResponseWriter, r *http.Request, relayed boo
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	escaped := url.QueryEscape(r.URL.RequestURI())
-	http.Redirect(w, r, "/login?next="+escaped, http.StatusSeeOther)
+	http.Redirect(w, r, loginRedirectTarget(r), http.StatusSeeOther)
+}
+
+// loginRedirectTarget builds the /login URL an unauthenticated browser is sent
+// to, carrying the original request as ?next= so the deep link survives the
+// login round-trip. Targets that isSafeNextPath rejects are dropped rather
+// than carried, leaving a bare /login.
+//
+// The target comes from r.RequestURI, not r.URL: useEncodedPath moves RawPath
+// into Path, after which r.URL.RequestURI() re-escapes an already-escaped path
+// (a task ID's %2F becomes %252F). r.RequestURI is the client's original
+// request target and is unaffected.
+func loginRedirectTarget(r *http.Request) string {
+	if next := r.RequestURI; isSafeNextPath(next) {
+		return "/login?next=" + url.QueryEscape(next)
+	}
+	return "/login"
 }
 
 // isSafeNextPath returns true when next is a same-origin, path-only URL
@@ -308,7 +323,9 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		// /login, not /: the root is itself gated, so redirecting there
+		// bounces back to itself until the browser gives up.
+		http.Redirect(w, r, loginRedirectTarget(r), http.StatusSeeOther)
 	})
 }
 
