@@ -197,11 +197,12 @@ export function renderMessage(f: NotifyFields): RenderedMessage {
   if (f.resume_url !== undefined && !body.includes(f.resume_url)) {
     detail.push(`Resume: ${escapeHtml(f.resume_url)}`);
   }
-  // A run id alone cannot be opened from a phone. base_url is supplied by the
-  // caller (the daemon knows its own reachable address; the task does not), so
-  // the link only appears when both halves are present.
+  // base_url is supplied by the caller — the daemon knows its own reachable
+  // address, the task does not — so the link renders only when both halves are
+  // present. The daemon builds resume links to this same form, so an equal
+  // resume_url is the same link under another name.
   const logsURL = runLogsURL(f);
-  if (logsURL !== undefined && !body.includes(logsURL)) {
+  if (logsURL !== undefined && !body.includes(logsURL) && logsURL !== f.resume_url) {
     detail.push(`Logs: ${escapeHtml(logsURL)}`);
   }
   if (detail.length > 0) lines.push("", ...detail);

@@ -365,3 +365,15 @@ test("a link past the body cut still gets its own detail line", () => {
   assert.ok(!text.includes(`${"x".repeat(2000)} ${url}`), "body should be truncated");
   assert.ok(text.includes(`Logs: ${url}`), "the surviving copy of the link must be rendered");
 });
+
+test("no Logs line when it would only repeat resume_url", () => {
+  // The daemon builds resume links to the same base + "/?run=<id>" form, so on
+  // a suspend notification the two would render as adjacent identical lines.
+  const { text } = render({
+    base_url: "http://host.ts.net:8080",
+    resume_url: "http://host.ts.net:8080/?run=r1",
+  }, { runID: "r1", event: "suspended" });
+  assert.ok(text.includes("Resume: http://host.ts.net:8080/?run=r1"));
+  assert.equal(text.split("http://host.ts.net:8080/?run=r1").length - 1, 1);
+  assert.ok(!text.includes("Logs:"));
+});

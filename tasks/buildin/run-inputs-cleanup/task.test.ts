@@ -4,10 +4,9 @@
  * Run with:  make test-tasks
  *            deno test --allow-read --allow-write tasks/buildin/run-inputs-cleanup/task.test.ts
  *
- * The harness's freshDicode() does not include a `runs` sub-object (it
- * predates Task 11). Each test patches (globalThis as any).dicode.runs
- * before calling runTask() — the same ad-hoc pattern used for any SDK
- * surface that hasn't been backfilled into sdk-test.ts yet.
+ * The harness's freshDicode() does not include a `runs` sub-object, so each
+ * test patches (globalThis as any).dicode.runs before calling runTask() — the
+ * same ad-hoc pattern used for any SDK surface sdk-test.ts does not carry.
  */
 import { setupHarness } from "../../sdk-test.ts";
 await setupHarness(import.meta.url);
@@ -34,10 +33,11 @@ test("removes expired rows", async () => {
   });
 
   params.set("retention_seconds", "2592000");
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, true);
   assert.equal(res.removed, 2);
   assert.equal(res.errors, 0);
+  assert.equal(res.remaining, 0);
   assert.equal(deleted.length, 2);
   assert.ok(deleted.includes("r1"), "r1 must have been deleted");
   assert.ok(deleted.includes("r2"), "r2 must have been deleted");
@@ -50,10 +50,11 @@ test("returns ok with 0 when nothing to clean", async () => {
   });
 
   params.set("retention_seconds", "2592000");
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, true);
   assert.equal(res.removed, 0);
   assert.equal(res.errors, 0);
+  assert.equal(res.remaining, 0);
 });
 
 test("returns ok with 0 when list_expired returns null", async () => {
@@ -63,10 +64,11 @@ test("returns ok with 0 when list_expired returns null", async () => {
   });
 
   params.set("retention_seconds", "2592000");
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, true);
   assert.equal(res.removed, 0);
   assert.equal(res.errors, 0);
+  assert.equal(res.remaining, 0);
 });
 
 test("counts errors when delete_input throws", async () => {
@@ -82,10 +84,11 @@ test("counts errors when delete_input throws", async () => {
   });
 
   params.set("retention_seconds", "2592000");
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, false);
   assert.equal(res.removed, 1);
   assert.equal(res.errors, 1);
+  assert.equal(res.remaining, 0);
 });
 
 test("rejects invalid retention_seconds (non-numeric)", async () => {
@@ -146,10 +149,11 @@ test("uses default retention_seconds from task.yaml when param not set", async (
     delete_input: async () => ({ ok: true }),
   });
 
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, true);
   assert.equal(res.removed, 0);
   assert.equal(res.errors, 0);
+  assert.equal(res.remaining, 0);
   // cutoff should be roughly now - 2592000; sanity-check it's in the past
   const nowSec = Math.floor(Date.now() / 1000);
   assert.ok(
@@ -175,11 +179,40 @@ test("continues deleting remaining rows after a failure", async () => {
   });
 
   params.set("retention_seconds", "2592000");
-  const res = await runTask() as { ok: boolean; removed: number; errors: number };
+  const res = await runTask() as { ok: boolean; removed: number; errors: number; remaining: number };
   assert.equal(res.ok, false);
   assert.equal(res.removed, 2);
   assert.equal(res.errors, 1);
+  assert.equal(res.remaining, 0);
   // "a" and "c" must both have been processed despite "b" failing
   assert.ok(deleted.includes("a"), "a must have been deleted");
   assert.ok(deleted.includes("c"), "c must have been deleted after b failed");
+});
+
+test("stops at the budget and reports the rest as remaining", async () => {
+  // A partial sweep is a success — reporting failure for work that partly
+  // landed is the behaviour budget_seconds exists to remove.
+  setRunsMock({
+    list_expired: async () => [
+      { runID: "a", storageKey: "run-inputs/a", storedAt: 100 },
+      { runID: "b", storageKey: "run-inputs/b", storedAt: 100 },
+      { runID: "c", storageKey: "run-inputs/c", storedAt: 100 },
+    ],
+    delete_input: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { ok: true };
+    },
+  });
+
+  params.set("budget_seconds", "0.01");
+  const res = await runTask() as {
+    ok: boolean;
+    removed: number;
+    errors: number;
+    remaining: number;
+  };
+  assert.equal(res.ok, true);
+  assert.equal(res.errors, 0);
+  assert.equal(res.removed + res.remaining, 3);
+  assert.ok(res.remaining >= 2, "the deadline must have cut the sweep short");
 });

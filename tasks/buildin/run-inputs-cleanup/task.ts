@@ -23,7 +23,7 @@ interface ExpiredRow {
 type DicodeWithRuns = any;
 
 export default async function main({ params, dicode }: DicodeSdk) {
-  // dicode.runs.* is injected by the daemon at runtime (Task 11 SDK extension).
+  // dicode.runs.* is injected by the daemon at runtime.
   const retentionStr = (await params.get("retention_seconds")) ?? "2592000";
   const retention = Number(retentionStr);
   if (!Number.isFinite(retention) || retention <= 0) {

@@ -60,6 +60,10 @@ params:
     type: string
     default: ""
     description: "WebUI link that answers a suspended run."
+  base_url:
+    type: string
+    default: ""
+    description: "WebUI base address used to build a Logs link to the run. Supplied by the caller (typically mirroring server.public_url); the task cannot derive it."
 
 permissions:
   # Both optional so the task reaches its own actionable error instead of a
