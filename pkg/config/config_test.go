@@ -1418,10 +1418,12 @@ func TestLoad_PublicURL_RejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestLoad_PublicURL_RequiresAuthOrProxy covers the fail-closed gate. The
-// daemon binds loopback while auth is off, so a public_url with neither auth
-// nor trust_proxy either points nowhere or publishes an open dashboard.
-func TestLoad_PublicURL_RequiresAuthOrProxy(t *testing.T) {
+// TestLoad_PublicURL_RequiresAuth covers the fail-closed gate: publishing an
+// off-loopback address is only safe behind the auth wall, since requireAuth
+// falls open when server.auth is false and GET /api/audit then serves live
+// approve tokens. trust_proxy does not substitute — the daemon cannot verify a
+// fronting proxy authenticates.
+func TestLoad_PublicURL_RequiresAuth(t *testing.T) {
 	tests := []struct {
 		name       string
 		auth       bool
@@ -1429,9 +1431,9 @@ func TestLoad_PublicURL_RequiresAuthOrProxy(t *testing.T) {
 		wantErr    bool
 	}{
 		{"neither", false, false, true},
+		{"trust_proxy only", false, true, true},
 		{"auth", true, false, false},
-		{"trust_proxy", false, true, false},
-		{"both", true, true, false},
+		{"auth and trust_proxy", true, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

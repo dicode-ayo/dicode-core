@@ -438,8 +438,9 @@ type ServerConfig struct {
 	// PublicURL is the scheme://host[:port] at which this daemon is reachable
 	// from outside the machine; notification links are built from it, and an
 	// empty value falls back to the loopback form. Must be a bare authority —
-	// no path, query, fragment or credentials — and requires server.auth or
-	// server.trust_proxy; validate enforces both.
+	// no path, query, fragment or credentials — and requires server.auth,
+	// since publishing an address off-loopback is only safe behind the auth
+	// wall; validate enforces both.
 	PublicURL string `yaml:"public_url,omitempty"`
 	// BcryptCost is the work factor used when hashing the stored auth
 	// passphrase. Valid range 4–14. 0 means "unset" → defaults to 12 in
@@ -770,13 +771,16 @@ func (cfg *Config) validate() error {
 		// this value, so only the bare authority is stored: a trailing "/",
 		// "?" or "#" carries nothing and would corrupt every joined link.
 		cfg.Server.PublicURL = u.Scheme + "://" + u.Host
-		// The daemon binds loopback only while auth is off (bindAddr,
-		// pkg/webui/server.go), so an off-host address is either unreachable
-		// or fronted by a proxy. trust_proxy is how that proxy is declared;
-		// without either flag the setting would publish an unauthenticated
-		// dashboard, so fail closed rather than hand out the link.
-		if !cfg.Server.Auth && !cfg.Server.TrustProxy {
-			return errors.New("server.public_url: requires server.auth: true, or server.trust_proxy: true when a reverse proxy fronts the daemon")
+		// Publishing an address is only safe behind the auth wall. Without
+		// server.auth every "authenticated" endpoint falls open (requireAuth
+		// early-returns, pkg/webui/auth.go) — including GET /api/audit, whose
+		// rows carry live single-use approve tokens — so a reachable off-host
+		// address would hand the control plane, and the approval gate with it,
+		// to any unauthenticated caller. A fronting proxy that authenticates
+		// does not change this: the daemon cannot verify it does, so it will
+		// not take that on trust. Fail closed instead of minting the link.
+		if !cfg.Server.Auth {
+			return errors.New("server.public_url: requires server.auth: true")
 		}
 	}
 	// server_url (single-instance shorthand) and server_urls (HA fan-out list)

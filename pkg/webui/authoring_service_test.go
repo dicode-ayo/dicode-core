@@ -81,9 +81,8 @@ func TestEditTask_ConcurrentSameTaskNoServerError(t *testing.T) {
 
 // TestWebUIBaseURL covers the precedence every outbound link depends on:
 // server.public_url wins outright, TLS only picks the scheme for the loopback
-// fallback. The auth and trust_proxy flags are inert here — WebUIBaseURL never
-// reads them — and are set only to keep each fixture one that config.validate
-// would admit.
+// fallback. Auth is inert here — WebUIBaseURL never reads it — and is set only
+// to keep each public_url fixture one that config.validate would admit.
 func TestWebUIBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -108,7 +107,7 @@ func TestWebUIBaseURL(t *testing.T) {
 		{
 			name: "public_url keeps its own scheme and port over the TLS guess",
 			cfg: config.ServerConfig{
-				Port: 8080, TrustProxy: true,
+				Port: 8080, Auth: true,
 				TLSCertFile: "cert.pem", TLSKeyFile: "key.pem",
 				PublicURL: "http://dicode.lan:9000",
 			},

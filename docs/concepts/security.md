@@ -32,7 +32,7 @@ server:
   secret: ""                          # optional YAML override — see passphrase source priority below
   allowed_origins: []                 # empty = same-origin only
   trust_proxy: false                  # set true when behind nginx/Caddy
-  public_url: ""                      # scheme://host[:port] that notification links are built from; requires auth or trust_proxy
+  public_url: ""                      # scheme://host[:port] that notification links are built from; requires auth
   device_binding: off                 # off | warn | strict — bind trusted-device cookie to IP subnet + UA family
 ```
 
@@ -203,11 +203,16 @@ something is waiting and cannot act on it.
 a reverse proxy, a tailnet name or a LAN host. It does not make the daemon
 reachable; that stays the operator's problem.
 
-**It is refused unless `auth` or `trust_proxy` is set.** `bindAddr()` binds
-`127.0.0.1` while auth is off, so an off-host address either points nowhere or
-is served by a proxy on the same host — and `trust_proxy` is how that proxy is
-declared. Accepting it with neither flag would publish an unauthenticated
-dashboard, so config load fails instead.
+**It is refused unless `server.auth` is set.** Publishing an off-loopback
+address is only safe behind the auth wall. With auth off, `requireAuth`
+early-returns and every "authenticated" endpoint falls open — including
+`GET /api/audit`, whose rows carry live single-use approve tokens — so a
+reachable address hands the whole control plane, and the approval gate with it,
+to any unauthenticated caller. A fronting proxy that authenticates does not
+lift the requirement: the daemon cannot verify that it does, so `trust_proxy`
+(which only governs `X-Forwarded-For` parsing) is not accepted as a substitute.
+Run such a proxy *and* `server.auth: true` — the daemon's own wall is cheap
+insurance against the proxy being misconfigured or bypassed on the LAN.
 
 **Only a bare authority is accepted.** The web UI serves root-relative URLs, so
 mounting it under a subpath would fix the notification link and break every
@@ -964,7 +969,7 @@ All security-relevant fields in `ServerConfig`:
 | `secret` | string | `""` | YAML passphrase override — highest priority; if omitted dicode auto-generates one on first boot and stores it in SQLite |
 | `allowed_origins` | []string | `[]` | CORS allowlist — empty = same-origin only |
 | `trust_proxy` | bool | `false` | Trust `X-Forwarded-For` (set when behind a reverse proxy) |
-| `public_url` | string | `""` | Address the daemon is reachable at from outside the machine; notification links are built from it. `scheme://host[:port]` — no path, query, fragment or credentials. Rejected unless `auth` or `trust_proxy` is set |
+| `public_url` | string | `""` | Address the daemon is reachable at from outside the machine; notification links are built from it. `scheme://host[:port]` — no path, query, fragment or credentials. Rejected unless `auth` is set |
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
 | `bcrypt_cost` | int | `12` | bcrypt work factor for the stored passphrase hash; valid range 4–14 |
 | `device_binding` | string | `off` | Bind trusted-device cookie to issuing IP subnet (/24, /48) + UA family. `off` \| `warn` \| `strict` |
