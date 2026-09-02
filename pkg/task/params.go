@@ -42,8 +42,10 @@ func (e ParamErrors) Error() string {
 // in a calling agent's payload surface immediately rather than being
 // silently dropped at runtime.
 //
-// Missing-but-required fields are flagged. Fields with a declared default
-// fall back to that default when absent.
+// Missing-but-required fields are flagged, as are required fields whose
+// value coerces to the empty string: params reach a task as strings, so an
+// empty value is indistinguishable from an absent one on the far side.
+// Fields with a declared default fall back to that default when absent.
 //
 // Type coercion rules:
 //   - "string" / "" — accepts JSON string, number, or boolean (stringified).
@@ -85,6 +87,10 @@ func ValidateParams(declared Params, input map[string]any) (map[string]string, P
 		coerced, err := coerceParam(p.Type, raw)
 		if err != "" {
 			errs = append(errs, ParamError{Field: p.Name, Message: err})
+			continue
+		}
+		if p.Required && coerced == "" {
+			errs = append(errs, ParamError{Field: p.Name, Message: "required"})
 			continue
 		}
 		out[p.Name] = coerced
@@ -163,4 +169,34 @@ func coerceParam(declaredType string, raw any) (string, string) {
 		}
 		return fmt.Sprintf("%v", raw), ""
 	}
+}
+
+// MissingRequiredParams reports which of the spec's required params a
+// fire-time override map leaves unsatisfied. Names come back in declaration
+// order.
+//
+// The effective value is computed the way runtime.MergeParams computes it: an
+// override wins wherever the key is present, empty string included, so a
+// declared Default satisfies the requirement only when the fire supplies no
+// value of its own. An effective value of "" is unsatisfied — params reach a
+// task as strings, where empty and absent are the same thing.
+//
+// The schema is open here, unlike ValidateParams: keys the spec does not
+// declare are ignored rather than rejected, because every fire path merges
+// undeclared overrides through to the runtime untouched.
+func MissingRequiredParams(declared Params, overrides map[string]string) []string {
+	var missing []string
+	for _, p := range declared {
+		if !p.Required {
+			continue
+		}
+		effective, ok := overrides[p.Name]
+		if !ok {
+			effective = p.Default
+		}
+		if effective == "" {
+			missing = append(missing, p.Name)
+		}
+	}
+	return missing
 }
