@@ -178,8 +178,10 @@ export function renderMessage(f: NotifyFields): RenderedMessage {
 
   const lines: string[] = [`<b>${escapeHtml(cut(f.title ?? derived.title, TITLE_MAX))}</b>`];
 
-  const body = f.body ?? derived.body;
-  if (body) lines.push("", escapeHtml(cut(body, BODY_MAX)));
+  // Dedup below tests the *shown* body: a URL past the cut is not in the
+  // message, so matching the full text would drop the only copy of the link.
+  const body = cut(f.body ?? derived.body, BODY_MAX);
+  if (body) lines.push("", escapeHtml(body));
 
   const detail: string[] = [];
   if (f.task_id !== undefined) detail.push(`Task: <code>${escapeHtml(f.task_id)}</code>`);

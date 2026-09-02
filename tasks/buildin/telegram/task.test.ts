@@ -350,3 +350,18 @@ test("a trailing slash on base_url does not double up in the link", () => {
   const f = collectFields({ base_url: "http://host.ts.net:8080/" }, { runID: "r1" });
   assert.equal(runLogsURL(f), "http://host.ts.net:8080/?run=r1");
 });
+
+test("a link past the body cut still gets its own detail line", () => {
+  // The dedup exists because the suspend hook inlines its link in the body.
+  // When the body is long enough that the link falls past BODY_MAX, the
+  // rendered message no longer contains it, so the detail line is the only
+  // copy left and must not be suppressed.
+  const url = "http://host.ts.net:8080/?run=r1";
+  const { text } = render({ base_url: "http://host.ts.net:8080" }, {
+    runID: "r1",
+    status: "failure",
+    body: "x".repeat(2000) + " " + url,
+  });
+  assert.ok(!text.includes(`${"x".repeat(2000)} ${url}`), "body should be truncated");
+  assert.ok(text.includes(`Logs: ${url}`), "the surviving copy of the link must be rendered");
+});

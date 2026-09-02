@@ -47,7 +47,7 @@ export default async function main({ params, dicode }: DicodeSdk) {
     | null;
 
   if (!rows || rows.length === 0) {
-    return { ok: true, removed: 0, errors: 0 };
+    return { ok: true, removed: 0, errors: 0, remaining: 0 };
   }
 
   let removed = 0;
