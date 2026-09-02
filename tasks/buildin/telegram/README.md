@@ -13,17 +13,17 @@ notification daemon, this reaches you from a headless server.
 | Source | Config key | How the data arrives |
 |---|---|---|
 | A run suspended, or a suspended conversation ended | `ai.notify_task` | params: `title`, `body`, `priority`, `event`, `run_id`, `task_id`, `resume_url`, `status` (on `ended`) |
-| A task went pending approval | `approval.notify_task` | params: `task_id`, `hash`, `approve_url` |
+| A task went pending approval | `approval.notify_task` | params: `title`, `body`, `priority`, `event`, `task_id`, `hash`, `approve_url` |
 | A run failed | `defaults.on_failure_chain` | chain **input**: `taskID`, `runID`, `status`, `output` |
 
 Params are read first, then `input` — the failure chain fires through
 `fireAsync` with an `Input:` map, not params, and stamps its task/run keys in
 camelCase.
 
-Only the suspend hook sends rendered `title`/`body`. The approval hook sends
-neither, so the task composes its own headline and text from whatever fields
-are present; a notification with no recognized field at all still sends. No
-field is required, and none is validated at fire time.
+Both hooks send rendered `title`/`body`; the failure chain sends neither, so
+the task composes its own headline and text from whatever fields are present.
+A notification with no recognized field at all still sends. No field is
+required, and none is validated at fire time.
 
 ## Setup
 

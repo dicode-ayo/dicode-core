@@ -18,8 +18,8 @@ params:
       Target chat, channel or user ID (e.g. -1001234567890). Falls back to the
       TELEGRAM_CHAT_ID secret when empty.
 
-  # Every field below is optional: the approval hook sends only task_id / hash /
-  # approve_url, so a message is composed from whatever fields arrive.
+  # Every field below is optional: the failure chain sends no rendered text, so
+  # a message is composed from whatever fields arrive.
   title:
     type: string
     default: ""
@@ -35,7 +35,7 @@ params:
   event:
     type: string
     default: ""
-    description: "suspended | ended, from the suspend hook."
+    description: "suspended | ended | approval_pending, from the notification hooks."
   status:
     type: string
     default: ""

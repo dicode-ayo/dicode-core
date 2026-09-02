@@ -58,7 +58,7 @@ test("ended event: low priority is delivered silently", () => {
   assert.equal(silent, true);
 });
 
-test("approval hook: composes a message from task_id/hash/approve_url alone", () => {
+test("bare approval fields: composes a message when no rendered text arrives", () => {
   const { text } = render({
     task_id: "buildin/ai-agent-claude-cli",
     hash: "abc123",
@@ -71,10 +71,26 @@ test("approval hook: composes a message from task_id/hash/approve_url alone", ()
   assert.ok(text.includes("Approve: http://localhost:8080/approve?t=tok"), text);
 });
 
-test("approval hook: an empty approve_url still yields a usable message", () => {
+test("bare approval fields: an empty approve_url still yields a usable message", () => {
   const { text } = render({ task_id: "buildin/x", hash: "h1", approve_url: "" });
   assert.ok(text.includes("pending approval"), text);
   assert.equal(text.includes("Approve:"), false);
+});
+
+test("approval hook: the inlined approve link is not repeated as a detail line", () => {
+  const url = "http://localhost:8080/approve?t=tok";
+  const { text } = render({
+    title: "dicode: a task is waiting for approval",
+    body: `Task buildin/deploy is held pending approval and will not run until it is approved. Approve: ${url}`,
+    priority: "default",
+    event: "approval_pending",
+    task_id: "buildin/deploy",
+    hash: "abc123",
+    approve_url: url,
+  });
+
+  assert.ok(text.includes("<b>dicode: a task is waiting for approval</b>"), text);
+  assert.equal(text.split(url).length - 1, 1, text);
 });
 
 test("failure chain: reads the engine-stamped input, not params", () => {

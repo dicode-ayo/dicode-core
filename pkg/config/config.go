@@ -239,10 +239,11 @@ type ApprovalConfig struct {
 	Enabled *bool `yaml:"enabled,omitempty"`
 
 	// NotifyTask is fired (manual trigger) on the transition into pending with
-	// string params {task_id, hash, approve_url}; delivery (slack/email/ntfy)
-	// is that task's concern. It should be a builtin or trusted task — the
-	// notify task is itself subject to the gate, so an untrusted one would sit
-	// pending and never fire. Empty → WebUI broadcast + WARN log only.
+	// a rendered title/body and the structured {event, task_id, hash,
+	// approve_url} alongside; delivery (slack/email/ntfy) is that task's
+	// concern. It should be a builtin or trusted task — the notify task is
+	// itself subject to the gate, so an untrusted one would sit pending and
+	// never fire. Empty → WebUI broadcast + WARN log only.
 	NotifyTask string `yaml:"notify_task,omitempty"`
 
 	// Sources maps a source name (the first segment of a namespaced task ID,

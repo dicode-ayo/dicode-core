@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -39,11 +40,45 @@ func TestApprovalNotifyFiresWithParams(t *testing.T) {
 		"task_id":     "repo/deploy",
 		"hash":        "abc123",
 		"approve_url": "https://host/approve/tok123",
+		"event":       "approval_pending",
+		"title":       "dicode: a task is waiting for approval",
+		"priority":    "default",
 	}
 	for k, v := range want {
 		if f.params[k] != v {
 			t.Fatalf("param %q = %q, want %q", k, f.params[k], v)
 		}
+	}
+	// buildin/notifications hard-fails on an empty title or body, so a delivery
+	// task that composes nothing itself must still be able to send.
+	if body := f.params["body"]; !strings.Contains(body, "repo/deploy") ||
+		!strings.Contains(body, "https://host/approve/tok123") {
+		t.Fatalf("body = %q, want the task ID and the approve link", body)
+	}
+}
+
+func TestApprovalNotifyBodyOmitsEmptyApproveURL(t *testing.T) {
+	var fires []fireCall
+	n := approvalNotifier{
+		notifyTask: "buildin/notifications",
+		mintLink:   func(string) (string, error) { return "", errors.New("not pending") },
+		fire: func(id string, params map[string]string) error {
+			fires = append(fires, fireCall{id, params})
+			return nil
+		},
+	}
+
+	n.notify("repo/deploy", "abc123")
+
+	if len(fires) != 1 {
+		t.Fatalf("fires = %v, want 1", fires)
+	}
+	body := fires[0].params["body"]
+	if body == "" {
+		t.Fatal("body is empty; buildin/notifications rejects that")
+	}
+	if strings.Contains(body, "Approve:") {
+		t.Fatalf("body = %q, want no dangling Approve: label when no link was minted", body)
 	}
 }
 
