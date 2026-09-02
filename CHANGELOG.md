@@ -12,6 +12,7 @@
 ### Bug Fixes
 
 * **approval:** render title/body in the approval notify hook ([#811](https://github.com/dicode-ayo/dicode-core/issues/811)) ([5e05768](https://github.com/dicode-ayo/dicode-core/commit/5e05768ff41501f256fc2dd79e30e46c5092aacf)), closes [#797](https://github.com/dicode-ayo/dicode-core/issues/797)
+* **params:** enforce required params on the fire path, not only in task test ([#812](https://github.com/dicode-ayo/dicode-core/issues/812)) ([a9e52ca](https://github.com/dicode-ayo/dicode-core/commit/a9e52caac2281b4f43a2057c5fa5abf87d759f85))
 * **webui:** send unauthenticated browsers to /login, not to the gated root ([#809](https://github.com/dicode-ayo/dicode-core/issues/809)) ([331132c](https://github.com/dicode-ayo/dicode-core/commit/331132c13e1a566ffc770597731c0ef6e9c37f9f)), closes [#808](https://github.com/dicode-ayo/dicode-core/issues/808)
 
 
