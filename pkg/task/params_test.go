@@ -148,3 +148,66 @@ func TestParamErrors_Error(t *testing.T) {
 		t.Error("multi-field ParamErrors should produce a message")
 	}
 }
+
+func TestValidateParams_RequiredRejectsEmptyValue(t *testing.T) {
+	declared := Params{{Name: "title", Type: "string", Required: true}}
+	out, errs := ValidateParams(declared, map[string]any{"title": ""})
+	if len(errs) != 1 || errs[0].Field != "title" || errs[0].Message != "required" {
+		t.Fatalf("expected a single 'required' error on title, got %v", errs)
+	}
+	if _, ok := out["title"]; ok {
+		t.Errorf("rejected field should not appear in the coerced map, got %v", out)
+	}
+}
+
+func TestMissingRequiredParams(t *testing.T) {
+	declared := Params{
+		{Name: "title", Required: true},
+		{Name: "body", Required: true},
+		{Name: "priority", Default: "default"},
+		{Name: "icon"},
+		{Name: "root", Required: true, Default: "${DATADIR}/blobs"},
+	}
+
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		want      []string
+	}{
+		{"none supplied", nil, []string{"title", "body"}},
+		{"empty value counts as missing", map[string]string{"title": "", "body": "x"}, []string{"title"}},
+		{"overrides satisfy", map[string]string{"title": "t", "body": "b"}, nil},
+		{"declared default satisfies an absent override", map[string]string{"title": "t", "body": "b", "root": ""}, []string{"root"}},
+		{"undeclared keys are ignored", map[string]string{"title": "t", "body": "b", "event": "approval_pending"}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MissingRequiredParams(declared, tc.overrides)
+			if len(got) != len(tc.want) {
+				t.Fatalf("MissingRequiredParams = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("MissingRequiredParams = %v, want %v (declaration order)", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestMissingRequiredParams_EmptyOverrideClobbersDefault pins agreement with
+// runtime.MergeParams: an override is applied wherever the key is present, so
+// an empty one replaces the declared default rather than falling back to it.
+// Counting the param as satisfied here would hand the task "" — the state
+// required is meant to exclude.
+func TestMissingRequiredParams_EmptyOverrideClobbersDefault(t *testing.T) {
+	declared := Params{{Name: "body", Required: true, Default: "from the spec"}}
+
+	if got := MissingRequiredParams(declared, nil); got != nil {
+		t.Errorf("absent override should fall back to the default, got missing=%v", got)
+	}
+	got := MissingRequiredParams(declared, map[string]string{"body": ""})
+	if len(got) != 1 || got[0] != "body" {
+		t.Errorf("empty override should be missing, got %v", got)
+	}
+}

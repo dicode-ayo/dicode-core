@@ -100,6 +100,8 @@ permissions:
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
 | `params[].default` | string | | Default value (all params are strings) |
+| `params[].type` | string | | `string` (default) \| `number` \| `boolean` \| `cron`. Coercion is applied by `dicode task test`; the fire path treats every value as a string. |
+| `params[].required` | bool | | The run fails before dispatch when the param's effective value is empty. See [Required params](#required-params). |
 | `tags` | list of strings | | Tags for filtering (future: source selectors) |
 | `mcp_exposed` | bool | | When `false` (default), the task is hidden from MCP `tools/list` and `tools/call`. Set to `true` to expose the task to MCP clients. |
 | `run_result` | object | | Per-task return-value persistence config — see [Suppressing return-value persistence](#suppressing-return-value-persistence) |
@@ -109,6 +111,32 @@ permissions:
 | `webui.nav.label` | string | | Link text shown in the WebUI header nav. Required if `webui.nav` is set. |
 | `webui.nav.order` | int | | Sort position among contributed nav entries, ascending (default `0`). Ties break by task ID. |
 | `webui.nav.icon` | string | | Optional text or emoji prefix rendered verbatim before the nav label. |
+
+### Required params
+
+`required: true` is enforced on every fire path — cron, webhook, manual, chain,
+pipeline stage, resume — not only by `dicode task test`. The rule is applied to
+the param's *effective* value, computed the way the runtime computes it: the
+fire's override wherever the fire supplies the key, the declared `default`
+otherwise. An empty effective value is unsatisfied, because params reach a task
+as strings, where empty and absent are the same thing.
+
+A `default` therefore rescues a param the fire omits, but not one the fire
+supplies as `""` — an override is applied wherever its key is present, so the
+empty value replaces the default rather than falling back to it.
+
+An unsatisfied param fails the run *before* dispatch. The task body never
+executes, and the run records a `fail_reason` naming the fields:
+
+    params_invalid: title, body are required
+
+Undeclared params are not an error. Keys the spec does not list ride through to
+the task untouched, which is what lets a caller attach structured context (the
+approval hook's `event` / `task_id` / `approve_url`) to a delivery task that
+declares only the fields it renders.
+
+`dicode task test` additionally rejects undeclared keys and coerces values to
+their declared `type`; the fire path does neither.
 
 ### Trigger types
 

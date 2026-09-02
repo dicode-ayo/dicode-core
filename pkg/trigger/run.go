@@ -17,6 +17,7 @@ import (
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
@@ -411,6 +412,25 @@ func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
 	return true
 }
 
+// preflightParams enforces `required: true` for every trigger source. The
+// check belongs in runTask on two counts: it is the one point every fire path
+// reaches, and the failure has to land on the run record, since a fire-time
+// error return reaches only the caller — often a best-effort hook.
+//
+// Only the required rule is enforced, not ValidateParams' closed schema:
+// undeclared keys ride through to the runtime the way MergeParams merges them,
+// so an extra key is not a fire-time failure.
+func preflightParams(spec *task.Spec, params map[string]string) (status, reason string) {
+	missing := task.MissingRequiredParams(spec.Params, params)
+	if len(missing) == 0 {
+		return "", ""
+	}
+	if len(missing) == 1 {
+		return registry.StatusFailure, "params_invalid: " + missing[0] + " is required"
+	}
+	return registry.StatusFailure, "params_invalid: " + strings.Join(missing, ", ") + " are required"
+}
+
 // runTask executes a task synchronously and handles all post-run bookkeeping
 // (logging, notifications, hooks, daemon restart). Returns status and result.
 func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult) {
@@ -423,10 +443,11 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 
 	start := time.Now()
 
-	// Preflight env-resolver: typed envresolve failures
-	// (provider_unavailable / required_secret_missing / provider_misconfigured)
-	// are recorded as the run's fail_reason BEFORE dispatch so the operator
-	// gets a categorized reason instead of an opaque executor error.
+	// Preflight, in two legs, both recording a categorized fail_reason BEFORE
+	// dispatch so the operator gets a reason instead of an opaque executor
+	// error: declared-but-unsatisfied required params (params_invalid), then
+	// the env-resolver's typed failures (provider_unavailable /
+	// required_secret_missing / provider_misconfigured).
 	//
 	// On preflight success the *Resolved is forwarded to the runtime via
 	// opts.PreResolvedEnv so provider tasks fire exactly once per consumer
@@ -435,13 +456,17 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	// inline-resolver path.
 	var status string
 	var result *pkgruntime.RunResult
-	preResolved, preStatus, preReason := e.preflightEnv(runCtx, spec)
+	var preResolved *envresolve.Resolved
+	preStatus, preReason := preflightParams(spec, opts.Params)
+	if preStatus == "" {
+		preResolved, preStatus, preReason = e.preflightEnv(runCtx, spec)
+	}
 	if preStatus != "" {
 		if err := e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason); err != nil {
 			e.log.Warn("FinishRun: preflight failure", zap.String("run", opts.RunID), zap.Error(err))
 		}
 		// Chain-on-failure semantics: dispatch normally fires FireChain;
-		// the preflight-env short-circuit replicates it so chain triggers
+		// the preflight short-circuit replicates it so chain triggers
 		// and on_failure_chain still observe the failure.
 		//
 		// Called synchronously so the caller's deferred cleanup() (which
