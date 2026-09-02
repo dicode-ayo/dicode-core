@@ -35,6 +35,31 @@ func TestSanitizeParams_RedactsByName(t *testing.T) {
 	}
 }
 
+// Every run audits its params through this list (pkg/trigger/run.go),
+// including the approval hook's own notify_task fire, so an unredacted
+// approve_url puts a working approval link in the audit trail.
+func TestSanitizeParams_RedactsApproveURL(t *testing.T) {
+	got := SanitizeParams(map[string]string{
+		"task_id":     "repo/pending-task",
+		"hash":        "abc123",
+		"approve_url": "https://host/approve/tok-secret-xyz",
+	})
+
+	var m map[string]string
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, got)
+	}
+	if m["approve_url"] != Redacted {
+		t.Errorf("approve_url: got %q, want %q", m["approve_url"], Redacted)
+	}
+	if m["task_id"] != "repo/pending-task" {
+		t.Errorf("task_id should not be redacted: got %q", m["task_id"])
+	}
+	if strings.Contains(got, "tok-secret-xyz") {
+		t.Errorf("sanitized output leaks the approval token: %s", got)
+	}
+}
+
 func TestSanitizeParams_RedactsEnvAndSecretRefs(t *testing.T) {
 	got := SanitizeParams(map[string]string{
 		"target":  "env:GH_TOKEN",

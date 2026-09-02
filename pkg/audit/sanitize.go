@@ -27,6 +27,9 @@ var denyExact = map[string]struct{}{
 	"bearer":        {},
 	"credential":    {},
 	"credentials":   {},
+	// The URL embeds a single-use approval token, so the value is a bearer
+	// credential even though the name matches no substring rule.
+	"approve_url": {},
 }
 
 // denySubstrings is matched case-insensitively as a substring of the param

@@ -130,14 +130,10 @@ var denyListExact = map[string]struct{}{
 	"secret":              {},
 	"token":               {},
 	"bearer":              {},
-	// approve_url (pkg/daemon/approval_notify.go) embeds a single-use approval
-	// token — MintApproveLink returns WebUIBaseURL()+"/approve/"+token — so the
-	// URL itself is a bearer credential, not just a link. Neither this map nor
-	// denyListSubstrings otherwise catches the field name "approve_url" (#798).
-	// resume_url (pkg/daemon/suspend_notify.go) is deliberately not listed
-	// here: it carries only a run ID (WebUIBaseURL()+"/?run="+runID) — the
-	// resume token itself is resolved server-side against the caller's
-	// session, so the bare link grants nothing on its own.
+	// The URL embeds a single-use approval token, so the value is a bearer
+	// credential even though the name matches no substring rule. resume_url
+	// stays off this list: it carries only a run ID, and the resume token is
+	// resolved server-side against the caller's session.
 	"approve_url": {},
 }
 

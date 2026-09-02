@@ -23,13 +23,9 @@ func TestShouldRedactName_ExactMatches(t *testing.T) {
 }
 
 func TestShouldRedactName_ApproveURL(t *testing.T) {
-	// approve_url (pkg/daemon/approval_notify.go) carries a single-use
-	// approval token embedded in the URL itself (#798) — it must be redacted
-	// even though it matches neither the pre-existing exact list nor any
-	// substring rule ("approve_url" contains none of signature/token/secret/
-	// password/key).
+	// The name matches no substring rule, so only the exact list can catch it.
 	if !shouldRedactName("approve_url") {
-		t.Errorf("shouldRedactName(approve_url) = false, want true (#798)")
+		t.Errorf("shouldRedactName(approve_url) = false, want true")
 	}
 	if !shouldRedactName("APPROVE_URL") {
 		t.Errorf("shouldRedactName(APPROVE_URL) = false, want true (case-insensitive)")
@@ -37,11 +33,10 @@ func TestShouldRedactName_ApproveURL(t *testing.T) {
 }
 
 func TestShouldRedactName_ResumeURLNotRedacted(t *testing.T) {
-	// resume_url (pkg/daemon/suspend_notify.go) is a deliberate non-match: it
-	// carries only a run ID, not a bearer credential — the resume token is
-	// resolved server-side against the caller's session (#798).
+	// resume_url carries only a run ID; the resume token is resolved
+	// server-side against the caller's session.
 	if shouldRedactName("resume_url") {
-		t.Errorf("shouldRedactName(resume_url) = true, want false (not a credential — see #798)")
+		t.Errorf("shouldRedactName(resume_url) = true, want false")
 	}
 }
 
@@ -279,13 +274,9 @@ func TestRedactParams_PrimitiveAndNil(t *testing.T) {
 	}
 }
 
-// TestBuildPersistedInputFromRunOpts_RedactsApproveURL is the end-to-end
-// regression for #798: the approval hook fires its notify_task with
-// {task_id, hash, approve_url} (pkg/daemon/approval_notify.go), and the
-// engine persists that via BuildPersistedInputFromRunOpts (pkg/trigger/
-// run.go, pkg/trigger/pipeline_runner.go). Before approve_url was added to
-// denyListExact, the single-use approval token embedded in that URL landed
-// in the persisted (encrypted-at-rest, 30-day-retained) run input verbatim.
+// The approval hook fires its notify_task with {task_id, hash, approve_url},
+// and the engine persists those params through this function — the path by
+// which the approval token reaches the retained run-input blob.
 func TestBuildPersistedInputFromRunOpts_RedactsApproveURL(t *testing.T) {
 	params := map[string]string{
 		"task_id":     "repo/pending-task",
@@ -315,10 +306,8 @@ func TestBuildPersistedInputFromRunOpts_RedactsApproveURL(t *testing.T) {
 	}
 }
 
-// TestBuildPersistedInputFromRunOpts_KeepsResumeURL guards the deliberate
-// non-redaction of resume_url (#798): it is a bare run ID link, not a
-// credential, so persisting it lets a replay/audit view show the real
-// destination rather than a stripped placeholder.
+// resume_url is a bare run-ID link, not a credential, so persisting it lets
+// a replay view show the real destination rather than a placeholder.
 func TestBuildPersistedInputFromRunOpts_KeepsResumeURL(t *testing.T) {
 	params := map[string]string{
 		"task_id":    "repo/some-task",
