@@ -19,6 +19,10 @@ params:
     type: number
     default: "2592000"   # 30 days
     description: "Retain inputs for at most this many seconds. Daemon overrides via dicode.yaml."
+  budget_seconds:
+    type: number
+    default: "90"
+    description: "Stop sweeping after this many seconds so a large backlog drains across ticks instead of being killed at the timeout."
 
 permissions:
   dicode:

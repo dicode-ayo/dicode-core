@@ -21,8 +21,8 @@ function setRunsMock(mock: { list_expired: any; delete_input: any }) {
 
 test("removes expired rows", async () => {
   const expired = [
-    { RunID: "r1", StorageKey: "run-inputs/r1", StoredAt: 100 },
-    { RunID: "r2", StorageKey: "run-inputs/r2", StoredAt: 100 },
+    { runID: "r1", storageKey: "run-inputs/r1", storedAt: 100 },
+    { runID: "r2", storageKey: "run-inputs/r2", storedAt: 100 },
   ];
   const deleted: string[] = [];
   setRunsMock({
@@ -72,8 +72,8 @@ test("returns ok with 0 when list_expired returns null", async () => {
 test("counts errors when delete_input throws", async () => {
   setRunsMock({
     list_expired: async () => [
-      { RunID: "good", StorageKey: "run-inputs/good", StoredAt: 100 },
-      { RunID: "bad",  StorageKey: "run-inputs/bad",  StoredAt: 100 },
+      { runID: "good", storageKey: "run-inputs/good", storedAt: 100 },
+      { runID: "bad",  storageKey: "run-inputs/bad",  storedAt: 100 },
     ],
     delete_input: async (runID: string) => {
       if (runID === "bad") throw new Error("storage backend down");
@@ -163,9 +163,9 @@ test("continues deleting remaining rows after a failure", async () => {
   const deleted: string[] = [];
   setRunsMock({
     list_expired: async () => [
-      { RunID: "a", StorageKey: "run-inputs/a", StoredAt: 100 },
-      { RunID: "b", StorageKey: "run-inputs/b", StoredAt: 100 },
-      { RunID: "c", StorageKey: "run-inputs/c", StoredAt: 100 },
+      { runID: "a", storageKey: "run-inputs/a", storedAt: 100 },
+      { runID: "b", storageKey: "run-inputs/b", storedAt: 100 },
+      { runID: "c", storageKey: "run-inputs/c", storedAt: 100 },
     ],
     delete_input: async (runID: string) => {
       if (runID === "b") throw new Error("transient error");

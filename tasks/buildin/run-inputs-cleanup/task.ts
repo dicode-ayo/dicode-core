@@ -11,10 +11,12 @@
 
 import type { DicodeSdk } from "../../sdk.ts";
 
+// Field names are the JSON tags on registry.ExpiredInput, not its Go field
+// names — the daemon marshals RunID as "runID".
 interface ExpiredRow {
-  RunID: string;
-  StorageKey: string;
-  StoredAt: number;
+  runID: string;
+  storageKey: string;
+  storedAt: number;
 }
 
 // deno-lint-ignore no-explicit-any
@@ -28,6 +30,16 @@ export default async function main({ params, dicode }: DicodeSdk) {
     return { ok: false, error: `invalid retention_seconds: ${retentionStr}` };
   }
 
+  // A backlog can exceed what one tick can delete inside task.yaml's timeout,
+  // and being killed mid-sweep reports failure for work that partly succeeded.
+  // Stop at the budget instead and let the next tick continue.
+  const budgetStr = (await params.get("budget_seconds")) ?? "90";
+  const budget = Number(budgetStr);
+  if (!Number.isFinite(budget) || budget <= 0) {
+    return { ok: false, error: `invalid budget_seconds: ${budgetStr}` };
+  }
+  const deadline = Date.now() + budget * 1000;
+
   const cutoff = Math.floor(Date.now() / 1000) - retention;
 
   const rows = (await (dicode as DicodeWithRuns).runs.list_expired({ before_ts: cutoff })) as
@@ -40,15 +52,21 @@ export default async function main({ params, dicode }: DicodeSdk) {
 
   let removed = 0;
   let errors = 0;
-  for (const row of rows) {
+  let remaining = 0;
+  for (const [i, row] of rows.entries()) {
+    if (Date.now() >= deadline) {
+      remaining = rows.length - i;
+      console.log(`budget of ${budget}s reached; ${remaining} left for the next tick`);
+      break;
+    }
     try {
-      await (dicode as DicodeWithRuns).runs.delete_input(row.RunID);
+      await (dicode as DicodeWithRuns).runs.delete_input(row.runID);
       removed++;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`delete_input(${row.RunID}) failed: ${msg}`);
+      console.warn(`delete_input(${row.runID}) failed: ${msg}`);
       errors++;
     }
   }
-  return { ok: errors === 0, removed, errors };
+  return { ok: errors === 0, removed, errors, remaining };
 }

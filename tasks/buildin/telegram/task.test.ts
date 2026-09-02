@@ -12,7 +12,7 @@
 import { setupHarness } from "../../sdk-test.ts";
 await setupHarness(import.meta.url);
 
-import { collectFields, escapeHtml, MAX_TEXT, renderMessage } from "./render.ts";
+import { collectFields, escapeHtml, MAX_TEXT, renderMessage, runLogsURL } from "./render.ts";
 import { backoffDelayMs, stripToken } from "./retry.ts";
 
 const SEND = "https://api.telegram.org/bot*/sendMessage";
@@ -319,4 +319,34 @@ test("stripToken keeps the bot token out of error text", () => {
   assert.equal(safe.includes(token), false);
   assert.ok(safe.includes("<token>"), safe);
   assert.equal(stripToken("plain failure", ""), "plain failure");
+});
+
+test("failure-chain input yields a logs link when base_url is configured", () => {
+  const input = {
+    taskID: "buildin/run-inputs-cleanup",
+    runID: "52eed385-3372-4e88-9d10-a8e473781b4e",
+    status: "failure",
+  };
+  const f = collectFields({ base_url: "http://host.ts.net:8080" }, input);
+  assert.equal(
+    runLogsURL(f),
+    "http://host.ts.net:8080/?run=52eed385-3372-4e88-9d10-a8e473781b4e",
+  );
+  const { text } = render({ base_url: "http://host.ts.net:8080" }, input);
+  assert.ok(
+    text.includes("Logs: http://host.ts.net:8080/?run=52eed385-3372-4e88-9d10-a8e473781b4e"),
+  );
+});
+
+test("no logs link when either half is missing", () => {
+  assert.equal(runLogsURL(collectFields({}, { runID: "r1", status: "failure" })), undefined);
+  assert.equal(
+    runLogsURL(collectFields({ base_url: "http://host.ts.net:8080" }, { status: "failure" })),
+    undefined,
+  );
+});
+
+test("a trailing slash on base_url does not double up in the link", () => {
+  const f = collectFields({ base_url: "http://host.ts.net:8080/" }, { runID: "r1" });
+  assert.equal(runLogsURL(f), "http://host.ts.net:8080/?run=r1");
 });
