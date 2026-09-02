@@ -912,7 +912,7 @@ Tasks without explicit `secrets:` entries continue to use the provider chain —
 
 Notifications are delivered by **tasks**, not a daemon-side subsystem. Three settings point at a delivery task: `ai.notify_task` (a run suspended awaiting your reply), `approval.notify_task` (the approval gate held a task), and `defaults.on_failure_chain` (a run failed). Point any of them at a task that emits the alert — desktop, Telegram, ntfy, Slack, Discord, email, anything you can reach over HTTP.
 
-The three do not hand the delivery task the same fields: the suspend hook sends a rendered `title` and `body`, the approval hook sends only `task_id`/`hash`/`approve_url`, and the failure chain delivers through `input` rather than params. A task serving more than one of them has to compose its own text when none arrives — see `tasks/buildin/telegram/` for a worked example.
+Both hooks hand the delivery task a rendered `title` and `body`, with the structured fields (`event`, `task_id`, `run_id`, `hash`, `approve_url`, `resume_url`) riding alongside for a task that would rather render its own link than a line of prose. The failure chain is the exception: it delivers through `input` rather than params and sends no rendered text, so a task serving it has to compose its own — see `tasks/buildin/telegram/` for a worked example.
 
 ### Buildins
 

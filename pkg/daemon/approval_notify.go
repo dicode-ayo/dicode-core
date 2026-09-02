@@ -44,10 +44,15 @@ func (n approvalNotifier) notify(taskID, hash string) {
 	if n.fire == nil {
 		return
 	}
+	body := "Task " + taskID + " is held pending approval and will not run until it is approved."
+	if approveURL != "" {
+		body += " Approve: " + approveURL
+	}
 	if err := n.fire(n.notifyTask, map[string]string{
-		"task_id":     taskID,
-		"hash":        hash,
-		"approve_url": approveURL,
+		// Rendered fields for buildin/notifications (title + body required);
+		// structured fields for custom delivery tasks.
+		"title": "dicode: a task is waiting for approval", "body": body, "priority": "default",
+		"event": "approval_pending", "task_id": taskID, "hash": hash, "approve_url": approveURL,
 	}); err != nil && n.log != nil {
 		// The single-use token lives in approveURL — keep it out of the log.
 		n.log.Warn("approval notify task failed to fire",
