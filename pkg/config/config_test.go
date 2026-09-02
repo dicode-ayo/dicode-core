@@ -1366,3 +1366,127 @@ container_security:
 		}
 	})
 }
+
+// publicURLConfig renders a dicode.yaml carrying a server block with the given
+// public_url and auth/trust_proxy flags, and Loads it.
+func publicURLConfig(t *testing.T, publicURL string, auth, trustProxy bool) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := fmt.Sprintf(`
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+server:
+  port: 8080
+  auth: %t
+  trust_proxy: %t
+  public_url: %q
+`, auth, trustProxy, publicURL)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(cfgPath)
+}
+
+// TestLoad_PublicURL_RejectsMalformed covers the shape rules: scheme must be
+// http/https, a host is required, and anything beyond the bare authority is
+// refused rather than carried into a link.
+func TestLoad_PublicURL_RejectsMalformed(t *testing.T) {
+	for _, bad := range []string{
+		"dicode.example.com",                       // no scheme
+		"ftp://dicode.example.com",                 // non-http scheme
+		"wss://dicode.example.com",                 // websocket scheme
+		"https://",                                 // missing host
+		"https://dicode.example.com/sub",           // path prefix
+		"https://dicode.example.com/?a=b",          // query
+		"https://dicode.example.com/#top",          // fragment
+		"https://alice:hunter2@dicode.example.com", // credentials
+		"https://alice@dicode.example.com",         // credentials, password omitted
+	} {
+		t.Run(bad, func(t *testing.T) {
+			_, err := publicURLConfig(t, bad, true, false)
+			if err == nil {
+				t.Fatalf("Load(public_url=%q): expected error, got nil", bad)
+			}
+			if !strings.Contains(err.Error(), "server.public_url") {
+				t.Errorf("error %q does not name the offending setting", err)
+			}
+		})
+	}
+}
+
+// TestLoad_PublicURL_RequiresAuth covers the fail-closed gate: publishing an
+// off-loopback address is only safe behind the auth wall, since requireAuth
+// falls open when server.auth is false and GET /api/audit then serves live
+// approve tokens. trust_proxy does not substitute — the daemon cannot verify a
+// fronting proxy authenticates.
+func TestLoad_PublicURL_RequiresAuth(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       bool
+		trustProxy bool
+		wantErr    bool
+	}{
+		{"neither", false, false, true},
+		{"trust_proxy only", false, true, true},
+		{"auth", true, false, false},
+		{"auth and trust_proxy", true, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := publicURLConfig(t, "https://dicode.example.com", tc.auth, tc.trustProxy)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "server.public_url") {
+					t.Errorf("error %q does not name the offending setting", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoad_PublicURL_StoresBareAuthority guards the join: callers append
+// "/approve/<token>" and "/?run=<id>" straight onto this value, so an empty
+// trailing separator has to be gone by the time it is stored. url.Parse
+// reports a bare "?" as ForceQuery with an empty RawQuery and a bare "#" as an
+// empty Fragment, so neither is caught by inspecting the parsed parts.
+func TestLoad_PublicURL_StoresBareAuthority(t *testing.T) {
+	const want = "https://dicode.example.com"
+	for _, raw := range []string{
+		want,
+		want + "/",
+		want + "?",
+		want + "#",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			cfg, err := publicURLConfig(t, raw, true, false)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Server.PublicURL; got != want {
+				t.Errorf("PublicURL = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestLoad_PublicURL_EmptyIsValid covers the default: an unset public_url is
+// not subject to the auth gate, since nothing is being published.
+func TestLoad_PublicURL_EmptyIsValid(t *testing.T) {
+	cfg, err := publicURLConfig(t, "", false, false)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.PublicURL != "" {
+		t.Errorf("PublicURL = %q, want empty", cfg.Server.PublicURL)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dicode/dicode/pkg/config"
 )
 
 // TestIsUniqueConstraint_RealDriverError pins isUniqueConstraint against the
@@ -74,5 +76,50 @@ func TestEditTask_ConcurrentSameTaskNoServerError(t *testing.T) {
 		} else if sessions[i] != sessID {
 			t.Fatalf("goroutine %d resolved to session %q, want shared %q", i, sessions[i], sessID)
 		}
+	}
+}
+
+// TestWebUIBaseURL covers the precedence every outbound link depends on:
+// server.public_url wins outright, TLS only picks the scheme for the loopback
+// fallback. Auth is inert here — WebUIBaseURL never reads it — and is set only
+// to keep each public_url fixture one that config.validate would admit.
+func TestWebUIBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.ServerConfig
+		want string
+	}{
+		{
+			name: "loopback fallback",
+			cfg:  config.ServerConfig{Port: 8080},
+			want: "http://localhost:8080",
+		},
+		{
+			name: "tls flips the fallback scheme",
+			cfg:  config.ServerConfig{Port: 8080, TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"},
+			want: "https://localhost:8080",
+		},
+		{
+			name: "public_url wins",
+			cfg:  config.ServerConfig{Port: 8080, Auth: true, PublicURL: "https://dicode.example.com"},
+			want: "https://dicode.example.com",
+		},
+		{
+			name: "public_url keeps its own scheme and port over the TLS guess",
+			cfg: config.ServerConfig{
+				Port: 8080, Auth: true,
+				TLSCertFile: "cert.pem", TLSKeyFile: "key.pem",
+				PublicURL: "http://dicode.lan:9000",
+			},
+			want: "http://dicode.lan:9000",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServerWithSourceMgr(t, &config.Config{Server: tc.cfg}, "", nil)
+			if got := srv.WebUIBaseURL(); got != tc.want {
+				t.Errorf("WebUIBaseURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

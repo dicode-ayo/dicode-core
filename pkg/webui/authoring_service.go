@@ -599,16 +599,23 @@ func (s *Server) startAuthoringPurgeLoop(ctx context.Context) {
 }
 
 // WebUIBaseURL returns the scheme://host:port the browser would use to reach
-// this daemon's web UI. TLS config flips the scheme; the host defaults to
-// localhost since the daemon binds all interfaces and the CLI runs on the
-// same machine.
+// this daemon's web UI. server.public_url wins when set, since a link that
+// leaves the machine — an approve or resume link in a notification — has to
+// carry an address the recipient can resolve. Otherwise the host is localhost:
+// with auth off the daemon binds loopback only, and with auth on the CLI that
+// reads this still runs on the same machine.
 func (s *Server) WebUIBaseURL() string {
 	scheme := "http"
 	s.cfgMu.RLock()
-	if s.cfg != nil && s.cfg.Server.TLSCertFile != "" && s.cfg.Server.TLSKeyFile != "" {
-		scheme = "https"
+	defer s.cfgMu.RUnlock()
+	if s.cfg != nil {
+		if base := s.cfg.Server.PublicURL; base != "" {
+			return base
+		}
+		if s.cfg.Server.TLSCertFile != "" && s.cfg.Server.TLSKeyFile != "" {
+			scheme = "https"
+		}
 	}
-	s.cfgMu.RUnlock()
 	return fmt.Sprintf("%s://localhost:%d", scheme, s.port)
 }
 

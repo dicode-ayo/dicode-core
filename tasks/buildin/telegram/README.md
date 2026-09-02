@@ -64,9 +64,11 @@ lines, so truncation can never split a tag. `priority: min` and `priority: low`
 send with `disable_notification` (no sound).
 
 `resume_url` and `approve_url` are included verbatim. They are built from
-`WebUIBaseURL()` and therefore read `http://localhost:<port>/...` — reachable
-only from the daemon host. Making them externally reachable is tracked in
-[#796](https://github.com/dicode-ayo/dicode-core/issues/796).
+`WebUIBaseURL()`, which reads `localhost:<port>` — over `https` only when the
+daemon terminates TLS itself — unless `server.public_url` is set. Set it, or
+the link that arrives on your phone resolves to your phone. `approve_url` then works as-is, since its single-use
+token is the credential; `resume_url` reaches the dashboard and still needs a
+login at the far end.
 
 The API answers `200` with `{"ok": false, "description": "..."}` for several
 errors, so the response body — not the status — decides. A rejected send throws

@@ -435,6 +435,13 @@ type ServerConfig struct {
 	MCP            *bool    `yaml:"mcp,omitempty"`             // expose MCP endpoint at /mcp; nil → default true, explicit false opts out
 	TLSCertFile    string   `yaml:"tls_cert,omitempty"`        // path to TLS certificate (PEM); enables HTTPS when set with tls_key
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
+	// PublicURL is the scheme://host[:port] at which this daemon is reachable
+	// from outside the machine; notification links are built from it, and an
+	// empty value falls back to the loopback form. Must be a bare authority —
+	// no path, query, fragment or credentials — and requires server.auth,
+	// since publishing an address off-loopback is only safe behind the auth
+	// wall; validate enforces both.
+	PublicURL string `yaml:"public_url,omitempty"`
 	// BcryptCost is the work factor used when hashing the stored auth
 	// passphrase. Valid range 4–14. 0 means "unset" → defaults to 12 in
 	// applyDefaults. Higher = slower login but stronger against offline attacks
@@ -699,6 +706,23 @@ func applyDefaults(cfg *Config, configDir string) {
 	// DataDir default is set earlier during variable expansion.
 }
 
+// parseHTTPURL parses a config value that must be an http(s) URL, prefixing
+// every error with the setting's own name so the operator is told which line
+// of dicode.yaml to fix.
+func parseHTTPURL(field, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%s: must use http:// or https://, got scheme %q", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%s: missing host in %q", field, raw)
+	}
+	return u, nil
+}
+
 func (cfg *Config) validate() error {
 	for name, entry := range cfg.Spec.Entries {
 		if entry == nil {
@@ -726,15 +750,37 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("spec.entries: %w", err)
 	}
 	if cfg.Relay.BrokerURL != "" {
-		u, err := url.Parse(cfg.Relay.BrokerURL)
+		if _, err := parseHTTPURL("relay.broker_url", cfg.Relay.BrokerURL); err != nil {
+			return err
+		}
+	}
+	if cfg.Server.PublicURL != "" {
+		u, err := parseHTTPURL("server.public_url", cfg.Server.PublicURL)
 		if err != nil {
-			return fmt.Errorf("relay.broker_url: %w", err)
+			return err
 		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("relay.broker_url: must use http:// or https://, got scheme %q", u.Scheme)
+		// Credentials would ride along in every notification this address is
+		// pasted into, Telegram's servers included.
+		if u.User != nil {
+			return fmt.Errorf("server.public_url: must not carry credentials, got user info in %q", cfg.Server.PublicURL)
 		}
-		if u.Host == "" {
-			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.public_url: must be scheme://host[:port] with no path, query or fragment, got %q", cfg.Server.PublicURL)
+		}
+		// Callers append "/approve/<token>" and "/?run=<id>" straight onto
+		// this value, so only the bare authority is stored: a trailing "/",
+		// "?" or "#" carries nothing and would corrupt every joined link.
+		cfg.Server.PublicURL = u.Scheme + "://" + u.Host
+		// Publishing an address is only safe behind the auth wall. Without
+		// server.auth every "authenticated" endpoint falls open (requireAuth
+		// early-returns, pkg/webui/auth.go) — including GET /api/audit, whose
+		// rows carry live single-use approve tokens — so a reachable off-host
+		// address would hand the control plane, and the approval gate with it,
+		// to any unauthenticated caller. A fronting proxy that authenticates
+		// does not change this: the daemon cannot verify it does, so it will
+		// not take that on trust. Fail closed instead of minting the link.
+		if !cfg.Server.Auth {
+			return errors.New("server.public_url: requires server.auth: true")
 		}
 	}
 	// server_url (single-instance shorthand) and server_urls (HA fan-out list)
