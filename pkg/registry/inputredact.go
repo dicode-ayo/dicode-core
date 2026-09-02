@@ -131,9 +131,7 @@ var denyListExact = map[string]struct{}{
 	"token":               {},
 	"bearer":              {},
 	// The URL embeds a single-use approval token, so the value is a bearer
-	// credential even though the name matches no substring rule. resume_url
-	// stays off this list: it carries only a run ID, and the resume token is
-	// resolved server-side against the caller's session.
+	// credential despite the innocuous name.
 	"approve_url": {},
 }
 
