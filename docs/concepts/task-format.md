@@ -128,7 +128,9 @@ empty value replaces the default rather than falling back to it.
 An unsatisfied param fails the run *before* dispatch. The task body never
 executes, and the run records a `fail_reason` naming the fields:
 
-    params_invalid: title, body are required
+```text
+params_invalid: title, body are required
+```
 
 Undeclared params are not an error. Keys the spec does not list ride through to
 the task untouched, which is what lets a caller attach structured context (the
