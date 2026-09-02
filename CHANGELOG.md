@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.3](https://github.com/dicode-ayo/dicode-core/compare/v0.5.2...v0.5.3) (2026-09-02)
+
+
+### Features
+
+* **config:** add server.public_url for off-host notification links ([#805](https://github.com/dicode-ayo/dicode-core/issues/805)) ([f56dcfc](https://github.com/dicode-ayo/dicode-core/commit/f56dcfcd1d67711c2192a59f5233e1afe8d6156e)), closes [#796](https://github.com/dicode-ayo/dicode-core/issues/796)
+* **telegram:** add buildin/telegram notification delivery ([8089cb6](https://github.com/dicode-ayo/dicode-core/commit/8089cb6f9e037c2615bce2e721f064f9eea8a519))
+
+
+### Bug Fixes
+
+* **approval:** render title/body in the approval notify hook ([#811](https://github.com/dicode-ayo/dicode-core/issues/811)) ([5e05768](https://github.com/dicode-ayo/dicode-core/commit/5e05768ff41501f256fc2dd79e30e46c5092aacf)), closes [#797](https://github.com/dicode-ayo/dicode-core/issues/797)
+* **webui:** send unauthenticated browsers to /login, not to the gated root ([#809](https://github.com/dicode-ayo/dicode-core/issues/809)) ([331132c](https://github.com/dicode-ayo/dicode-core/commit/331132c13e1a566ffc770597731c0ef6e9c37f9f)), closes [#808](https://github.com/dicode-ayo/dicode-core/issues/808)
+
+
+### Documentation
+
+* correct two CLAUDE.md claims that misdescribe the runtime ([#804](https://github.com/dicode-ayo/dicode-core/issues/804)) ([f6ac92b](https://github.com/dicode-ayo/dicode-core/commit/f6ac92b98e711c127bfecedebb2c6e3319ffab69))
+
 ## [0.5.2](https://github.com/dicode-ayo/dicode-core/compare/v0.5.1...v0.5.2) (2026-09-01)
 
 
