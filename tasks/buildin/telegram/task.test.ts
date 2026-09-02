@@ -12,7 +12,7 @@
 import { setupHarness } from "../../sdk-test.ts";
 await setupHarness(import.meta.url);
 
-import { collectFields, escapeHtml, MAX_TEXT, renderMessage } from "./render.ts";
+import { collectFields, escapeHtml, MAX_TEXT, renderMessage, runLogsURL } from "./render.ts";
 import { backoffDelayMs, stripToken } from "./retry.ts";
 
 const SEND = "https://api.telegram.org/bot*/sendMessage";
@@ -319,4 +319,61 @@ test("stripToken keeps the bot token out of error text", () => {
   assert.equal(safe.includes(token), false);
   assert.ok(safe.includes("<token>"), safe);
   assert.equal(stripToken("plain failure", ""), "plain failure");
+});
+
+test("failure-chain input yields a logs link when base_url is configured", () => {
+  const input = {
+    taskID: "buildin/run-inputs-cleanup",
+    runID: "52eed385-3372-4e88-9d10-a8e473781b4e",
+    status: "failure",
+  };
+  const f = collectFields({ base_url: "http://host.ts.net:8080" }, input);
+  assert.equal(
+    runLogsURL(f),
+    "http://host.ts.net:8080/?run=52eed385-3372-4e88-9d10-a8e473781b4e",
+  );
+  const { text } = render({ base_url: "http://host.ts.net:8080" }, input);
+  assert.ok(
+    text.includes("Logs: http://host.ts.net:8080/?run=52eed385-3372-4e88-9d10-a8e473781b4e"),
+  );
+});
+
+test("no logs link when either half is missing", () => {
+  assert.equal(runLogsURL(collectFields({}, { runID: "r1", status: "failure" })), undefined);
+  assert.equal(
+    runLogsURL(collectFields({ base_url: "http://host.ts.net:8080" }, { status: "failure" })),
+    undefined,
+  );
+});
+
+test("a trailing slash on base_url does not double up in the link", () => {
+  const f = collectFields({ base_url: "http://host.ts.net:8080/" }, { runID: "r1" });
+  assert.equal(runLogsURL(f), "http://host.ts.net:8080/?run=r1");
+});
+
+test("a link past the body cut still gets its own detail line", () => {
+  // The dedup exists because the suspend hook inlines its link in the body.
+  // When the body is long enough that the link falls past BODY_MAX, the
+  // rendered message no longer contains it, so the detail line is the only
+  // copy left and must not be suppressed.
+  const url = "http://host.ts.net:8080/?run=r1";
+  const { text } = render({ base_url: "http://host.ts.net:8080" }, {
+    runID: "r1",
+    status: "failure",
+    body: "x".repeat(2000) + " " + url,
+  });
+  assert.ok(!text.includes(`${"x".repeat(2000)} ${url}`), "body should be truncated");
+  assert.ok(text.includes(`Logs: ${url}`), "the surviving copy of the link must be rendered");
+});
+
+test("no Logs line when it would only repeat resume_url", () => {
+  // The daemon builds resume links to the same base + "/?run=<id>" form, so on
+  // a suspend notification the two would render as adjacent identical lines.
+  const { text } = render({
+    base_url: "http://host.ts.net:8080",
+    resume_url: "http://host.ts.net:8080/?run=r1",
+  }, { runID: "r1", event: "suspended" });
+  assert.ok(text.includes("Resume: http://host.ts.net:8080/?run=r1"));
+  assert.equal(text.split("http://host.ts.net:8080/?run=r1").length - 1, 1);
+  assert.ok(!text.includes("Logs:"));
 });

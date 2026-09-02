@@ -16,6 +16,7 @@ export interface NotifyFields {
   hash?: string;
   approve_url?: string;
   resume_url?: string;
+  base_url?: string;
   output?: string;
 }
 
@@ -101,6 +102,7 @@ export function collectFields(params: Record<string, string>, input: unknown): N
     hash: pick("hash"),
     approve_url: pick("approve_url"),
     resume_url: pick("resume_url"),
+    base_url: pick("base_url"),
     output: pick("output"),
   };
 }
@@ -161,14 +163,25 @@ function clamp(lines: string[], max: number): string {
   return kept.join("\n");
 }
 
+/**
+ * The WebUI run-detail link, matching the form the daemon builds for resume
+ * links. Undefined unless both the base and the run id arrived.
+ */
+export function runLogsURL(f: NotifyFields): string | undefined {
+  if (!f.base_url || !f.run_id) return undefined;
+  return `${f.base_url.replace(/\/+$/, "")}/?run=${encodeURIComponent(f.run_id)}`;
+}
+
 /** Render one notification. Never throws, whatever subset of fields arrived. */
 export function renderMessage(f: NotifyFields): RenderedMessage {
   const derived = derive(f, classify(f));
 
   const lines: string[] = [`<b>${escapeHtml(cut(f.title ?? derived.title, TITLE_MAX))}</b>`];
 
-  const body = f.body ?? derived.body;
-  if (body) lines.push("", escapeHtml(cut(body, BODY_MAX)));
+  // Dedup below tests the *shown* body: a URL past the cut is not in the
+  // message, so matching the full text would drop the only copy of the link.
+  const body = cut(f.body ?? derived.body, BODY_MAX);
+  if (body) lines.push("", escapeHtml(body));
 
   const detail: string[] = [];
   if (f.task_id !== undefined) detail.push(`Task: <code>${escapeHtml(f.task_id)}</code>`);
@@ -183,6 +196,14 @@ export function renderMessage(f: NotifyFields): RenderedMessage {
   }
   if (f.resume_url !== undefined && !body.includes(f.resume_url)) {
     detail.push(`Resume: ${escapeHtml(f.resume_url)}`);
+  }
+  // base_url is supplied by the caller — the daemon knows its own reachable
+  // address, the task does not — so the link renders only when both halves are
+  // present. The daemon builds resume links to this same form, so an equal
+  // resume_url is the same link under another name.
+  const logsURL = runLogsURL(f);
+  if (logsURL !== undefined && !body.includes(logsURL) && logsURL !== f.resume_url) {
+    detail.push(`Logs: ${escapeHtml(logsURL)}`);
   }
   if (detail.length > 0) lines.push("", ...detail);
 

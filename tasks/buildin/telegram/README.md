@@ -70,6 +70,13 @@ the link that arrives on your phone resolves to your phone. `approve_url` then w
 token is the credential; `resume_url` reaches the dashboard and still needs a
 login at the far end.
 
+A `Logs:` line linking to the failed run is added when the caller supplies
+`base_url`; it is built to the same form and carries the same caveat, so point
+it at whatever `server.public_url` holds. The task cannot derive the address
+itself, which is why it arrives as a field — for the failure chain, set it under
+`defaults.on_failure_chain.params`. The line is omitted when no run id arrived,
+or when it would merely repeat `resume_url`.
+
 The API answers `200` with `{"ok": false, "description": "..."}` for several
 errors, so the response body — not the status — decides. A rejected send throws
 with the `description`, failing the run visibly instead of dropping the

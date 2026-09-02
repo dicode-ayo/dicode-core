@@ -7,7 +7,7 @@ description: |
   Mirrors the temp-cleanup pattern.
 
   retention_seconds defaults to 30 days (2592000s); the daemon overrides
-  this via dicode.yaml's defaults.run_inputs.retention (Task 14, future).
+  this via dicode.yaml's defaults.run_inputs.retention.
 
 runtime: deno
 
@@ -19,6 +19,10 @@ params:
     type: number
     default: "2592000"   # 30 days
     description: "Retain inputs for at most this many seconds. Daemon overrides via dicode.yaml."
+  budget_seconds:
+    type: number
+    default: "90"
+    description: "Stop sweeping after this many seconds so a large backlog drains across ticks instead of being killed at the timeout."
 
 permissions:
   dicode:
