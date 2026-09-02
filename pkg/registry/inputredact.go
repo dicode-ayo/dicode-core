@@ -130,6 +130,9 @@ var denyListExact = map[string]struct{}{
 	"secret":              {},
 	"token":               {},
 	"bearer":              {},
+	// The URL embeds a single-use approval token, so the value is a bearer
+	// credential despite the innocuous name.
+	"approve_url": {},
 }
 
 // denyListSubstrings is matched as a case-insensitive substring against the

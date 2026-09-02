@@ -22,6 +22,24 @@ func TestShouldRedactName_ExactMatches(t *testing.T) {
 	}
 }
 
+func TestShouldRedactName_ApproveURL(t *testing.T) {
+	// The name matches no substring rule, so only the exact list can catch it.
+	if !shouldRedactName("approve_url") {
+		t.Errorf("shouldRedactName(approve_url) = false, want true")
+	}
+	if !shouldRedactName("APPROVE_URL") {
+		t.Errorf("shouldRedactName(APPROVE_URL) = false, want true (case-insensitive)")
+	}
+}
+
+func TestShouldRedactName_ResumeURLNotRedacted(t *testing.T) {
+	// resume_url carries only a run ID; the resume token is resolved
+	// server-side against the caller's session.
+	if shouldRedactName("resume_url") {
+		t.Errorf("shouldRedactName(resume_url) = true, want false")
+	}
+}
+
 func TestShouldRedactName_SubstringMatches(t *testing.T) {
 	cases := []string{
 		"x-custom-token",
@@ -253,6 +271,58 @@ func TestRedactParams_PrimitiveAndNil(t *testing.T) {
 	}
 	if len(redacted) != 0 {
 		t.Errorf("primitives should produce no redaction entries")
+	}
+}
+
+// The approval hook fires its notify_task with {task_id, hash, approve_url},
+// and the engine persists those params through this function — the path by
+// which the approval token reaches the retained run-input blob.
+func TestBuildPersistedInputFromRunOpts_RedactsApproveURL(t *testing.T) {
+	params := map[string]string{
+		"task_id":     "repo/pending-task",
+		"hash":        "abc123",
+		"approve_url": "https://host/approve/tok-secret-xyz",
+	}
+	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+
+	if got := in.Params["approve_url"]; got != redactPlaceholder {
+		t.Errorf("params.approve_url = %v, want redacted placeholder", got)
+	}
+	if got := in.Params["task_id"]; got != "repo/pending-task" {
+		t.Errorf("params.task_id should not be redacted: %v", got)
+	}
+	if got := in.Params["hash"]; got != "abc123" {
+		t.Errorf("params.hash should not be redacted: %v", got)
+	}
+
+	found := false
+	for _, p := range in.RedactedFields {
+		if p == "params.approve_url" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in RedactedFields, got %v", "params.approve_url", in.RedactedFields)
+	}
+}
+
+// resume_url is a bare run-ID link, not a credential, so persisting it lets
+// a replay view show the real destination rather than a placeholder.
+func TestBuildPersistedInputFromRunOpts_KeepsResumeURL(t *testing.T) {
+	params := map[string]string{
+		"task_id":    "repo/some-task",
+		"run_id":     "run-9",
+		"resume_url": "https://host/?run=run-9",
+	}
+	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+
+	if got := in.Params["resume_url"]; got != "https://host/?run=run-9" {
+		t.Errorf("params.resume_url = %v, want unredacted", got)
+	}
+	for _, p := range in.RedactedFields {
+		if p == "params.resume_url" {
+			t.Errorf("resume_url should not appear in RedactedFields, got %v", in.RedactedFields)
+		}
 	}
 }
 

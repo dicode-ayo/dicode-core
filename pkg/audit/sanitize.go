@@ -12,8 +12,9 @@ import (
 const Redacted = "[REDACTED]"
 
 // denyExact is the case-insensitive set of param names whose values are
-// always redacted, mirroring the run-input redaction deny-list in
-// pkg/registry/inputredact.go.
+// always redacted. pkg/registry/inputredact.go keeps a separate list for the
+// persisted run input; the two share the credential names but not the header
+// names, and a credential name added to either belongs in both.
 var denyExact = map[string]struct{}{
 	"authorization": {},
 	"cookie":        {},
@@ -27,6 +28,9 @@ var denyExact = map[string]struct{}{
 	"bearer":        {},
 	"credential":    {},
 	"credentials":   {},
+	// The URL embeds a single-use approval token, so the value is a bearer
+	// credential despite the innocuous name.
+	"approve_url": {},
 }
 
 // denySubstrings is matched case-insensitively as a substring of the param

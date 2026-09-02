@@ -205,12 +205,12 @@ reachable; that stays the operator's problem.
 
 **It is refused unless `server.auth` is set.** Publishing an off-loopback
 address is only safe behind the auth wall. With auth off, `requireAuth`
-early-returns and every "authenticated" endpoint falls open — including
-`GET /api/audit`, whose rows carry live single-use approve tokens — so a
-reachable address hands the whole control plane, and the approval gate with it,
-to any unauthenticated caller. A fronting proxy that authenticates does not
-lift the requirement: the daemon cannot verify that it does, so `trust_proxy`
-(which only governs `X-Forwarded-For` parsing) is not accepted as a substitute.
+early-returns and every "authenticated" endpoint falls open —
+`POST /api/tasks/{id}/approve` among them — so a reachable address hands the
+whole control plane, and the approval gate with it, to any unauthenticated
+caller. A fronting proxy that authenticates does not lift the requirement: the
+daemon cannot verify that it does, so `trust_proxy` (which only governs
+`X-Forwarded-For` parsing) is not accepted as a substitute.
 Run such a proxy *and* `server.auth: true` — the daemon's own wall is cheap
 insurance against the proxy being misconfigured or bypassed on the LAN.
 
