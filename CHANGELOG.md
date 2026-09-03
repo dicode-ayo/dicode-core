@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.0](https://github.com/dicode-ayo/dicode-core/compare/v0.5.3...v0.6.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* an existing dicode.yaml pointing `buildin` at a path under this repo's tasks/ resolves nothing after upgrading. Repoint it at the git ref, as the updated onboarding preset now does.
+
+### Bug Fixes
+
+* **run-inputs,telegram:** unbreak the run-input sweep and link failed runs from notifications ([#818](https://github.com/dicode-ayo/dicode-core/issues/818)) ([ed6b3bf](https://github.com/dicode-ayo/dicode-core/commit/ed6b3bf74f3ceadfa0f95341076107bcebbef744))
+* **tasktest:** stop rejecting test runs over params the run never reads ([#828](https://github.com/dicode-ayo/dicode-core/issues/828)) ([5e3612f](https://github.com/dicode-ayo/dicode-core/commit/5e3612f1d9768bee2cf0fe49aef406427e2a94b1))
+* **tray:** point the no-SNI-host guidance at advice that actually works ([#824](https://github.com/dicode-ayo/dicode-core/issues/824)) ([c78fb5a](https://github.com/dicode-ayo/dicode-core/commit/c78fb5a705a488459b69b7f2054717e123c95930))
+
+
+### Documentation
+
+* **params:** fence the params_invalid example and record [#812](https://github.com/dicode-ayo/dicode-core/issues/812) in the changelog ([#814](https://github.com/dicode-ayo/dicode-core/issues/814)) ([ba01df9](https://github.com/dicode-ayo/dicode-core/commit/ba01df952b7fea3d090f99335551adcef613e8e3))
+
+
+### Miscellaneous
+
+* move the buildin taskset out to dicode-ayo/dicode-buildin ([#826](https://github.com/dicode-ayo/dicode-core/issues/826)) ([ff14f84](https://github.com/dicode-ayo/dicode-core/commit/ff14f848693a151af2bf7e00e6d37bcddedc59b9))
+
 ## [0.5.3](https://github.com/dicode-ayo/dicode-core/compare/v0.5.2...v0.5.3) (2026-09-02)
 
 
