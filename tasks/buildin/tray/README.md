@@ -20,8 +20,9 @@ even though the task is running fine.
 
 Two things confuse people here:
 
-- **i3bar only supports the legacy XEmbed protocol, not SNI.** So even with
-  i3bar's `tray_output` enabled, an SNI icon won't show.
+- **Most X11 bars speak only the legacy XEmbed protocol, not SNI** — i3bar and
+  polybar included. So an SNI icon won't show even with i3bar's `tray_output`
+  or polybar's `tray-position` enabled.
 - There's no error — the item registers into the void.
 
 The task logs a one-line hint at startup when it detects no SNI host (see
@@ -29,22 +30,47 @@ The task logs a one-line hint at startup when it detects no SNI host (see
 
 ### Fixes
 
-- **polybar ≥ 3.6** has a native SNI tray. Add a tray module and use polybar as
-  your bar:
-  ```ini
-  [module/tray]
-  type = internal/tray
-  tray-size = 66%
+Every fix is the same shape: run something that registers as a
+StatusNotifierHost. Which one depends on your bar.
+
+- **waybar** (Wayland) hosts SNI itself through its `tray` module — nothing
+  extra to install.
+- **X11 bars host only XEmbed**, so they need `snixembed` in front. It presents
+  itself as an SNI host and maintains a matching XEmbed icon for each item it
+  sees, which the bar's own tray then renders:
   ```
-- **waybar** (Wayland) supports SNI via its `tray` module.
-- **Stay on i3bar** by running an SNI→XEmbed bridge, then i3bar renders it:
+  # ~/.config/i3/config — must precede the SNI apps, which look for a host at
+  # their own startup
+  exec --no-startup-id snixembed --fork
   ```
-  # ~/.config/i3/config
-  exec --no-startup-id snixembed        # or: xembedsniproxy (from KDE)
-  # in the bar { } block:
-  tray_output primary
-  ```
-  On Debian/Ubuntu: `sudo apt install snixembed`.
+  Then keep your bar's existing tray: polybar's `tray-position` (or
+  `[module/tray]` on >=3.7), or `tray_output primary` in i3bar's `bar { }`
+  block. Polybar has **no** SNI support at any version — both of its tray
+  forms are XEmbed.
+
+  Use `--fork` rather than `&`: it forks once the host is on the bus, so apps
+  that publish an icon only when a host already exists don't race it.
+
+`snixembed` is packaged on Arch (AUR) and Debian trixie+, but **not on any
+Ubuntu LTS**. Build it from source there:
+
+```
+sudo apt install -y git make valac libgtk-3-dev libglib2.0-dev \
+                    libdbusmenu-gtk3-dev libdbusmenu-glib-dev
+git clone --branch 0.3.3 --depth 1 https://git.sr.ht/~steef/snixembed
+cd snixembed && make && sudo make install     # -> /usr/bin/snixembed
+```
+
+KDE's `xembedsniproxy` is **not** an alternative. It bridges XEmbed -> SNI, the
+opposite direction, so that legacy tray apps appear under Plasma.
+
+Not every item re-registers when a host shows up later, and this task's helper
+is one that doesn't. After starting a host for the first time, restart the task
+— `restart: always` brings it straight back:
+
+```
+pkill -f buildin/tray
+```
 
 macOS and Windows render the tray natively and are unaffected.
 
