@@ -55,12 +55,10 @@ func (e *ErrParamsInvalid) Unwrap() error { return e.FieldErrors }
 // the runner to inherit a server-wide deadline should pass 0 and bind their
 // own ctx upstream.
 //
-// The validated-and-coerced params are returned alongside the Result so
-// callers (or future SDK plumbing once tasktest.Run learns to forward them
-// to the runner) can inspect what was actually sent. Today the params are
-// validated but not forwarded to the runner, so requiredness is not enforced
-// here — a test file mocks its own params — while unknown keys and type
-// mismatches in what the caller did supply are still rejected (#827).
+// Params are validated but not forwarded to the runner: a test file mocks its
+// own params. Requiredness is therefore not enforced, while unknown keys and
+// type mismatches in what the caller did supply are still rejected. The
+// coerced map is returned alongside the Result so callers can inspect it.
 func RunByID(ctx context.Context, reg SpecLookup, taskID string, params map[string]any, timeout time.Duration) (Result, map[string]string, error) {
 	if reg == nil {
 		return Result{}, nil, fmt.Errorf("tasktest: registry is nil")
@@ -70,7 +68,7 @@ func RunByID(ctx context.Context, reg SpecLookup, taskID string, params map[stri
 		return Result{TaskID: taskID}, nil, ErrTaskNotFound
 	}
 
-	coerced, perrs := task.ValidateSuppliedParams(spec.Params, params)
+	coerced, perrs := task.ValidateParamsIgnoringRequired(spec.Params, params)
 	if perrs != nil {
 		return Result{TaskID: taskID}, nil, &ErrParamsInvalid{FieldErrors: perrs}
 	}

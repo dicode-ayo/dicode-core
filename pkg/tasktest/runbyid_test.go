@@ -19,26 +19,24 @@ func (s stubLookup) Get(id string) (*task.Spec, bool) {
 	return spec, ok
 }
 
-// requiredParamSpec builds a task whose only param is required with no
-// default — the shape that used to make every test run fail.
-func requiredParamSpec(t *testing.T, testSrc string) *task.Spec {
+// fixtureSpec writes testSrc as the task.test.ts of a fresh temp dir and
+// returns a Deno spec over it declaring params.
+func fixtureSpec(t *testing.T, id string, params task.Params, testSrc string) *task.Spec {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "task.test.ts"), []byte(testSrc), 0644); err != nil {
 		t.Fatal(err)
 	}
-	return &task.Spec{
-		ID:      "examples/required-param-fixture",
-		TaskDir: dir,
-		Runtime: task.RuntimeDeno,
-		Params:  task.Params{{Name: "content", Type: "string", Required: true}},
-	}
+	return &task.Spec{ID: id, TaskDir: dir, Runtime: task.RuntimeDeno, Params: params}
 }
 
-// TestRunByID_RequiredParamUnsupplied is the regression guard for #827: a
-// task declaring a required param with no default must still be testable,
-// because the test file mocks its own params and the validated map never
-// reaches the runner.
+// requiredParam is the shape a test run must tolerate: required, no default,
+// and no way for the caller to supply it.
+var requiredParam = task.Params{{Name: "content", Type: "string", Required: true}}
+
+// TestRunByID_RequiredParamUnsupplied asserts a task declaring a required
+// param with no default is testable: the test file mocks its own params and
+// the validated map never reaches the runner.
 func TestRunByID_RequiredParamUnsupplied(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires deno subprocess")
@@ -47,7 +45,7 @@ func TestRunByID_RequiredParamUnsupplied(t *testing.T) {
 		t.Skipf("deno provisioning failed (offline?): %v", err)
 	}
 
-	spec := requiredParamSpec(t, `Deno.test("mocks its own params", () => {
+	spec := fixtureSpec(t, "examples/required-param-fixture", requiredParam, `Deno.test("mocks its own params", () => {
   const params = { content: "mocked" };
   if (params.content !== "mocked") throw new Error("unreachable");
 });
@@ -63,10 +61,10 @@ func TestRunByID_RequiredParamUnsupplied(t *testing.T) {
 	}
 }
 
-// TestRunByID_UnknownParamRejected pins the half of validation that survives:
-// junk a caller did supply is still an error, before any subprocess starts.
+// TestRunByID_UnknownParamRejected pins the closed schema: junk a caller did
+// supply is an error, raised before any subprocess starts.
 func TestRunByID_UnknownParamRejected(t *testing.T) {
-	spec := requiredParamSpec(t, "")
+	spec := fixtureSpec(t, "examples/required-param-fixture", requiredParam, "")
 	reg := stubLookup{spec.ID: spec}
 
 	_, _, err := RunByID(context.Background(), reg, spec.ID, map[string]any{"typo": "x"}, 0)
@@ -79,16 +77,10 @@ func TestRunByID_UnknownParamRejected(t *testing.T) {
 	}
 }
 
-// TestRunByID_TypeMismatchRejected covers the other surviving half: a
-// supplied value that doesn't coerce to its declared type.
+// TestRunByID_TypeMismatchRejected pins the other rule RunByID still applies:
+// a supplied value that doesn't coerce to its declared type.
 func TestRunByID_TypeMismatchRejected(t *testing.T) {
-	dir := t.TempDir()
-	spec := &task.Spec{
-		ID:      "examples/typed-param-fixture",
-		TaskDir: dir,
-		Runtime: task.RuntimeDeno,
-		Params:  task.Params{{Name: "limit", Type: "number"}},
-	}
+	spec := fixtureSpec(t, "examples/typed-param-fixture", task.Params{{Name: "limit", Type: "number"}}, "")
 	reg := stubLookup{spec.ID: spec}
 
 	_, _, err := RunByID(context.Background(), reg, spec.ID, map[string]any{"limit": "not-a-number"}, 0)

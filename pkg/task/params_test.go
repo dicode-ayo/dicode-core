@@ -212,11 +212,11 @@ func TestMissingRequiredParams_EmptyOverrideClobbersDefault(t *testing.T) {
 	}
 }
 
-func TestValidateSuppliedParams_RequiredMissingAccepted(t *testing.T) {
+func TestValidateParamsIgnoringRequired_RequiredMissingAccepted(t *testing.T) {
 	declared := Params{
 		{Name: "repo", Type: "string", Required: true},
 	}
-	out, errs := ValidateSuppliedParams(declared, map[string]any{})
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{})
 	if errs != nil {
 		t.Fatalf("requiredness should not be enforced: %v", errs)
 	}
@@ -225,11 +225,11 @@ func TestValidateSuppliedParams_RequiredMissingAccepted(t *testing.T) {
 	}
 }
 
-func TestValidateSuppliedParams_RequiredEmptyAccepted(t *testing.T) {
+func TestValidateParamsIgnoringRequired_RequiredEmptyAccepted(t *testing.T) {
 	declared := Params{
 		{Name: "title", Type: "string", Required: true},
 	}
-	out, errs := ValidateSuppliedParams(declared, map[string]any{"title": ""})
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{"title": ""})
 	if errs != nil {
 		t.Fatalf("empty value for a required param should pass: %v", errs)
 	}
@@ -238,11 +238,11 @@ func TestValidateSuppliedParams_RequiredEmptyAccepted(t *testing.T) {
 	}
 }
 
-func TestValidateSuppliedParams_StillRejectsUnknownAndMistyped(t *testing.T) {
+func TestValidateParamsIgnoringRequired_StillRejectsUnknownAndMistyped(t *testing.T) {
 	declared := Params{
 		{Name: "limit", Type: "number", Required: true},
 	}
-	_, errs := ValidateSuppliedParams(declared, map[string]any{
+	_, errs := ValidateParamsIgnoringRequired(declared, map[string]any{
 		"limit": "not-a-number",
 		"typo":  "x",
 	})
@@ -251,11 +251,11 @@ func TestValidateSuppliedParams_StillRejectsUnknownAndMistyped(t *testing.T) {
 	}
 }
 
-func TestValidateSuppliedParams_FillsDefaults(t *testing.T) {
+func TestValidateParamsIgnoringRequired_FillsDefaults(t *testing.T) {
 	declared := Params{
 		{Name: "repo", Type: "string", Required: true, Default: "deno/deno"},
 	}
-	out, errs := ValidateSuppliedParams(declared, map[string]any{})
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{})
 	if errs != nil {
 		t.Fatalf("unexpected errors: %v", errs)
 	}

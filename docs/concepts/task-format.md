@@ -115,11 +115,11 @@ permissions:
 ### Required params
 
 `required: true` is enforced on every fire path — cron, webhook, manual, chain,
-pipeline stage, resume. The rule is applied to
-the param's *effective* value, computed the way the runtime computes it: the
-fire's override wherever the fire supplies the key, the declared `default`
-otherwise. An empty effective value is unsatisfied, because params reach a task
-as strings, where empty and absent are the same thing.
+pipeline stage, resume. The rule is applied to the param's *effective* value,
+computed the way the runtime computes it: the fire's override wherever the fire
+supplies the key, the declared `default` otherwise. An empty effective value is
+unsatisfied, because params reach a task as strings, where empty and absent are
+the same thing.
 
 A `default` therefore rescues a param the fire omits, but not one the fire
 supplies as `""` — an override is applied wherever its key is present, so the
