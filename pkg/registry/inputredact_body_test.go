@@ -154,6 +154,36 @@ func TestRedactBody_TextFullTextualOptIn(t *testing.T) {
 	}
 }
 
+// #810 code-review follow-up: a text body has no field structure for the
+// name-based check to run against, so bodyFullTextual persisted it verbatim
+// regardless of content — the value-shape check must still catch a
+// credential riding in it.
+func TestRedactBody_TextFullTextual_ValueShapeCredential(t *testing.T) {
+	body := []byte("Approve here: https://host/approve/dcap_abc123")
+	redacted := []string{}
+	out := redactBody(body, "text/plain", true, &redacted)
+
+	if out.BodyKind != "text" {
+		t.Errorf("BodyKind = %q, want text", out.BodyKind)
+	}
+	var got string
+	if err := json.Unmarshal(out.Body, &got); err != nil {
+		t.Fatalf("body should be JSON-string-wrapped: %v", err)
+	}
+	if got != redactPlaceholder {
+		t.Errorf("body = %q, want redacted placeholder", got)
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body", redacted)
+	}
+}
+
 func TestRedactBody_Multipart(t *testing.T) {
 	body := []byte("--BOUNDARY\r\n" +
 		"Content-Disposition: form-data; name=\"username\"\r\n\r\n" +

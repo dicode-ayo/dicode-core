@@ -135,7 +135,17 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 	case strings.HasPrefix(mediaType, "text/"):
 		out.BodyKind = "text"
 		if bodyFullTextual {
-			j, err := json.Marshal(string(raw))
+			text := string(raw)
+			// A text body has no field structure for the name-based check to
+			// run against, so it was persisted verbatim regardless of
+			// content — the value-shape check is the only redaction this
+			// branch can apply. A hit redacts the whole body, matching how
+			// a name-based hit redacts a whole field value elsewhere.
+			if containsCredentialValue(text) {
+				text = redactPlaceholder
+				*redacted = append(*redacted, "body")
+			}
+			j, err := json.Marshal(text)
 			if err != nil {
 				out.BodyKind = "binary"
 				out.BodyHash = hash
