@@ -211,3 +211,55 @@ func TestMissingRequiredParams_EmptyOverrideClobbersDefault(t *testing.T) {
 		t.Errorf("empty override should be missing, got %v", got)
 	}
 }
+
+func TestValidateParamsIgnoringRequired_RequiredMissingAccepted(t *testing.T) {
+	declared := Params{
+		{Name: "repo", Type: "string", Required: true},
+	}
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{})
+	if errs != nil {
+		t.Fatalf("requiredness should not be enforced: %v", errs)
+	}
+	if _, ok := out["repo"]; ok {
+		t.Errorf("absent param should stay absent, got %v", out)
+	}
+}
+
+func TestValidateParamsIgnoringRequired_RequiredEmptyAccepted(t *testing.T) {
+	declared := Params{
+		{Name: "title", Type: "string", Required: true},
+	}
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{"title": ""})
+	if errs != nil {
+		t.Fatalf("empty value for a required param should pass: %v", errs)
+	}
+	if out["title"] != "" {
+		t.Errorf("got %q, want empty", out["title"])
+	}
+}
+
+func TestValidateParamsIgnoringRequired_StillRejectsUnknownAndMistyped(t *testing.T) {
+	declared := Params{
+		{Name: "limit", Type: "number", Required: true},
+	}
+	_, errs := ValidateParamsIgnoringRequired(declared, map[string]any{
+		"limit": "not-a-number",
+		"typo":  "x",
+	})
+	if len(errs) != 2 {
+		t.Fatalf("expected an unknown-key error and a type error, got %v", errs)
+	}
+}
+
+func TestValidateParamsIgnoringRequired_FillsDefaults(t *testing.T) {
+	declared := Params{
+		{Name: "repo", Type: "string", Required: true, Default: "deno/deno"},
+	}
+	out, errs := ValidateParamsIgnoringRequired(declared, map[string]any{})
+	if errs != nil {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if out["repo"] != "deno/deno" {
+		t.Errorf("got %q, want the declared default", out["repo"])
+	}
+}

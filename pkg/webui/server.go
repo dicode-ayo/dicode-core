@@ -2068,8 +2068,10 @@ type testTaskResponse struct {
 // reachable by every scoped token regardless of declared capabilities).
 // Unscoped operator/CLI/dashboard keys are unaffected.
 //
-// Body (optional): {"params": {...}, "timeout_s": int}. params are validated
-// against the task's declared schema (422 on mismatch, with per-field detail).
+// Body (optional): {"params": {...}, "timeout_s": int}. Supplied params are
+// validated against the task's declared schema (422 on mismatch, with
+// per-field detail); requiredness is not enforced, since a test file mocks
+// its own params.
 // timeout_s caps the runner subprocess lifetime; on expiry the handler
 // returns 408 with whatever output was captured before cancellation.
 //

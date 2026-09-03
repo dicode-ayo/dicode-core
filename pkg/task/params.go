@@ -57,6 +57,29 @@ func (e ParamErrors) Error() string {
 // Other type names are accepted as-is — unknown types are not the validator's
 // job to police; they're already covered by the loader's spec validation.
 func ValidateParams(declared Params, input map[string]any) (map[string]string, ParamErrors) {
+	return validateParams(declared, input, enforceRequired)
+}
+
+// ValidateParamsIgnoringRequired applies every ValidateParams rule except
+// requiredness: unknown keys are still rejected and supplied values are still
+// coerced against their declared type, but a required param left out — or
+// supplied empty — is not an error.
+//
+// For callers that do not forward the validated map to a run, where a
+// declared `required` says nothing about the values the run will actually
+// read.
+func ValidateParamsIgnoringRequired(declared Params, input map[string]any) (map[string]string, ParamErrors) {
+	return validateParams(declared, input, ignoreRequired)
+}
+
+// Named for the call sites, where a bare true/false would say nothing about
+// which rule is being switched.
+const (
+	enforceRequired = true
+	ignoreRequired  = false
+)
+
+func validateParams(declared Params, input map[string]any, required bool) (map[string]string, ParamErrors) {
 	out := make(map[string]string, len(declared))
 	var errs ParamErrors
 
@@ -79,7 +102,7 @@ func ValidateParams(declared Params, input map[string]any) (map[string]string, P
 				out[p.Name] = p.Default
 				continue
 			}
-			if p.Required {
+			if required && p.Required {
 				errs = append(errs, ParamError{Field: p.Name, Message: "required"})
 			}
 			continue
@@ -89,7 +112,7 @@ func ValidateParams(declared Params, input map[string]any) (map[string]string, P
 			errs = append(errs, ParamError{Field: p.Name, Message: err})
 			continue
 		}
-		if p.Required && coerced == "" {
+		if required && p.Required && coerced == "" {
 			errs = append(errs, ParamError{Field: p.Name, Message: "required"})
 			continue
 		}

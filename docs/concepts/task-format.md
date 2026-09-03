@@ -115,11 +115,11 @@ permissions:
 ### Required params
 
 `required: true` is enforced on every fire path — cron, webhook, manual, chain,
-pipeline stage, resume — not only by `dicode task test`. The rule is applied to
-the param's *effective* value, computed the way the runtime computes it: the
-fire's override wherever the fire supplies the key, the declared `default`
-otherwise. An empty effective value is unsatisfied, because params reach a task
-as strings, where empty and absent are the same thing.
+pipeline stage, resume. The rule is applied to the param's *effective* value,
+computed the way the runtime computes it: the fire's override wherever the fire
+supplies the key, the declared `default` otherwise. An empty effective value is
+unsatisfied, because params reach a task as strings, where empty and absent are
+the same thing.
 
 A `default` therefore rescues a param the fire omits, but not one the fire
 supplies as `""` — an override is applied wherever its key is present, so the
@@ -137,8 +137,11 @@ the task untouched, which is what lets a caller attach structured context (the
 approval hook's `event` / `task_id` / `approve_url`) to a delivery task that
 declares only the fields it renders.
 
-`dicode task test` additionally rejects undeclared keys and coerces values to
-their declared `type`; the fire path does neither.
+`dicode task test` is not a fire path and does not enforce `required` at all —
+a test file mocks its own params, so a required param with no default is no
+obstacle to testing the task. It does reject undeclared keys and coerce values
+to their declared `type` for whatever params a caller passes it; the fire path
+does neither.
 
 ### Trigger types
 
