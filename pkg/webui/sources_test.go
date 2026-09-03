@@ -1159,3 +1159,66 @@ func TestSourceManager_Sources_StripsURLCredentials(t *testing.T) {
 		t.Errorf("URL = %q, want the repo without userinfo", got[0].URL)
 	}
 }
+
+// TestApiAddSource_PinnedTag adds a source pinned to a tag and verifies the
+// entry carries the pin without the "main" branch every unpinned git source
+// gets.
+func TestApiAddSource_PinnedTag(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"pinned","url":"https://github.com/example/repo.git","tag":"v1.2.3"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/settings/sources returned %d; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["pinned"]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil {
+		t.Fatal("expected pinned entry in config after add")
+	}
+	if entry.Ref.Tag != "v1.2.3" {
+		t.Errorf("tag = %q, want v1.2.3", entry.Ref.Tag)
+	}
+	if entry.Ref.Branch != "" {
+		t.Errorf("branch = %q on a pinned source, want it left unset", entry.Ref.Branch)
+	}
+}
+
+// TestApiAddSource_RejectsBadTarget keeps the handler under the same rules
+// config-load applies: a request it accepted but the loader rejects would
+// leave a dicode.yaml the daemon cannot boot from.
+func TestApiAddSource_RejectsBadTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"branch and tag together", `{"name":"both","url":"https://github.com/example/repo.git","branch":"main","tag":"v1.2.3"}`},
+		{"malformed tag", `{"name":"bad","url":"https://github.com/example/repo.git","tag":"v1..3"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServerWithConfigPath(t)
+			req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("got %d; want 400; body=%s", w.Code, w.Body.String())
+			}
+			srv.cfgMu.RLock()
+			_, added := srv.cfg.Spec.Entries["both"]
+			_, added2 := srv.cfg.Spec.Entries["bad"]
+			srv.cfgMu.RUnlock()
+			if added || added2 {
+				t.Error("a rejected add still claimed an entry in spec.entries")
+			}
+		})
+	}
+}

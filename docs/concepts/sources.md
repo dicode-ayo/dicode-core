@@ -61,6 +61,8 @@ spec:
 
 A tag names one commit for good, so a pinned source has nothing to poll for: it resolves once and is never fetched again, and a tag the remote later re-points is not followed. Bumping the pin is an edit to `dicode.yaml`.
 
+`POST /api/settings/sources` takes `tag` in place of `branch`, so a source can be added pinned without hand-editing the file. It applies the same rules as config-load, so the API cannot write an entry the next boot would reject.
+
 `GET /api/sources` reports a pinned source with `"pinned": true` and its `tag`. Its `last_pull_at` therefore ages by design — read it as "pinned here since", not as a pull gone stale.
 
 Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every attempt.

@@ -1,6 +1,7 @@
 package taskset
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -242,26 +243,32 @@ func isValidSCPHost(s string) bool {
 }
 
 // ValidateRefTarget checks the remote ref a git entry tracks: branch and tag
-// are mutually exclusive, and a tag must be a legal git ref name.
+// are mutually exclusive, and a tag must be a legal git ref name. Local refs
+// track nothing and always pass.
 //
-// It runs at config-load, on every ref in dicode.yaml and in every
+// It runs at config-load on every ref in dicode.yaml and in every
 // taskset.yaml, so a mistyped or contradictory pin is rejected against the
 // line that declares it rather than surfacing 30 seconds later as a clone
-// failure against the remote.
+// failure against the remote. pkg/webui's add-source handler runs it too, so
+// the API cannot accept a ref the next config load would reject.
+//
+// The error names the fields but not the file: the config-load call sites add
+// their own file and entry prefix, and a ref typed into the add-source form
+// has neither.
 //
 // A branch name is not checked: an illegal one already fails its own clone
 // with git's own message, and tightening that here would reject refs the
 // daemon currently accepts.
-func ValidateRefTarget(filePath, key string, ref *Ref) error {
+func ValidateRefTarget(ref *Ref) error {
 	if !ref.IsGit() {
 		return nil
 	}
 	if ref.Tag != "" && ref.Branch != "" {
-		return fmt.Errorf("%s: entry %q: ref.branch and ref.tag are mutually exclusive — set ref.branch to track a moving branch, ref.tag to pin an immutable release", filePath, key)
+		return errors.New("ref.branch and ref.tag are mutually exclusive — set ref.branch to track a moving branch, ref.tag to pin an immutable release")
 	}
 	if ref.Tag != "" {
 		if err := ValidateTagName(ref.Tag); err != nil {
-			return fmt.Errorf("%s: entry %q: ref.tag %q: %w", filePath, key, ref.Tag, err)
+			return fmt.Errorf("ref.tag %q: %w", ref.Tag, err)
 		}
 	}
 	return nil
@@ -288,8 +295,8 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 			if err := ValidateRefURL(path, key, entry.Ref.URL); err != nil {
 				return err
 			}
-			if err := ValidateRefTarget(path, key, entry.Ref); err != nil {
-				return err
+			if err := ValidateRefTarget(entry.Ref); err != nil {
+				return fmt.Errorf("%s: entry %q: %w", path, key, err)
 			}
 		}
 	}

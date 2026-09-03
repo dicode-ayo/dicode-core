@@ -742,8 +742,8 @@ func (cfg *Config) validate() error {
 				if err := taskset.ValidateRefURL("dicode.yaml", name, entry.Ref.URL); err != nil {
 					return err
 				}
-				if err := taskset.ValidateRefTarget("dicode.yaml", name, entry.Ref); err != nil {
-					return err
+				if err := taskset.ValidateRefTarget(entry.Ref); err != nil {
+					return fmt.Errorf("dicode.yaml: entry %q: %w", name, err)
 				}
 			} else if entry.Ref.Path == "" {
 				return fmt.Errorf("spec.entries[%q]: ref.path is required for local entries", name)
