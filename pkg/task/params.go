@@ -57,6 +57,24 @@ func (e ParamErrors) Error() string {
 // Other type names are accepted as-is — unknown types are not the validator's
 // job to police; they're already covered by the loader's spec validation.
 func ValidateParams(declared Params, input map[string]any) (map[string]string, ParamErrors) {
+	return validateParams(declared, input, true)
+}
+
+// ValidateSuppliedParams applies every ValidateParams rule except
+// requiredness: it still rejects unknown keys and still coerces (and
+// type-checks) whatever the caller supplied, but a required param the caller
+// left out — or supplied empty — is not an error.
+//
+// This is the shape the test harness needs. A task's test file mocks its own
+// params in-file and nothing forwards the validated map to the runner, so
+// requiredness there rejects runs over values the run never reads. Junk the
+// caller did supply is still worth reporting, which is why the schema stays
+// closed.
+func ValidateSuppliedParams(declared Params, input map[string]any) (map[string]string, ParamErrors) {
+	return validateParams(declared, input, false)
+}
+
+func validateParams(declared Params, input map[string]any, enforceRequired bool) (map[string]string, ParamErrors) {
 	out := make(map[string]string, len(declared))
 	var errs ParamErrors
 
@@ -79,7 +97,7 @@ func ValidateParams(declared Params, input map[string]any) (map[string]string, P
 				out[p.Name] = p.Default
 				continue
 			}
-			if p.Required {
+			if enforceRequired && p.Required {
 				errs = append(errs, ParamError{Field: p.Name, Message: "required"})
 			}
 			continue
@@ -89,7 +107,7 @@ func ValidateParams(declared Params, input map[string]any) (map[string]string, P
 			errs = append(errs, ParamError{Field: p.Name, Message: err})
 			continue
 		}
-		if p.Required && coerced == "" {
+		if enforceRequired && p.Required && coerced == "" {
 			errs = append(errs, ParamError{Field: p.Name, Message: "required"})
 			continue
 		}
