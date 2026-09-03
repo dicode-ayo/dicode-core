@@ -55,10 +55,10 @@ StatusNotifierHost. Which one depends on your bar.
 Ubuntu LTS**. Build it from source there:
 
 ```
-sudo apt install -y make valac libgtk-3-dev libglib2.0-dev \
+sudo apt install -y git make valac libgtk-3-dev libglib2.0-dev \
                     libdbusmenu-gtk3-dev libdbusmenu-glib-dev
-git clone https://git.sr.ht/~steef/snixembed && cd snixembed
-make && sudo make install     # -> /usr/bin/snixembed
+git clone --branch 0.3.3 --depth 1 https://git.sr.ht/~steef/snixembed
+cd snixembed && make && sudo make install     # -> /usr/bin/snixembed
 ```
 
 KDE's `xembedsniproxy` is **not** an alternative. It bridges XEmbed -> SNI, the
