@@ -83,6 +83,50 @@ func TestSanitizeParams_RedactsEnvAndSecretRefs(t *testing.T) {
 	}
 }
 
+// #810: a value-shape credential must be redacted even under a field name
+// the deny-list has never heard of — the approve_url case only worked
+// because the name itself was denylisted (see TestSanitizeParams_RedactsApproveURL).
+func TestSanitizeParams_RedactsCredentialUnderAnyName(t *testing.T) {
+	got := SanitizeParams(map[string]string{
+		"task_id": "repo/pending-task",
+		"link":    "https://host/approve/dcap_abc123",
+	})
+
+	var m map[string]string
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, got)
+	}
+	if m["link"] != Redacted {
+		t.Errorf("link: got %q, want %q", m["link"], Redacted)
+	}
+	if m["task_id"] != "repo/pending-task" {
+		t.Errorf("task_id should not be redacted: got %q", m["task_id"])
+	}
+	if strings.Contains(got, "dcap_abc123") {
+		t.Errorf("sanitized output leaks the approval token: %s", got)
+	}
+}
+
+func TestSanitizeAny_RedactsCredentialUnderAnyName(t *testing.T) {
+	got := SanitizeAny(map[string]any{
+		"cta":  "https://host/approve/dcap_zzz999",
+		"note": "hello",
+	})
+	if strings.Contains(got, "dcap_zzz999") {
+		t.Fatalf("approval token leaked: %s", got)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, got)
+	}
+	if m["cta"] != Redacted {
+		t.Errorf("cta: got %v, want %q", m["cta"], Redacted)
+	}
+	if m["note"] != "hello" {
+		t.Errorf("note should not be redacted: got %v", m["note"])
+	}
+}
+
 func TestSanitizeParams_Empty(t *testing.T) {
 	if got := SanitizeParams(nil); got != "" {
 		t.Errorf("nil map: got %q, want empty string", got)

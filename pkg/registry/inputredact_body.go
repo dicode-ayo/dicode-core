@@ -69,6 +69,19 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 					vals[k][i] = redactPlaceholder
 				}
 				*redacted = append(*redacted, "body."+k)
+				continue
+			}
+			// Name didn't match; a value might still carry a credential by
+			// shape (see containsCredentialValue).
+			hit := false
+			for i := range vals[k] {
+				if containsCredentialValue(vals[k][i]) {
+					vals[k][i] = redactPlaceholder
+					hit = true
+				}
+			}
+			if hit {
+				*redacted = append(*redacted, "body."+k)
 			}
 		}
 		// Persist as JSON-string-wrapped form encoding for shape consistency.

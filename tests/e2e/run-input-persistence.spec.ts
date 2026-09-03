@@ -216,6 +216,88 @@ test.describe('Group 1: persist + redact', () => {
   );
 });
 
+// ─── Group 1b: Value-shape redaction (#810) ───────────────────────────────────
+//
+// The deny-list above only redacts by field name. #810 adds a second,
+// name-independent check: a value that embeds the "dcap_" approval-token
+// prefix is redacted no matter what field carries it — the gap being that an
+// approval link forwarded through an unlisted name (e.g. "link", "cta",
+// "callback") previously reached the persisted blob in plaintext.
+
+/**
+ * POST to the persistence-test webhook with an approval-token-shaped value
+ * under a query param name the deny-list has never heard of.
+ */
+async function postUnlistedCredentialWebhook(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<string> {
+  const res = await request.post(
+    `${WEBHOOK_PATH}?cb=https%3A%2F%2Fhost%2Fapprove%2Fdcap_e2eRegressionToken`,
+    {
+      headers: { 'Content-Type': 'application/json' },
+      data: { user: 'alice' },
+    },
+  );
+  expect(res.ok()).toBe(true);
+  const runId = res.headers()['x-run-id'];
+  expect(runId).toBeTruthy();
+  return runId;
+}
+
+test.describe('Group 1b: value-shape redaction (#810)', () => {
+  test.setTimeout(60_000);
+
+  test(
+    'a credential-shaped value under an unlisted field name is absent from the on-disk blob',
+    async ({ request }) => {
+      const tempDir = process.env.DICODE_E2E_TEMP_DIR;
+      if (!tempDir) {
+        test.skip(true, 'DICODE_E2E_TEMP_DIR not set');
+        return;
+      }
+
+      const runId = await postUnlistedCredentialWebhook(request);
+      await waitForRun(request, runId);
+
+      const blobPath = path.join(tempDir, 'run-inputs', `${runId}.bin`);
+      await expect.poll(
+        () => fs.existsSync(blobPath),
+        { timeout: 15_000, intervals: [500] },
+      ).toBe(true);
+
+      const raw = fs.readFileSync(blobPath);
+      expect(raw.toString('latin1')).not.toContain('dcap_e2eRegressionToken');
+    },
+  );
+
+  test(
+    'InputRedactedFields includes the unlisted field ("query.cb"), not just deny-listed names',
+    async ({ request }) => {
+      const runId = await postUnlistedCredentialWebhook(request);
+      await waitForRun(request, runId);
+
+      await expect.poll(
+        async () => {
+          const res = await request.get(`/api/runs/${runId}`);
+          if (!res.ok()) return null;
+          const run = (await res.json()) as Record<string, unknown>;
+          return run.InputStorageKey ?? null;
+        },
+        { timeout: 15_000, intervals: [500] },
+      ).toBeTruthy();
+
+      const res = await request.get(`/api/runs/${runId}`);
+      expect(res.ok()).toBe(true);
+      const run = (await res.json()) as Record<string, unknown>;
+      const fields = (run.InputRedactedFields ?? []) as string[];
+
+      // "cb" is not on any deny-list (name or substring) — only the
+      // value-shape check catches it.
+      expect(fields).toContain('query.cb');
+    },
+  );
+});
+
 // ─── Group 2: Cleanup task is runnable ────────────────────────────────────────
 
 // The cleanup task is registered under the e2e-tests namespace because it is

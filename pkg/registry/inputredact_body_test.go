@@ -72,6 +72,38 @@ func TestRedactBody_FormURLEncoded(t *testing.T) {
 	}
 }
 
+// #810: a form field carrying a credential-shaped value must be redacted
+// even when its name isn't on the deny-list.
+func TestRedactBody_FormURLEncoded_ValueShapeCredential(t *testing.T) {
+	body := []byte("user=alice&link=https%3A%2F%2Fhost%2Fapprove%2Fdcap_abc123")
+	redacted := []string{}
+	out := redactBody(body, "application/x-www-form-urlencoded", false, &redacted)
+
+	var encoded string
+	if err := json.Unmarshal(out.Body, &encoded); err != nil {
+		t.Fatalf("body should be JSON string: %v", err)
+	}
+	parsed, err := url.ParseQuery(encoded)
+	if err != nil {
+		t.Fatalf("re-encoded form should parse: %v", err)
+	}
+	if parsed.Get("user") != "alice" {
+		t.Errorf("user mutated: %q", parsed.Get("user"))
+	}
+	if parsed.Get("link") != redactPlaceholder {
+		t.Errorf("link not redacted: %q", parsed.Get("link"))
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body.link" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body.link", redacted)
+	}
+}
+
 func TestRedactBody_BinaryDefaultOmitted(t *testing.T) {
 	body := []byte{0x00, 0x01, 0x02, 0x03}
 	redacted := []string{}

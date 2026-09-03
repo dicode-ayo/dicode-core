@@ -76,6 +76,28 @@ func isSecretRef(v string) bool {
 	return false
 }
 
+// credentialValuePrefixes catches a credential by its value shape, for field
+// names denyExact/denySubstrings haven't been taught yet — see the mirrored
+// copy and full rationale in pkg/registry/inputredact.go (#810). dcap_ is
+// pkg/approval.tokenPrefix (unexported there); the two packages already
+// mirror deny-list names by hand for the same reason (see the comment on
+// denyExact above).
+var credentialValuePrefixes = []string{"dcap_"}
+
+// containsCredentialValue reports whether v embeds a recognizable credential
+// value anywhere in it, not only as the whole value — unlike isSecretRef's
+// whole-value env:/secret: refs, a token typically rides inside a larger
+// string (e.g. a full https://host/approve/dcap_xxx URL).
+func containsCredentialValue(v string) bool {
+	lower := strings.ToLower(v)
+	for _, p := range credentialValuePrefixes {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // SanitizeParams sanitizes a flat string param map (the shape used by task
 // triggers) and returns it as a deterministic JSON object string. Values
 // are replaced with Redacted when either the key name matches the
@@ -87,7 +109,7 @@ func SanitizeParams(params map[string]string) string {
 	}
 	out := make(map[string]string, len(params))
 	for k, v := range params {
-		if shouldRedactName(k) || isSecretRef(v) {
+		if shouldRedactName(k) || isSecretRef(v) || containsCredentialValue(v) {
 			out[k] = Redacted
 			continue
 		}
@@ -135,7 +157,7 @@ func sanitizeValue(v any, depth int) any {
 	case map[string]string:
 		out := make(map[string]any, len(x))
 		for k, child := range x {
-			if shouldRedactName(k) || isSecretRef(child) {
+			if shouldRedactName(k) || isSecretRef(child) || containsCredentialValue(child) {
 				out[k] = Redacted
 				continue
 			}
@@ -149,7 +171,7 @@ func sanitizeValue(v any, depth int) any {
 		}
 		return out
 	case string:
-		if isSecretRef(x) {
+		if isSecretRef(x) || containsCredentialValue(x) {
 			return Redacted
 		}
 		return x
@@ -159,7 +181,7 @@ func sanitizeValue(v any, depth int) any {
 	default:
 		// Unknown Go type — fall back to its string form, redacting refs.
 		s := fmt.Sprintf("%v", x)
-		if isSecretRef(s) {
+		if isSecretRef(s) || containsCredentialValue(s) {
 			return Redacted
 		}
 		return s
