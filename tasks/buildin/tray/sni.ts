@@ -71,8 +71,9 @@ export function trayVisibilityHint(
   return (
     "tray: no StatusNotifierItem host is running on the session bus, so the " +
     "icon will not appear. Bare window managers (i3/dwm/bspwm/sway) don't host " +
-    "SNI by default. Run an SNI-capable bar (polybar ≥3.6 `internal/tray`, " +
-    "waybar), or bridge to i3bar with `snixembed` / `xembedsniproxy`. " +
+    "SNI by default. On Wayland use waybar's tray module; on X11 run " +
+    "`snixembed --fork` in front of your bar — i3bar and polybar render " +
+    "only XEmbed. " +
     "See tasks/buildin/tray/README.md."
   );
 }
