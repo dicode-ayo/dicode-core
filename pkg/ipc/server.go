@@ -380,10 +380,13 @@ func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 // URL is the configured source URL with any userinfo stripped by the caller
 // building this value; a PAT embedded there is a credential, not an address.
 type SourceSummary struct {
-	Name    string `json:"name"`
-	Type    string `json:"type,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+	URL  string `json:"url,omitempty"`
+	// Exactly one of Branch or Tag is set on a git source: a pinned source
+	// tracks a tag, so reporting only Branch would show it as tracking nothing.
 	Branch  string `json:"branch,omitempty"`
+	Tag     string `json:"tag,omitempty"`
 	DevMode bool   `json:"dev_mode"`
 }
 

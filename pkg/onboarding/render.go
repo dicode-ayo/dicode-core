@@ -43,7 +43,11 @@ spec:
 		if !r.TaskSetsEnabled[p.Name] {
 			continue
 		}
-		fmt.Fprintf(&b, "    %s:\n      ref:\n        url: %q\n        branch: %q\n        path: %q\n        poll_interval: 30s\n", p.Name, p.URL, p.Branch, p.EntryPath)
+		target := fmt.Sprintf("branch: %q", p.Branch)
+		if p.Tag != "" {
+			target = fmt.Sprintf("tag: %q", p.Tag)
+		}
+		fmt.Fprintf(&b, "    %s:\n      ref:\n        url: %q\n        %s\n        path: %q\n        poll_interval: 30s\n", p.Name, p.URL, target, p.EntryPath)
 	}
 
 	if r.LocalTasksDir != "" {

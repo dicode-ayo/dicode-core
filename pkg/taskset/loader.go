@@ -241,6 +241,32 @@ func isValidSCPHost(s string) bool {
 	return true
 }
 
+// ValidateRefTarget checks the remote ref a git entry tracks: branch and tag
+// are mutually exclusive, and a tag must be a legal git ref name.
+//
+// It runs at config-load, on every ref in dicode.yaml and in every
+// taskset.yaml, so a mistyped or contradictory pin is rejected against the
+// line that declares it rather than surfacing 30 seconds later as a clone
+// failure against the remote.
+//
+// A branch name is not checked: an illegal one already fails its own clone
+// with git's own message, and tightening that here would reject refs the
+// daemon currently accepts.
+func ValidateRefTarget(filePath, key string, ref *Ref) error {
+	if !ref.IsGit() {
+		return nil
+	}
+	if ref.Tag != "" && ref.Branch != "" {
+		return fmt.Errorf("%s: entry %q: ref.branch and ref.tag are mutually exclusive — set ref.branch to track a moving branch, ref.tag to pin an immutable release", filePath, key)
+	}
+	if ref.Tag != "" {
+		if err := ValidateTagName(ref.Tag); err != nil {
+			return fmt.Errorf("%s: entry %q: ref.tag %q: %w", filePath, key, ref.Tag, err)
+		}
+	}
+	return nil
+}
+
 func validateTaskSet(ts *TaskSetSpec, path string) error {
 	if ts.Spec.Entries == nil {
 		return fmt.Errorf("%s: spec.entries is required", path)
@@ -260,6 +286,9 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 		}
 		if entry.Ref != nil && entry.Ref.URL != "" {
 			if err := ValidateRefURL(path, key, entry.Ref.URL); err != nil {
+				return err
+			}
+			if err := ValidateRefTarget(path, key, entry.Ref); err != nil {
 				return err
 			}
 		}

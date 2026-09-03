@@ -13,9 +13,12 @@ import (
 // Ref points to a yaml file (kind: Task or kind: TaskSet).
 // If URL is non-empty it is a git ref; otherwise Path is an absolute local path.
 type Ref struct {
-	URL          string        `yaml:"url,omitempty"`
-	Path         string        `yaml:"path"`
+	URL  string `yaml:"url,omitempty"`
+	Path string `yaml:"path"`
+	// Branch tracks a moving head; Tag pins to one immutable commit. They are
+	// mutually exclusive, and a git ref with neither tracks branch "main".
 	Branch       string        `yaml:"branch,omitempty"`
+	Tag          string        `yaml:"tag,omitempty"`
 	PollInterval time.Duration `yaml:"poll_interval,omitempty"`
 	Auth         RefAuth       `yaml:"auth,omitempty"`
 	// DevRef is substituted in place of this ref when dev mode is active.
@@ -73,12 +76,41 @@ func SourceID(name string, ref *Ref) string {
 	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
-// effectiveBranch returns the branch, defaulting to "main".
-func (r *Ref) effectiveBranch() string {
-	if r.Branch != "" {
-		return r.Branch
+// gitTarget names the remote ref a clone tracks: exactly one of Branch or Tag.
+// It is comparable so it can key the resolver's clone cache, where a branch
+// and a tag of the same name must never share an entry.
+type gitTarget struct {
+	Branch string
+	Tag    string
+}
+
+// isPinned reports whether this target names an immutable commit.
+func (t gitTarget) isPinned() bool { return t.Tag != "" }
+
+// String renders the target for error messages and diagnostics. A tag is
+// spelled with its "tag:" prefix so it can never be read as a branch of the
+// same name.
+func (t gitTarget) String() string {
+	if t.Tag != "" {
+		return "tag:" + t.Tag
 	}
-	return "main"
+	return t.Branch
+}
+
+// IsPinned reports whether this ref names an immutable commit. A pinned ref
+// has nothing to poll for: the remote cannot move it.
+func (r *Ref) IsPinned() bool { return r.Tag != "" }
+
+// target returns the remote ref this git ref resolves against, defaulting to
+// branch "main" when neither branch nor tag is set.
+func (r *Ref) target() gitTarget {
+	if r.IsPinned() {
+		return gitTarget{Tag: r.Tag}
+	}
+	if r.Branch != "" {
+		return gitTarget{Branch: r.Branch}
+	}
+	return gitTarget{Branch: "main"}
 }
 
 // effectivePoll returns the poll interval, defaulting to 30s.

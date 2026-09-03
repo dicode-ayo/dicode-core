@@ -238,7 +238,7 @@ Response:
 }
 ```
 
-**GET `/api/sources`** items also carry pull-health and load-failure fields (#649) — `last_pull_at`/`last_pull_ok`/`last_pull_error` are omitted until a pull has actually been attempted, and `failed_count`/`failures` are omitted while everything under that source parses cleanly:
+**GET `/api/sources`** items also carry pull-health and load-failure fields (#649) — `last_pull_at`/`last_pull_ok`/`last_pull_error` are omitted until a pull has actually been attempted, and `failed_count`/`failures` are omitted while everything under that source parses cleanly. A source pinned to a tag reports `"pinned": true` alongside its `tag`, and is never polled, so its `last_pull_at` ages by design — read it as "pinned here since" rather than as a stale pull:
 
 ```json
 {

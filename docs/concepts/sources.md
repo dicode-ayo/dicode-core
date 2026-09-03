@@ -37,12 +37,33 @@ spec:
 |---|---|---|
 | `path` | required (local) | Absolute path to `taskset.yaml`; `${CONFIGDIR}` and `${HOME}` expanded |
 | `url` | required (git) | HTTPS or SSH git URL |
-| `branch` | `main` | Branch to track (git only) |
-| `poll_interval` | `30s` | How often to fetch (git only) |
+| `branch` | `main` | Branch to track (git only); mutually exclusive with `tag` |
+| `tag` | | Tag to pin to (git only); mutually exclusive with `branch` |
+| `poll_interval` | `30s` | How often to fetch (git only); ignored on a pinned ref |
 | `auth.token_env` | | Env var holding a personal access token |
 | `auth.ssh_key` | | Path to an SSH private key |
 | `watch` | `true` | Enable fsnotify live reload (local refs) |
 | `dev_ref` | | Substitute ref when dev mode is active |
+
+### Pinning a source to a release
+
+A `branch` ref follows whatever its head becomes on the next poll. Set `tag` instead to run exactly one release:
+
+```yaml
+spec:
+  entries:
+    buildin:
+      ref:
+        url: https://github.com/dicode-ayo/dicode-buildin
+        tag: v0.1.0
+        path: taskset.yaml
+```
+
+A tag names one commit for good, so a pinned source has nothing to poll for: it resolves once and is never fetched again, and a tag the remote later re-points is not followed. Bumping the pin is an edit to `dicode.yaml`.
+
+`GET /api/sources` reports a pinned source with `"pinned": true` and its `tag`. Its `last_pull_at` therefore ages by design — read it as "pinned here since", not as a pull gone stale.
+
+Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every attempt.
 
 `auth.token_env` is only honoured on a ref declared directly in `dicode.yaml` or in a source's root `taskset.yaml` — never on a `ref` discovered while resolving an already-resolved `TaskSet` entry further down the tree. A dropped `token_env` on a nested ref is logged as a warning rather than failing the resolve. This keeps a source that only grants write access to its own task tree (e.g. an AI authoring session) from being able to name an arbitrary daemon env var as a git credential and hand it to a host of its choosing on the next reconcile — see [#740](https://github.com/dicode-ayo/dicode-core/issues/740).
 

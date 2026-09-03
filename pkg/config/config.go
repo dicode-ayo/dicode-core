@@ -617,9 +617,11 @@ func applyDefaults(cfg *Config, configDir string) {
 			continue
 		}
 		entry.Ref.Path = expand(entry.Ref.Path)
-		// Apply defaults for git refs.
+		// Apply defaults for git refs. A pinned ref names its own commit, so
+		// defaulting a branch onto it would both contradict the pin and trip
+		// the branch/tag mutual-exclusion check in validate().
 		if entry.Ref.IsGit() {
-			if entry.Ref.Branch == "" {
+			if entry.Ref.Branch == "" && !entry.Ref.IsPinned() {
 				entry.Ref.Branch = "main"
 			}
 			if entry.Ref.PollInterval == 0 {
@@ -738,6 +740,9 @@ func (cfg *Config) validate() error {
 			if entry.Ref.IsGit() {
 				// URL is present (checked by IsGit); validate its scheme.
 				if err := taskset.ValidateRefURL("dicode.yaml", name, entry.Ref.URL); err != nil {
+					return err
+				}
+				if err := taskset.ValidateRefTarget("dicode.yaml", name, entry.Ref); err != nil {
 					return err
 				}
 			} else if entry.Ref.Path == "" {

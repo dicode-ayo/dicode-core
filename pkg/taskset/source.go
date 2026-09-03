@@ -35,7 +35,8 @@ var ErrDevModeBusy = errors.New("dev-mode: a clone session with this run ID is a
 // For local sources fsnotify is used to react to file changes immediately
 // (debounced at 150 ms). For git sources a periodic ticker pulls from the
 // remote; fsnotify on the local clone directory then detects actual file
-// changes so syncAndEmit only runs when content has changed.
+// changes so syncAndEmit only runs when content has changed. A git ref pinned
+// to a tag is resolved once and never polled — see Ref.IsPinned.
 type Source struct {
 	id         string
 	namespace  string
@@ -144,6 +145,10 @@ func NewSource(
 		snapshot:     make(map[string]taskSnap),
 		failures:     make(map[string]task.LoadFailure),
 	}
+	// Pinning is fixed for the source's lifetime, so the health surface
+	// carries it from the start rather than only from the first recorded pull
+	// — a pinned source may never record one.
+	s.pullStatus.ps.Pinned = rootRef != nil && rootRef.IsPinned()
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -466,7 +471,8 @@ func (s *Source) latestCloneRunIDLocked() string {
 
 // enableClone clones this source's git repo into ${dataDir}/dev-clones/<namespace>/<runID>/
 // and returns the path to the cloned taskset.yaml. If opts.Branch doesn't exist
-// remotely, it is created locally from opts.Base (or the source's tracked branch).
+// remotely, it is created locally from opts.Base (or the source's tracked
+// branch, or the tag it is pinned to).
 // Pure go-git — no `git` binary.
 func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, error) {
 	if opts.RunID == "" {
@@ -528,16 +534,24 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 		// branch doesn't exist — create it locally from Base
 		base := opts.Base
 		if base == "" {
+			// A pinned source has no branch to fork from; the commit it
+			// actually runs is the one the fix should be built on.
 			base = s.rootRef.Branch
+			if base == "" {
+				base = s.rootRef.Tag
+			}
 		}
 		if base == "" {
 			return "", fmt.Errorf("checkout %q failed and no base branch resolvable: %w", opts.Branch, err)
 		}
-		// Try local branch ref first, then fall back to remote tracking ref.
+		// Try local branch ref first, then the remote tracking ref, then a tag.
 		baseHash, resolveErr := repo.ResolveRevision(plumbing.Revision(plumbing.NewBranchReferenceName(base)))
 		if resolveErr != nil {
 			remoteRef := plumbing.NewRemoteReferenceName("origin", base)
 			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(remoteRef))
+		}
+		if resolveErr != nil {
+			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(plumbing.NewTagReferenceName(base)))
 			if resolveErr != nil {
 				return "", fmt.Errorf("resolve base %q: %w", base, resolveErr)
 			}
@@ -631,7 +645,8 @@ func (s *Source) SetParentOverrides(ov *Overrides) {
 //     ticker re-registers any new task directories added since last sync.
 //   - For git sources:    a pull ticker fetches from the remote on every
 //     pollInterval; fsnotify then fires only when the pull actually changed
-//     files on disk, so syncAndEmit is skipped on no-op pulls.
+//     files on disk, so syncAndEmit is skipped on no-op pulls. A ref pinned
+//     to a tag gets no pull ticker at all.
 //
 // Falls back to a plain polling loop if fsnotify is unavailable.
 func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
@@ -664,9 +679,11 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 		}
 	}
 
-	// Pull ticker — only for git sources; nil for local.
+	// Pull ticker — only for git sources tracking a branch; nil for local and
+	// for pinned ones, which have nothing to poll for: the remote cannot move
+	// a tag out from under the clone.
 	var pullTickC <-chan time.Time
-	if s.rootRef.IsGit() {
+	if s.rootRef.IsGit() && !s.rootRef.IsPinned() {
 		pt := time.NewTicker(s.pollInterval)
 		defer pt.Stop()
 		pullTickC = pt.C
@@ -752,7 +769,7 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 					zap.String("id", s.id), zap.Error(err))
 			}
 		case <-ticker.C:
-			if s.rootRef.IsGit() {
+			if s.rootRef.IsGit() && !s.rootRef.IsPinned() {
 				_, err := s.resolver.Pull(ctx, s.rootRef)
 				s.recordPull(err)
 				if err != nil {

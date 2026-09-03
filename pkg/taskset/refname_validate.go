@@ -1,5 +1,6 @@
-// Package-level validator for branch names accepted by dev-mode clone-mode
-// and dicode.git.commit_push. Pure function — no I/O.
+// Package-level validators for the git ref names dicode accepts: branch names
+// (dev-mode clone-mode and dicode.git.commit_push) and the tag a source pins
+// itself to. Pure functions — no I/O.
 //
 // Rules (spec § 4.6.3): git check-ref-format equivalent + literal-prefix
 // match against the per-task branch_prefix. Glob/regex characters in the
@@ -15,6 +16,7 @@ import (
 
 var (
 	ErrInvalidBranchName    = errors.New("invalid branch name (git check-ref-format)")
+	ErrInvalidTagName       = errors.New("invalid tag name (git check-ref-format)")
 	ErrBranchPrefixMismatch = errors.New("branch does not start with required prefix")
 	ErrInvalidRunID         = errors.New("invalid run ID")
 )
@@ -45,45 +47,65 @@ func ValidateRunID(runID string) error {
 // ValidateBranchName enforces git check-ref-format rules plus a literal-prefix
 // match against `prefix`. An empty prefix means "no prefix required".
 func ValidateBranchName(branch, prefix string) error {
-	if branch == "" {
-		return fmt.Errorf("%w: empty", ErrInvalidBranchName)
-	}
-	if branch == "@" {
-		return fmt.Errorf("%w: name '@' is not allowed", ErrInvalidBranchName)
-	}
-	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") {
-		return fmt.Errorf("%w: leading/trailing slash", ErrInvalidBranchName)
-	}
-	if strings.HasPrefix(branch, "-") {
-		return fmt.Errorf("%w: leading dash", ErrInvalidBranchName)
-	}
-	if strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
-		return fmt.Errorf("%w: forbidden sequence", ErrInvalidBranchName)
-	}
-	for _, r := range branch {
-		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("%w: control char", ErrInvalidBranchName)
-		}
-		switch r {
-		case ' ', '~', '^', ':', '?', '*', '[', '\\':
-			return fmt.Errorf("%w: forbidden char %q", ErrInvalidBranchName, r)
-		}
-	}
-	for _, comp := range strings.Split(branch, "/") {
-		if strings.HasPrefix(comp, ".") {
-			return fmt.Errorf("%w: component starts with '.'", ErrInvalidBranchName)
-		}
-		if strings.HasSuffix(comp, ".") {
-			return fmt.Errorf("%w: component ends with '.'", ErrInvalidBranchName)
-		}
-		if strings.HasSuffix(comp, ".lock") {
-			return fmt.Errorf("%w: component ends with '.lock'", ErrInvalidBranchName)
-		}
+	if reason := refNameViolation(branch); reason != "" {
+		return fmt.Errorf("%w: %s", ErrInvalidBranchName, reason)
 	}
 	if prefix != "" && !strings.HasPrefix(branch, prefix) {
 		return fmt.Errorf("%w: branch %q does not start with %q", ErrBranchPrefixMismatch, branch, prefix)
 	}
 	return nil
+}
+
+// ValidateTagName enforces the same git check-ref-format rules on the tag a
+// git ref pins itself to. Tags carry no prefix convention, so unlike a branch
+// there is nothing further to match against.
+func ValidateTagName(tag string) error {
+	if reason := refNameViolation(tag); reason != "" {
+		return fmt.Errorf("%w: %s", ErrInvalidTagName, reason)
+	}
+	return nil
+}
+
+// refNameViolation returns why name is not a legal git ref name, or "" when
+// it is one. git check-ref-format applies the same rules to every ref
+// namespace, so branch and tag names share this one implementation.
+func refNameViolation(name string) string {
+	if name == "" {
+		return "empty"
+	}
+	if name == "@" {
+		return "name '@' is not allowed"
+	}
+	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return "leading/trailing slash"
+	}
+	if strings.HasPrefix(name, "-") {
+		return "leading dash"
+	}
+	if strings.Contains(name, "..") || strings.Contains(name, "//") || strings.Contains(name, "@{") {
+		return "forbidden sequence"
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "control char"
+		}
+		switch r {
+		case ' ', '~', '^', ':', '?', '*', '[', '\\':
+			return fmt.Sprintf("forbidden char %q", r)
+		}
+	}
+	for _, comp := range strings.Split(name, "/") {
+		if strings.HasPrefix(comp, ".") {
+			return "component starts with '.'"
+		}
+		if strings.HasSuffix(comp, ".") {
+			return "component ends with '.'"
+		}
+		if strings.HasSuffix(comp, ".lock") {
+			return "component ends with '.lock'"
+		}
+	}
+	return ""
 }
 
 // ValidateBranchPrefix is invoked at config-load on each task's branch_prefix

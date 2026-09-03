@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/dicode/dicode/internal/gitops"
+	"github.com/dicode/dicode/pkg/source"
+	"go.uber.org/zap"
 )
 
 // seededBareRepo is a bare repo on disk plus a scratch worktree used to
@@ -117,8 +120,8 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 	bare.commit(t, "c", "three", "commit 3")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := cloneOrPull(context.Background(), clone, bare.url, "main", ""); err != nil {
-		t.Fatalf("cloneOrPull: %v", err)
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+		t.Fatalf("syncClone: %v", err)
 	}
 
 	if got := countCommits(t, clone); got < 3 {
@@ -133,7 +136,7 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 // pull fails with a reconcile-style error ("pull: object not found")
 // no matter how long you wait.
 //
-// cloneOrPull must detect that failure class, wipe the directory, and
+// syncClone must detect that failure class, wipe the directory, and
 // re-clone from scratch — otherwise operators have to manually
 // `rm -rf ~/.dicode/tasksets` after every upgrade.
 //
@@ -148,7 +151,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := cloneOrPull(context.Background(), clone, bare.url, "main", ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
 		t.Fatalf("initial clone: %v", err)
 	}
 
@@ -171,9 +174,9 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "b", "two", "commit 2")
 	bare.commit(t, "c", "three", "commit 3")
 
-	// cloneOrPull must detect the broken clone and recover.
-	if err := cloneOrPull(context.Background(), clone, bare.url, "main", ""); err != nil {
-		t.Fatalf("cloneOrPull did not recover from corrupted clone: %v", err)
+	// syncClone must detect the broken clone and recover.
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+		t.Fatalf("syncClone did not recover from corrupted clone: %v", err)
 	}
 
 	if got := countCommits(t, clone); got < 3 {
@@ -182,7 +185,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 }
 
 // TestIsReclonableError spot-checks the error-signature heuristic used
-// by cloneOrPull to decide whether to wipe and re-clone vs propagate.
+// by syncClone to decide whether to wipe and re-clone vs propagate.
 // Keeps the production error messages observed in the wild locked in.
 func TestIsReclonableError(t *testing.T) {
 	cases := []struct {
@@ -234,18 +237,146 @@ func TestCloneOrPull_PullAfterRemoteAdvance(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := cloneOrPull(context.Background(), clone, bare.url, "main", ""); err != nil {
-		t.Fatalf("initial cloneOrPull: %v", err)
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+		t.Fatalf("initial syncClone: %v", err)
 	}
 
 	bare.commit(t, "b", "two", "commit 2")
 	bare.commit(t, "c", "three", "commit 3")
 
-	if err := cloneOrPull(context.Background(), clone, bare.url, "main", ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
 		t.Fatalf("pull after remote advance: %v", err)
 	}
 
 	if got := countCommits(t, clone); got < 3 {
 		t.Errorf("after pull, clone has %d commits; want >=3", got)
+	}
+}
+
+// commitTree writes every path in files (relative, subdirectories created as
+// needed), commits them, and pushes to the bare remote.
+func (r *seededBareRepo) commitTree(t *testing.T, files map[string]string, msg string) {
+	t.Helper()
+	tree, err := r.wt.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+	for name, body := range files {
+		full := filepath.Join(r.wtPath, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if _, err := tree.Add(name); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+	}
+	if _, err := tree.Commit(msg, &gogit.CommitOptions{
+		Author: &object.Signature{Name: "t", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := r.wt.Push(&gogit.PushOptions{RemoteName: "origin"}); err != nil && err != gogit.NoErrAlreadyUpToDate {
+		t.Fatalf("push: %v", err)
+	}
+}
+
+// tagHead tags the current HEAD and pushes the tag.
+func (r *seededBareRepo) tagHead(t *testing.T, name string) {
+	t.Helper()
+	head, err := r.wt.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if _, err := r.wt.CreateTag(name, head.Hash(), nil); err != nil {
+		t.Fatalf("create tag: %v", err)
+	}
+	err = r.wt.Push(&gogit.PushOptions{
+		RemoteName: "origin",
+		RefSpecs:   []gogitconfig.RefSpec{"+refs/tags/*:refs/tags/*"},
+	})
+	if err != nil && err != gogit.NoErrAlreadyUpToDate {
+		t.Fatalf("push tag: %v", err)
+	}
+}
+
+func tasksetRepoFiles(cron string) map[string]string {
+	return map[string]string{
+		"taskset.yaml":           "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n    deploy:\n      ref:\n        path: tasks/deploy/task.yaml\n",
+		"tasks/deploy/task.yaml": "apiVersion: dicode/v1\nkind: Task\nname: deploy\nruntime: deno\ntrigger:\n  cron: \"" + cron + "\"\n",
+		"tasks/deploy/task.js":   "// task",
+	}
+}
+
+// TestSource_PinnedTagDoesNotFollowTheBranch is #825's headline guarantee: a
+// source pinned to a tag registers the tagged commit's tasks and stays there
+// while the branch it was cut from moves on underneath it.
+func TestSource_PinnedTagDoesNotFollowTheBranch(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commitTree(t, tasksetRepoFiles("0 8 * * *"), "release")
+	bare.tagHead(t, "v1.0.0")
+	bare.commitTree(t, tasksetRepoFiles("0 9 * * *"), "move on")
+
+	ref := &Ref{URL: bare.url, Tag: "v1.0.0", Path: "taskset.yaml", PollInterval: 50 * time.Millisecond}
+	src := NewSource("pinned", "infra", ref, "", t.TempDir(), false, 50*time.Millisecond, zap.NewNop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Long enough for several poll intervals: an unpinned source would have
+	// pulled the newer commit and emitted an update by now.
+	events := collectEvents(t, ch, 500*time.Millisecond)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want exactly the one Added for the pinned commit: %+v", len(events), events)
+	}
+	ev := events[0]
+	if ev.Kind != source.EventAdded || ev.TaskID != "infra/deploy" {
+		t.Fatalf("got %v for %q, want EventAdded for infra/deploy", ev.Kind, ev.TaskID)
+	}
+	if got := asSpec(ev.Kinded).Trigger.Cron; got != "0 8 * * *" {
+		t.Errorf("resolved cron = %q, want the tagged commit's %q", got, "0 8 * * *")
+	}
+
+	ps := src.PullStatus()
+	if !ps.Pinned {
+		t.Error("PullStatus().Pinned = false on a tag-pinned source")
+	}
+	if !ps.OK || ps.LastPullAt.IsZero() {
+		t.Errorf("PullStatus() = %+v, want a recorded successful resolve", ps)
+	}
+}
+
+// TestSource_UnknownTagReportsItAndRegistersNothing covers the operator-typo
+// path end to end: the source comes up, reports the failure through the health
+// surface the webui reads, and registers no tasks.
+func TestSource_UnknownTagReportsItAndRegistersNothing(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commitTree(t, tasksetRepoFiles("0 8 * * *"), "release")
+	bare.tagHead(t, "v1.0.0")
+
+	ref := &Ref{URL: bare.url, Tag: "v9.9.9", Path: "taskset.yaml", PollInterval: 50 * time.Millisecond}
+	src := NewSource("pinned", "infra", ref, "", t.TempDir(), false, 50*time.Millisecond, zap.NewNop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if events := collectEvents(t, ch, 300*time.Millisecond); len(events) != 0 {
+		t.Fatalf("got %d events for an unresolvable tag, want none: %+v", len(events), events)
+	}
+	ps := src.PullStatus()
+	if ps.OK {
+		t.Error("PullStatus().OK = true for an unknown tag")
+	}
+	if !strings.Contains(ps.Error, "v9.9.9") {
+		t.Errorf("PullStatus().Error = %q, want it to name the missing tag", ps.Error)
 	}
 }

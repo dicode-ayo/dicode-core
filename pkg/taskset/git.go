@@ -6,13 +6,22 @@ import (
 	"github.com/dicode/dicode/internal/gitops"
 )
 
-// cloneOrPull clones url@branch into dir if not present, otherwise pulls.
-// tokenEnv is the name of an env var holding an HTTP auth token; pass "" for public repos.
+// syncClone brings the clone at dir onto tgt, cloning it first if it is not
+// there yet. tokenEnv is the name of an env var holding an HTTP auth token;
+// pass "" for public repos.
 //
-// Delegates to internal/gitops.CloneOrPull which handles re-clone-on-corrupt
-// recovery (see #175, #176).
-func cloneOrPull(ctx context.Context, dir, url, branch, tokenEnv string) error {
-	return gitops.CloneOrPull(ctx, dir, url, branch, gitops.HTTPAuth(tokenEnv))
+// The two targets refresh differently: a branch is pulled, because the remote
+// head moves; a tag names one commit for good, so it is checked out and only
+// fetched when the clone has never seen it.
+//
+// Delegates to internal/gitops, which handles re-clone-on-corrupt recovery
+// (see #175, #176).
+func syncClone(ctx context.Context, dir, url string, tgt gitTarget, tokenEnv string) error {
+	auth := gitops.HTTPAuth(tokenEnv)
+	if tgt.isPinned() {
+		return gitops.CloneAtTag(ctx, dir, url, tgt.Tag, auth)
+	}
+	return gitops.CloneOrPull(ctx, dir, url, tgt.Branch, auth)
 }
 
 // isReclonableError reports whether the local clone is in a state that
