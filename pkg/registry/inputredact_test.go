@@ -357,3 +357,126 @@ func TestRedactParams_DepthGuard(t *testing.T) {
 	// If we exit the loop without hitting a string, the depth guard never fired.
 	t.Errorf("depth guard never triggered; walked all 100 levels without hitting placeholder")
 }
+
+func TestContainsCredentialValue(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"bare token", "dcap_abc123", true},
+		{"embedded in URL", "https://host/approve/dcap_abc123XYZ", true},
+		{"uppercase prefix", "DCAP_ABC123", true},
+		{"plain url", "https://host/?run=run-9", false},
+		{"unrelated string", "hello world", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := containsCredentialValue(tc.in); got != tc.want {
+				t.Errorf("containsCredentialValue(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// #810: a token embedded in a value must be redacted even when the field
+// name carrying it isn't on the deny-list — the exact gap the issue
+// describes (approve_url only worked because #807 added that specific
+// name; a task author who forwards the same link through `link`, `cta`, or
+// `callback` got nothing).
+func TestRedactParams_ValueShapeCredential_UnlistedFieldName(t *testing.T) {
+	in := map[string]any{
+		"link":  "https://host/approve/dcap_9f8e7d6c5b",
+		"cta":   "Click here",
+		"plain": "https://host/dashboard",
+	}
+	redacted := []string{}
+	out := redactParams(in, "params", &redacted).(map[string]any)
+
+	if got := out["link"]; got != redactPlaceholder {
+		t.Errorf("params.link = %v, want redacted placeholder", got)
+	}
+	if got := out["cta"]; got != "Click here" {
+		t.Errorf("params.cta should not be redacted: %v", got)
+	}
+	if got := out["plain"]; got != "https://host/dashboard" {
+		t.Errorf("params.plain should not be redacted: %v", got)
+	}
+
+	found := false
+	for _, p := range redacted {
+		if p == "params.link" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "params.link", redacted)
+	}
+}
+
+func TestRedactHeaders_ValueShapeCredential_UnlistedName(t *testing.T) {
+	in := map[string][]string{
+		"X-Callback-Link": {"https://host/approve/dcap_zzz"},
+		"User-Agent":      {"Mozilla/5.0"},
+	}
+	redacted := []string{}
+	out := redactHeaders(in, &redacted)
+
+	if got := out["X-Callback-Link"][0]; got != redactPlaceholder {
+		t.Errorf("X-Callback-Link not redacted: %q", got)
+	}
+	if got := out["User-Agent"][0]; got != "Mozilla/5.0" {
+		t.Errorf("User-Agent should not be redacted: %q", got)
+	}
+	wantPath := "headers.X-Callback-Link"
+	found := false
+	for _, p := range redacted {
+		if p == wantPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", wantPath, redacted)
+	}
+}
+
+func TestRedactQuery_ValueShapeCredential_UnlistedName(t *testing.T) {
+	in := map[string][]string{
+		"cb":   {"https://host/approve/dcap_yyy"},
+		"page": {"1"},
+	}
+	redacted := []string{}
+	out := redactQuery(in, &redacted)
+
+	if out["cb"][0] != redactPlaceholder {
+		t.Errorf("cb not redacted: %q", out["cb"][0])
+	}
+	if out["page"][0] != "1" {
+		t.Errorf("page should not be redacted: %q", out["page"][0])
+	}
+}
+
+// End-to-end regression for #810 through the same entry point the approval
+// hook's notify_task fire uses (BuildPersistedInputFromRunOpts), but with the
+// token under a field name the deny-list has never heard of.
+func TestBuildPersistedInputFromRunOpts_RedactsCredentialUnderAnyFieldName(t *testing.T) {
+	params := map[string]string{
+		"task_id": "repo/pending-task",
+		"link":    "https://host/approve/dcap_deadbeef",
+	}
+	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+
+	if got := in.Params["link"]; got != redactPlaceholder {
+		t.Errorf("params.link = %v, want redacted placeholder", got)
+	}
+	found := false
+	for _, p := range in.RedactedFields {
+		if p == "params.link" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in RedactedFields, got %v", "params.link", in.RedactedFields)
+	}
+}

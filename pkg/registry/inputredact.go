@@ -163,6 +163,31 @@ func shouldRedactName(name string) bool {
 	return false
 }
 
+// credentialValuePrefixes catches a credential by its value shape, for the
+// field names denyListExact/denyListSubstrings haven't been taught yet — a
+// task author who forwards an approval link through `link`, `cta`, or
+// `callback` instead of `approve_url` gets no name-based redaction at all.
+// dcap_ is pkg/approval.tokenPrefix (unexported there); mirrored here by
+// hand the same way denyListExact already mirrors pkg/audit's deny list —
+// see #810. Resume tokens need no entry: they're resolved server-side
+// against the caller's session and never travel in a link (see
+// TestShouldRedactName_ResumeURLNotRedacted).
+var credentialValuePrefixes = []string{"dcap_"}
+
+// containsCredentialValue reports whether s embeds a recognizable credential
+// value anywhere in it, not only as the whole value — so a token riding
+// inside a larger string (e.g. a full https://host/approve/dcap_xxx URL)
+// is still caught regardless of what field name carries it.
+func containsCredentialValue(s string) bool {
+	lower := strings.ToLower(s)
+	for _, p := range credentialValuePrefixes {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // redactHeaders walks an HTTP-style map[string][]string. For each key whose
 // name matches the deny-list, every value in the slice is replaced with the
 // redactPlaceholder. Names of redacted keys are recorded as "headers.<name>"
@@ -194,9 +219,24 @@ func redactStringSliceMap(in map[string][]string, prefix string, redacted *[]str
 			}
 			out[name] = redactedVals
 			*redacted = append(*redacted, prefix+"."+name)
-		} else {
-			// Defensive copy: never share the input slice.
-			out[name] = append([]string(nil), vals...)
+			continue
+		}
+		// Name didn't match, but a value might still carry a credential by
+		// shape (e.g. an approval link under a header/query param nobody
+		// named "approve_url").
+		outVals := make([]string, len(vals))
+		hit := false
+		for i, val := range vals {
+			if containsCredentialValue(val) {
+				outVals[i] = redactPlaceholder
+				hit = true
+			} else {
+				outVals[i] = val
+			}
+		}
+		out[name] = outVals
+		if hit {
+			*redacted = append(*redacted, prefix+"."+name)
 		}
 	}
 	return out
@@ -237,6 +277,15 @@ func redactParamsDepth(v any, path string, redacted *[]string, depth int) any {
 			out[i] = redactParamsDepth(child, fmt.Sprintf("%s[%d]", path, i), redacted, depth+1)
 		}
 		return out
+	case string:
+		// Name-based redaction above already handled a matching key; this
+		// covers a credential riding under a name nobody's denylisted (see
+		// containsCredentialValue).
+		if containsCredentialValue(x) {
+			*redacted = append(*redacted, path)
+			return redactPlaceholder
+		}
+		return x
 	default:
 		return v
 	}

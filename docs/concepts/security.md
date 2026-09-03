@@ -658,9 +658,12 @@ trust boundaries (`pkg/audit`). Events are appended to the `audit_log` table
 
 **Redaction:** `params` is stored as JSON with values replaced by `[REDACTED]`
 when the key name matches the secret deny-list (mirroring
-`pkg/registry/inputredact.go`) or the value is an `env:` / `secret:` /
-`secrets:` reference. Nested MCP arguments are walked recursively, so audit
-rows never contain secret values.
+`pkg/registry/inputredact.go`), the value is an `env:` / `secret:` /
+`secrets:` reference, or the value itself embeds a recognizable credential
+(currently the `dcap_` approval-token prefix) regardless of what field name
+carries it — a link forwarded through `link`, `cta`, or `callback` instead of
+`approve_url` is still caught. Nested MCP arguments are walked recursively, so
+audit rows never contain secret values.
 
 **Retention:** `audit_log.retention_days` (top-level config) controls pruning —
 unset defaults to **30** days; an explicit `0` disables pruning. The daemon

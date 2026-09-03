@@ -72,6 +72,38 @@ func TestRedactBody_FormURLEncoded(t *testing.T) {
 	}
 }
 
+// #810: a form field carrying a credential-shaped value must be redacted
+// even when its name isn't on the deny-list.
+func TestRedactBody_FormURLEncoded_ValueShapeCredential(t *testing.T) {
+	body := []byte("user=alice&link=https%3A%2F%2Fhost%2Fapprove%2Fdcap_abc123")
+	redacted := []string{}
+	out := redactBody(body, "application/x-www-form-urlencoded", false, &redacted)
+
+	var encoded string
+	if err := json.Unmarshal(out.Body, &encoded); err != nil {
+		t.Fatalf("body should be JSON string: %v", err)
+	}
+	parsed, err := url.ParseQuery(encoded)
+	if err != nil {
+		t.Fatalf("re-encoded form should parse: %v", err)
+	}
+	if parsed.Get("user") != "alice" {
+		t.Errorf("user mutated: %q", parsed.Get("user"))
+	}
+	if parsed.Get("link") != redactPlaceholder {
+		t.Errorf("link not redacted: %q", parsed.Get("link"))
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body.link" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body.link", redacted)
+	}
+}
+
 func TestRedactBody_BinaryDefaultOmitted(t *testing.T) {
 	body := []byte{0x00, 0x01, 0x02, 0x03}
 	redacted := []string{}
@@ -122,6 +154,36 @@ func TestRedactBody_TextFullTextualOptIn(t *testing.T) {
 	}
 }
 
+// #810 code-review follow-up: a text body has no field structure for the
+// name-based check to run against, so bodyFullTextual persisted it verbatim
+// regardless of content — the value-shape check must still catch a
+// credential riding in it.
+func TestRedactBody_TextFullTextual_ValueShapeCredential(t *testing.T) {
+	body := []byte("Approve here: https://host/approve/dcap_abc123")
+	redacted := []string{}
+	out := redactBody(body, "text/plain", true, &redacted)
+
+	if out.BodyKind != "text" {
+		t.Errorf("BodyKind = %q, want text", out.BodyKind)
+	}
+	var got string
+	if err := json.Unmarshal(out.Body, &got); err != nil {
+		t.Fatalf("body should be JSON-string-wrapped: %v", err)
+	}
+	if got != redactPlaceholder {
+		t.Errorf("body = %q, want redacted placeholder", got)
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body", redacted)
+	}
+}
+
 func TestRedactBody_Multipart(t *testing.T) {
 	body := []byte("--BOUNDARY\r\n" +
 		"Content-Disposition: form-data; name=\"username\"\r\n\r\n" +
@@ -151,6 +213,37 @@ func TestRedactBody_Multipart(t *testing.T) {
 	}
 	if out.BodyHash == "" {
 		t.Error("BodyHash should be set for multipart")
+	}
+}
+
+// #810 code-review follow-up: a multipart filename carrying a
+// credential-shaped value must be redacted even when its part name isn't on
+// the deny-list — mirrors the same gap already covered for form/JSON/text
+// bodies, just for the filename metadata multipart persists instead of the
+// (never-persisted) part value.
+func TestRedactBody_Multipart_ValueShapeCredentialFilename(t *testing.T) {
+	body := []byte("--BOUNDARY\r\n" +
+		"Content-Disposition: form-data; name=\"upload\"; filename=\"dcap_abc123.txt\"\r\n" +
+		"Content-Type: text/plain\r\n\r\n" +
+		"file contents\r\n" +
+		"--BOUNDARY--\r\n")
+	redacted := []string{}
+	out := redactBody(body, "multipart/form-data; boundary=BOUNDARY", false, &redacted)
+
+	if len(out.BodyParts) != 1 {
+		t.Fatalf("BodyParts len = %d, want 1; parts = %#v", len(out.BodyParts), out.BodyParts)
+	}
+	if out.BodyParts[0].Filename != redactPlaceholder {
+		t.Errorf("filename not redacted: %q", out.BodyParts[0].Filename)
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body_parts.upload.filename" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body_parts.upload.filename", redacted)
 	}
 }
 

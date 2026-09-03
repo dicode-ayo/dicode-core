@@ -69,6 +69,19 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 					vals[k][i] = redactPlaceholder
 				}
 				*redacted = append(*redacted, "body."+k)
+				continue
+			}
+			// Name didn't match; a value might still carry a credential by
+			// shape (see containsCredentialValue).
+			hit := false
+			for i := range vals[k] {
+				if containsCredentialValue(vals[k][i]) {
+					vals[k][i] = redactPlaceholder
+					hit = true
+				}
+			}
+			if hit {
+				*redacted = append(*redacted, "body."+k)
 			}
 		}
 		// Persist as JSON-string-wrapped form encoding for shape consistency.
@@ -104,7 +117,7 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 			}
 			if filename := p.FileName(); filename != "" {
 				meta.Kind = "file"
-				if shouldRedactName(meta.Name) {
+				if shouldRedactName(meta.Name) || containsCredentialValue(filename) {
 					meta.Filename = redactPlaceholder
 					*redacted = append(*redacted, "body_parts."+meta.Name+".filename")
 				} else {
@@ -122,7 +135,17 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 	case strings.HasPrefix(mediaType, "text/"):
 		out.BodyKind = "text"
 		if bodyFullTextual {
-			j, err := json.Marshal(string(raw))
+			text := string(raw)
+			// A text body has no field structure for the name-based check to
+			// run against, so it was persisted verbatim regardless of
+			// content — the value-shape check is the only redaction this
+			// branch can apply. A hit redacts the whole body, matching how
+			// a name-based hit redacts a whole field value elsewhere.
+			if containsCredentialValue(text) {
+				text = redactPlaceholder
+				*redacted = append(*redacted, "body")
+			}
+			j, err := json.Marshal(text)
 			if err != nil {
 				out.BodyKind = "binary"
 				out.BodyHash = hash
