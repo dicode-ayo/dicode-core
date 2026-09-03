@@ -19,9 +19,9 @@ import (
 func syncClone(ctx context.Context, dir, url string, tgt gitTarget, tokenEnv string) error {
 	auth := gitops.HTTPAuth(tokenEnv)
 	if tgt.isPinned() {
-		return gitops.CloneAtTag(ctx, dir, url, tgt.Tag, auth)
+		return gitops.CloneAtTag(ctx, dir, url, tgt.Name, auth)
 	}
-	return gitops.CloneOrPull(ctx, dir, url, tgt.Branch, auth)
+	return gitops.CloneOrPull(ctx, dir, url, tgt.Name, auth)
 }
 
 // isReclonableError reports whether the local clone is in a state that

@@ -76,26 +76,44 @@ func SourceID(name string, ref *Ref) string {
 	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
-// gitTarget names the remote ref a clone tracks: exactly one of Branch or Tag.
+// refKind is how a git target is resolved and refreshed. It is the whole
+// reason dicode distinguishes ref namespaces at all: git treats a branch and
+// a tag as the same kind of thing, but a branch must be re-pulled on every
+// poll tick while a tag must never move.
+type refKind uint8
+
+const (
+	// refBranch is a moving head, pulled on every poll tick.
+	refBranch refKind = iota
+	// refTag is an immutable pin, resolved once and never polled.
+	refTag
+)
+
+func (k refKind) String() string {
+	if k == refTag {
+		return "tag"
+	}
+	return "branch"
+}
+
+// gitTarget names the remote ref a clone tracks. Kind carries the refresh
+// policy and Name the ref itself, so another kind of target costs one more
+// constant rather than one more field and one more mutual-exclusion rule.
+//
 // It is comparable so it can key the resolver's clone cache, where a branch
 // and a tag of the same name must never share an entry.
 type gitTarget struct {
-	Branch string
-	Tag    string
+	Kind refKind
+	Name string
 }
 
 // isPinned reports whether this target names an immutable commit.
-func (t gitTarget) isPinned() bool { return t.Tag != "" }
+func (t gitTarget) isPinned() bool { return t.Kind == refTag }
 
-// String renders the target for error messages and diagnostics. A tag is
-// spelled with its "tag:" prefix so it can never be read as a branch of the
-// same name.
-func (t gitTarget) String() string {
-	if t.Tag != "" {
-		return "tag:" + t.Tag
-	}
-	return t.Branch
-}
+// String renders the target for error messages, diagnostics, and cache keys.
+// The kind is always spelled out, so a tag can never be read as — or collide
+// with — a branch of the same name.
+func (t gitTarget) String() string { return t.Kind.String() + ":" + t.Name }
 
 // IsPinned reports whether this ref names an immutable commit. A pinned ref
 // has nothing to poll for: the remote cannot move it.
@@ -105,12 +123,12 @@ func (r *Ref) IsPinned() bool { return r.Tag != "" }
 // branch "main" when neither branch nor tag is set.
 func (r *Ref) target() gitTarget {
 	if r.IsPinned() {
-		return gitTarget{Tag: r.Tag}
+		return gitTarget{Kind: refTag, Name: r.Tag}
 	}
 	if r.Branch != "" {
-		return gitTarget{Branch: r.Branch}
+		return gitTarget{Kind: refBranch, Name: r.Branch}
 	}
-	return gitTarget{Branch: "main"}
+	return gitTarget{Kind: refBranch, Name: "main"}
 }
 
 // effectivePoll returns the poll interval, defaulting to 30s.

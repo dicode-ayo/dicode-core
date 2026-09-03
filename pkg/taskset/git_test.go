@@ -120,7 +120,7 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 	bare.commit(t, "c", "three", "commit 3")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
 		t.Fatalf("syncClone: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
 		t.Fatalf("initial clone: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "c", "three", "commit 3")
 
 	// syncClone must detect the broken clone and recover.
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
 		t.Fatalf("syncClone did not recover from corrupted clone: %v", err)
 	}
 
@@ -237,14 +237,14 @@ func TestCloneOrPull_PullAfterRemoteAdvance(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
 		t.Fatalf("initial syncClone: %v", err)
 	}
 
 	bare.commit(t, "b", "two", "commit 2")
 	bare.commit(t, "c", "three", "commit 3")
 
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Branch: "main"}, ""); err != nil {
+	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
 		t.Fatalf("pull after remote advance: %v", err)
 	}
 

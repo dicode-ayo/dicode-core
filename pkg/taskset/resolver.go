@@ -677,23 +677,33 @@ func resolveYAMLPath(path string) string {
 // specific operator directory, but worth stating precisely rather than
 // overclaiming full preimage resistance.
 func repoCloneDir(dataDir, url string, tgt gitTarget, allowAuth bool) string {
-	if allowAuth && !tgt.isPinned() {
-		h := sha256.Sum256([]byte(url + "@" + tgt.Branch))
+	if allowAuth && tgt.Kind == refBranch {
+		h := sha256.Sum256([]byte(url + "@" + tgt.Name))
 		return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
 	}
-	domain := "dicode-untrusted-clone-v1"
-	name := tgt.Branch
-	if tgt.isPinned() {
-		name = tgt.Tag
-		domain = "dicode-tag-clone-v1"
-		if !allowAuth {
-			domain = "dicode-untrusted-tag-clone-v1"
-		}
-	}
 	hu := sha256.Sum256([]byte(url))
-	hn := sha256.Sum256([]byte(name))
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%x:%x", domain, hu, hn)))
+	hn := sha256.Sum256([]byte(tgt.Name))
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%x:%x", cloneDirDomain(tgt.Kind, allowAuth), hu, hn)))
 	return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+}
+
+// cloneDirDomain is the domain-separation prefix for one (kind, trust tier)
+// bucket of the clone-directory hash space. The trusted-branch bucket has no
+// prefix of its own — it keeps the seed dicode used before tags existed, so
+// operator sources need no on-disk migration.
+//
+// A new refKind must add its own pair here.
+// TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory fails if it doesn't.
+func cloneDirDomain(kind refKind, allowAuth bool) string {
+	switch kind {
+	case refTag:
+		if allowAuth {
+			return "dicode-tag-clone-v1"
+		}
+		return "dicode-untrusted-tag-clone-v1"
+	default:
+		return "dicode-untrusted-clone-v1"
+	}
 }
 
 // Pull clones or fetches the latest commits for the given git ref and returns
@@ -782,7 +792,7 @@ func (r *Resolver) ensureClone(ctx context.Context, url string, tgt gitTarget, _
 // trust tiers appears twice, prefixed "untrusted:" for the allowAuth=false
 // entry, since the two never share a directory. The marker is prefixed, not
 // suffixed, so it can never be produced by a url/target value itself — a
-// suffix (e.g. "@untrusted") is a url/branch-shaped string an operator's own
+// suffix (e.g. "@untrusted") is a url/ref-shaped string an operator's own
 // branch name could coincidentally end in, which would silently collide two
 // distinct entries into one map key here (a diagnostics-only misreporting,
 // since ClonedRepos has no production caller — not the trust-boundary break
