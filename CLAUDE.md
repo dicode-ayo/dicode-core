@@ -53,8 +53,8 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |
 
 There is no `pkg/relay`. The relay — a WebSocket tunnel giving webhooks a public URL — is a pair of
-tasks, not a Go package: `tasks/buildin/relay-client` (the daemon-side tunnel, built on the pinned
-`npm:dicode-relay`) and `tasks/buildin/relay-server` (an optional in-process broker). It forwards
+tasks, not a Go package: `dicode-buildin/relay-client` (the daemon-side tunnel, built on the pinned
+`npm:dicode-relay`) and `dicode-buildin/relay-server` (an optional in-process broker). It forwards
 `/hooks/*` and `/dicode.js` only, and strips credential headers in both directions — see
 `docs/concepts/webhook-relay.md`.
 

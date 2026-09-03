@@ -617,7 +617,7 @@ has two pieces:
 The pipeline (`task.yaml`) whose terminal stage is the daemon body:
 
 ```yaml
-# tasks/buildin/relay-server/task.yaml  (kind: PipelineTask)
+# dicode-buildin/relay-server/task.yaml  (kind: PipelineTask)
 apiVersion: dicode/v1
 kind: PipelineTask
 name: Relay Server
@@ -660,7 +660,7 @@ stages:
 ```
 
 ```yaml
-# tasks/buildin/relay-server-body/task.yaml  (standalone daemon body)
+# dicode-buildin/relay-server-body/task.yaml  (standalone daemon body)
 apiVersion: dicode/v1
 kind: Task
 name: Relay Server (daemon body)
@@ -1330,7 +1330,7 @@ What does **not** change:
 
 ## WebUI navigation (`webui.nav`)
 
-Any task with a `trigger.webhook` (typically one that ships its own `index.html` and is served as a self-contained SPA at `/hooks/<path>` — see [`tasks/buildin/auth-providers`](../../tasks/buildin/auth-providers)) can contribute a first-class link in the main WebUI's header `<nav>`, instead of only being reachable by drilling into the Tasks list and clicking through to its webhook UI:
+Any task with a `trigger.webhook` (typically one that ships its own `index.html` and is served as a self-contained SPA at `/hooks/<path>` — see [`dicode-buildin/auth-providers`](../../dicode-buildin/auth-providers)) can contribute a first-class link in the main WebUI's header `<nav>`, instead of only being reachable by drilling into the Tasks list and clicking through to its webhook UI:
 
 ```yaml
 trigger:

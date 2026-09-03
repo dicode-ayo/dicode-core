@@ -24,7 +24,7 @@ plaintext credentials.
 ```
 
 Broker-backed providers (github, google, slack, …) connect via
-[`buildin/auth-start`](../../tasks/buildin/auth-start), which signs a
+[`buildin/auth-start`](../../dicode-buildin/auth-start), which signs a
 `/auth/:provider` URL with the daemon's relay identity and returns it.
 OpenRouter is the only hardcoded standalone PKCE provider (no relay broker);
 the dashboard opens its existing webhook directly. Any BYO entry instantiated
@@ -42,7 +42,7 @@ The dashboard assembles its provider list from three sources at runtime:
    colors; the SPA card falls back to the provider key and a neutral color
    (`meta.color` defaulting to `#888`) plus a per-key bundled SVG icon.
 2. **Standalone table** — a small hardcoded map in
-   [`task.ts`](../../tasks/buildin/auth-providers/task.ts) for providers
+   [`task.ts`](../../dicode-buildin/auth-providers/task.ts) for providers
    that are neither broker-backed nor template-derived. Today that is only
    `openrouter`.
 3. **BYO auto-discovery** — `dicode.list_tasks()` is scanned for tasks whose
@@ -117,7 +117,7 @@ The broker's `GET /providers` response supplies flow metadata only (`key`,
 requires no dashboard change, but its card carries no label or brand color
 from the broker; the SPA falls back to the provider key and a neutral color.
 Standalone providers live in the small `STANDALONE` map in
-[`task.ts`](../../tasks/buildin/auth-providers/task.ts) (currently only
+[`task.ts`](../../dicode-buildin/auth-providers/task.ts) (currently only
 openrouter), and BYO entries carry their own label/color metadata via
 `_oauth-app` params (`color`, task name), picked up by the `list_tasks`
 scan.

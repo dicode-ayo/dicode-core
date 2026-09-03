@@ -7,15 +7,15 @@ description: Author, modify, or debug dicode tasks — the JS/TS/Python/Docker a
 
 dicode is a single Go binary that watches a source of automation scripts ("tasks") and runs them on cron / webhook / manual / chain / daemon triggers. A **task is a folder** holding a `task.yaml` (metadata, trigger, permissions, params) and a runtime file (`task.ts` for Deno, `task.py` for Python, image config for Docker/Podman), plus an optional `task.test.ts`. The reconciler hot-reloads tasks — no daemon restart after an edit.
 
-Tasks live under `tasks/` in this repo: builtins in `tasks/buildin/`, examples in `tasks/examples/`. IDs are namespaced by source, e.g. `buildin/ai-agent`, `examples/github-stars`.
+Tasks live under `tasks/` in this repo: builtins in `dicode-buildin/`, examples in `tasks/examples/`. IDs are namespaced by source, e.g. `buildin/ai-agent`, `examples/github-stars`.
 
 ## The authoritative references (read these for depth)
 
 The long-form, canonical developer skill and concept docs already exist in this repo. Read them rather than guessing:
 
-- `tasks/skills/dicode-task-dev.md` — full schema, every SDK global, the complete test-harness API, taskset precedence. **This is the source of truth; this SKILL.md is the quick index.**
-- `tasks/skills/dicode-basics.md` — mental model of tasks/triggers/KV/permissions.
-- `tasks/skills/dicode-auto-fix.md` — the on-failure auto-fix loop workflow.
+- `dicode-buildin/skills/dicode-task-dev.md` — full schema, every SDK global, the complete test-harness API, taskset precedence. **This is the source of truth; this SKILL.md is the quick index.**
+- `dicode-buildin/skills/dicode-basics.md` — mental model of tasks/triggers/KV/permissions.
+- `dicode-buildin/skills/dicode-auto-fix.md` — the on-failure auto-fix loop workflow.
 - `docs/concepts/task-format.md`, `docs/deno-runtime.md`, `docs/python-runtime.md`, `docs/podman-runtime.md`, `docs/webhooks.md` — runtime + trigger detail.
 - `tasks/sdk.ts` — the actual TypeScript SDK surface; `pkg/runtime/deno/sdk/shim.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` are the runtime-authoritative shapes.
 - `tasks/examples/*` — working tasks to copy patterns from.

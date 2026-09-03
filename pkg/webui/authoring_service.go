@@ -295,7 +295,7 @@ const writeTaskFileTaskID = "buildin/write-task-file"
 
 // taskFileRootsEnv carries the write tool's inner boundary. Its value is
 // parsed here as well as by the tool, so the matching below mirrors
-// assertTaskFilePath in tasks/buildin/write-task-file/task.ts rather than
+// assertTaskFilePath in dicode-buildin's write-task-file/task.ts rather than
 // normalising first — a root the tool would reject must be rejected here too,
 // or the check passes a turn the tool then refuses.
 const taskFileRootsEnv = "DICODE_TASK_FILE_ROOTS"

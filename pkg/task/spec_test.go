@@ -913,64 +913,6 @@ func TestLoadDir_ZeroTimeoutPreserved(t *testing.T) {
 	}
 }
 
-// TestLoadDir_BuildinTasksParse walks every on-disk `tasks/buildin/*/task.yaml`
-// (and nested provider tasks like secret-providers/doppler/) and asserts that
-// LoadDir succeeds for each. This locks in the cleanup from #317 — a future
-// regression that reintroduces the legacy `notify:` block (or any other field
-// the strict validator rejects) surfaces immediately rather than waiting for a
-// downstream test to exercise the load path.
-func TestLoadDir_BuildinTasksParse(t *testing.T) {
-	_, thisFile, _, ok := goruntime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot anchor tasks/buildin path")
-	}
-	// thisFile is .../pkg/task/spec_test.go
-	// → repo root is two levels up from the file's directory.
-	pkgDir := filepath.Dir(thisFile)               // .../pkg/task
-	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
-	buildinRoot := filepath.Join(repoRoot, "tasks", "buildin")
-	if _, err := os.Stat(buildinRoot); err != nil {
-		t.Fatalf("tasks/buildin not found at %s: %v", buildinRoot, err)
-	}
-
-	var taskDirs []string
-	err := filepath.Walk(buildinRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() || filepath.Base(path) != "task.yaml" {
-			return nil
-		}
-		taskDirs = append(taskDirs, filepath.Dir(path))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", buildinRoot, err)
-	}
-	if len(taskDirs) == 0 {
-		t.Fatalf("no task.yaml files found under %s", buildinRoot)
-	}
-
-	for _, dir := range taskDirs {
-		rel, _ := filepath.Rel(repoRoot, dir)
-		t.Run(rel, func(t *testing.T) {
-			// Provide TASK_SET_DIR so tasks that reference ${TASK_SET_DIR}
-			// (e.g. ai-agent-claude-cli) resolve to a concrete path. The
-			// buildin source's effective TASK_SET_DIR is the tasks/buildin
-			// directory itself (where the taskset.yaml lives).
-			extras := map[string]string{
-				VarTaskSetDir: buildinRoot,
-			}
-			// LoadKindedDir routes by the task.yaml's `kind:` so both
-			// kind: Task and kind: PipelineTask (e.g. relay-server) load
-			// through their respective loaders — mirrors the reconciler.
-			if _, err := LoadKindedDir(dir, extras); err != nil {
-				t.Fatalf("LoadKindedDir(%s): %v", dir, err)
-			}
-		})
-	}
-}
-
 // TestLoadDir_OpsTasksParse walks every on-disk `tasks/ops/*/task.yaml` and
 // asserts LoadKindedDir succeeds — the same reconciler path that runs the
 // strict validator. Ops tasks ship with no Deno test that exercises the Go

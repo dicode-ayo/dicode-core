@@ -294,7 +294,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	// Write the shim as a proper ES module to a temp file.
 	// Run ID is embedded between the prefix and the __<random> suffix so the
-	// tasks/buildin/temp-cleanup builtin can correlate orphaned files with runs.
+	// buildin temp-cleanup task can correlate orphaned files with runs.
 	shimFile, err := os.CreateTemp("", "dicode-shim-"+runID+"__*.ts")
 	if err != nil {
 		result.Error = fmt.Errorf("create shim file: %w", err)
@@ -577,7 +577,7 @@ func expandHome(p string) string {
 
 // findDenoLockFile walks up from dir (at most maxParents levels) looking for
 // a deno.lock file. Returns the absolute path on the first match, or "".
-// maxParents=2 covers the buildin layout: tasks/buildin/<name>/ → tasks/deno.lock.
+// maxParents=2 covers a taskset laid out as <set>/<name>/ → <set>/../deno.lock.
 func findDenoLockFile(dir string, maxParents int) string {
 	path, _ := fsutil.FindUp(dir, "deno.lock", maxParents)
 	return path
@@ -589,7 +589,7 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 	// Enforce the lockfile when a deno.lock is found at or near the task directory.
 	// Skip when the task has its own deno.json: that file controls lock configuration
 	// (including "lock": false opt-out) and Deno respects it without our help.
-	// maxParents=2 covers tasks/buildin/<name>/ → tasks/deno.lock.
+	// maxParents=2 covers <set>/<name>/ → <set>/../deno.lock.
 	if _, err := os.Stat(filepath.Join(spec.TaskDir, "deno.json")); os.IsNotExist(err) {
 		if lf := findDenoLockFile(spec.TaskDir, 2); lf != "" {
 			args = append(args, "--lock="+lf, "--frozen")

@@ -44,8 +44,10 @@ spec:
   entries:
     buildin:
       ref:
-        path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
-        watch: true
+        url: https://github.com/dicode-ayo/dicode-buildin
+        branch: main
+        path: taskset.yaml
+        poll_interval: 30s
     auth:
       ref:
         path: ${CONFIGDIR}/tasks/auth/taskset.yaml

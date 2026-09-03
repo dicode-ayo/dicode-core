@@ -8,7 +8,7 @@ import (
 )
 
 // A task that fails via the shared ai-agent terminal-failure pattern
-// (output.json(envelope); throw — see tasks/buildin/ai-agent-core/chat.ts,
+// (output.json(envelope); throw — see dicode-buildin's ai-agent-core/chat.ts,
 // fixed by #750) never bare-returns: return_value stays empty even though the
 // caller-facing envelope was published as structured output. buildRunResult
 // must fall back to OutputContent so a `dicode ai`/control-socket caller (and

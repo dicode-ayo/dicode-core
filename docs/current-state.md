@@ -71,7 +71,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 ### `pkg/mcp/` ✅
 
 - The MCP **server** is no longer a Go package — it ships as the `buildin/mcp` task (JSON-RPC 2.0 over HTTP POST). `pkg/webui` serves an API-key-gated `/mcp` URL that forwards to it.
-- **Implemented tools** (`tasks/buildin/mcp/task.ts`): `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`, `test_task`.
+- **Implemented tools** (`dicode-buildin/mcp/task.ts`): `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`, `test_task`.
 - **Auth**: the `/mcp` forwarder requires a Bearer API key (`requireAPIKey` in `pkg/webui/server.go`) — no session-cookie fallback (#698). Bearer token format: `dck_<32 random bytes hex>`.
 - **`pkg/mcp/client/`** — lightweight HTTP JSON-RPC 2.0 MCP client: `New(port int)`, `ListTools(ctx)`, `Call(ctx, tool, args)`. Used by the socket server to proxy `mcp.list_tools` / `mcp.call` requests from task scripts to daemon MCP tasks.
 
@@ -173,7 +173,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 - Audit logs: run requested via API, kill requested via API
 - Task table sorted stably; namespace headers rendered when namespaced IDs present
 - Webhook trigger labels rendered as clickable links
-- **Frontend (migrated)** — The dashboard SPA lives in `tasks/buildin/webui/` and is served as a standalone webhook task at `/hooks/webui`. The Go binary no longer embeds the frontend assets. The server catch-all redirects `GET /*` to `/hooks/webui`. See the built-in tasks table below.
+- **Frontend (migrated)** — The dashboard SPA lives in `dicode-buildin/webui/` and is served as a standalone webhook task at `/hooks/webui`. The Go binary no longer embeds the frontend assets. The server catch-all redirects `GET /*` to `/hooks/webui`. See the built-in tasks table below.
   - `static/dicode.js` still embedded — standalone IIFE SDK injected into any webhook task UI; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
 - `GET /runs/{runID}/result` — serves `OutputContent` with its MIME type, or `ReturnValue` as `application/json` when no structured output type is set
 - 11 existing + 16 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, **extended lockout**, CORS allowlist, **malformed origin skipping**, security headers, CSP, API key generate/validate/revoke, MCP key check, **device token rotation**, **XFF trust flag**)
@@ -263,7 +263,7 @@ CLI dispatcher + daemon mode in one binary:
 | `webhook-dashboard/` | webhook | deno |
 | `webhook-form/` | webhook | deno |
 
-**Built-in tasks** (`tasks/buildin/`):
+**Built-in tasks** (`dicode-buildin/`):
 
 | Task | Description |
 | --- | --- |
@@ -290,7 +290,7 @@ CLI dispatcher + daemon mode in one binary:
 | `run-inputs-cleanup` | Hourly cleanup of expired run-input blobs |
 | `dev-clones-cleanup` | Removes dev-mode clone directories whose run ID is gone |
 
-`tasks/buildin/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
+`dicode-buildin/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
 
 ---
 
@@ -317,7 +317,7 @@ CLI dispatcher + daemon mode in one binary:
 | `docs/` | ✅ This documentation tree |
 | `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented + hardened) |
 | `docs/concepts/security.md` | ✅ Security developer reference (implementation details, DB schema, config reference) |
-| `tasks/skills/dicode-task-dev.md` | ✅ Agent skill document (consumed by `buildin/ai-agent` and the `dicodai` preset via the `skills` param) |
+| `dicode-buildin/skills/dicode-task-dev.md` | ✅ Agent skill document (consumed by `buildin/ai-agent` and the `dicodai` preset via the `skills` param) |
 
 ---
 

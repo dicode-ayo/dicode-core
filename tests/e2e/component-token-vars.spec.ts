@@ -45,8 +45,9 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'fs';
 import path from 'path';
+import { ensureBuildinCheckout } from './helpers/buildin';
 
-const APP = path.join(__dirname, '../../tasks/buildin/webui/app');
+const APP = path.join(ensureBuildinCheckout(path.resolve(__dirname, '../..')), 'webui/app');
 const THEME = readFileSync(path.join(APP, 'theme.css'), 'utf8');
 const GLOBAL = readFileSync(path.join(APP, 'global.css'), 'utf8').replace(
   /@import\s+['"]\.\/theme\.css['"];/,

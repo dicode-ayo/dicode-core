@@ -1,8 +1,8 @@
 /**
  * design-tokens.spec.ts
  *
- * Contract tests for the vendored dicode design system
- * (tasks/buildin/webui/app/theme.css + global.css).
+ * Contract tests for the dicode design system (theme.css + global.css from
+ * dicode-buildin's webui task).
  *
  * Loads both sheets straight from disk into a blank page rather than driving
  * the real SPA: the properties under test are stylesheet-level, so there is
@@ -16,8 +16,9 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'fs';
 import path from 'path';
+import { ensureBuildinCheckout } from './helpers/buildin';
 
-const APP = path.join(__dirname, '../../tasks/buildin/webui/app');
+const APP = path.join(ensureBuildinCheckout(path.resolve(__dirname, '../..')), 'webui/app');
 
 const THEME = readFileSync(path.join(APP, 'theme.css'), 'utf8');
 // global.css's first statement is `@import './theme.css'`, which a

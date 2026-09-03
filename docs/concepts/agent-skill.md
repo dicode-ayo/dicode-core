@@ -1,8 +1,8 @@
 # Agent Skill
 
-A **skill** is a markdown file that lives in the shared `tasks/skills/` directory and gives an AI agent running inside a dicode task the context it needs to work effectively in this repo. Skills live on disk and are read at run time — nothing is embedded in the dicode binary. The agent is told each skill's name and description up front and pulls the body in when it needs it.
+A **skill** is a markdown file that lives in the shared `dicode-buildin/skills/` directory and gives an AI agent running inside a dicode task the context it needs to work effectively in this repo. Skills live on disk and are read at run time — nothing is embedded in the dicode binary. The agent is told each skill's name and description up front and pulls the body in when it needs it.
 
-The canonical task-developer skill lives at `tasks/skills/dicode-task-dev.md`. It documents the mandatory task-development workflow (validate → test → commit), the `task.yaml` schema, available SDK globals, the test harness, and common mistakes to avoid.
+The canonical task-developer skill lives at `dicode-buildin/skills/dicode-task-dev.md`. It documents the mandatory task-development workflow (validate → test → commit), the `task.yaml` schema, available SDK globals, the test harness, and common mistakes to avoid.
 
 ---
 
@@ -19,11 +19,11 @@ params:
     default: "index"
     description: "index = advertise name + description, body via the dicode_read_skill tool. eager = concatenate every body into the system prompt."
   skills_dir:
-    default: "${TASK_SET_DIR}/../skills"
+    default: "${TASK_SET_DIR}/skills"
     description: "Absolute path to the directory holding skill .md files."
 ```
 
-At task-load time `${TASK_SET_DIR}` expands to the directory containing the root `taskset.yaml` that loaded the agent — for the built-in taskset that's `tasks/buildin/`, so `skills_dir` resolves to `tasks/skills/`.
+At task-load time `${TASK_SET_DIR}` expands to the directory containing the root `taskset.yaml` that loaded the agent — for the built-in taskset that's the root of the [dicode-buildin](https://github.com/dicode-ayo/dicode-buildin) checkout, so `skills_dir` resolves to its `skills/` directory.
 
 Set `skills: "dicode-task-dev,dicode-basics"` on a call (or as a preset default) and the ai-agent reads both files. Under the default `index` mode it appends a short catalogue to its `system_prompt` —
 
@@ -47,7 +47,7 @@ Their contents are not guessable from these descriptions.
 
 ## Preset: `buildin/dicodai`
 
-The `dicodai` preset (defined in `tasks/buildin/taskset.yaml` as an override of `./ai-agent/task.yaml`) ships with:
+The `dicodai` preset (defined in `dicode-buildin/taskset.yaml` as an override of `./ai-agent/task.yaml`) ships with:
 
 - `skills: "dicode-task-dev,dicode-basics"` — both skills available to look up
 - A task-development-tuned `system_prompt`
@@ -60,7 +60,7 @@ That means with only `OPENAI_API_KEY` set, the WebUI task-detail "AI" chat panel
 
 ## Adding your own skill
 
-1. Drop a markdown file into `tasks/skills/`, e.g. `tasks/skills/github-flow.md`.
+1. Drop a markdown file into `dicode-buildin/skills/`, e.g. `dicode-buildin/skills/github-flow.md`.
 2. Start it with YAML frontmatter. The `description` is what the agent sees in the index, so write it as the answer to "should I read this for the request in front of me?":
 
    ```yaml
@@ -85,10 +85,10 @@ Skills are plain markdown — no special templating language, no compilation ste
 
 ## Using with a custom agent outside dicode
 
-If you're writing your own agent (e.g. a Claude Code session, a local chat UI), the same file is the recommended system-prompt fragment. Point your agent at `tasks/skills/dicode-task-dev.md` and read the file at startup:
+If you're writing your own agent (e.g. a Claude Code session, a local chat UI), the same file is the recommended system-prompt fragment. Point your agent at `dicode-buildin/skills/dicode-task-dev.md` and read the file at startup:
 
 ```bash
-cat tasks/skills/dicode-task-dev.md >> CLAUDE.md
+curl -sL https://raw.githubusercontent.com/dicode-ayo/dicode-buildin/main/skills/dicode-task-dev.md >> CLAUDE.md
 ```
 
 The skill is the entire document — it was written to stand on its own without further scaffolding.

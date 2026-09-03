@@ -409,7 +409,7 @@ func TestControl_TaskEdit_SessionIDCarriesAcrossCalls(t *testing.T) {
 	// (the two turns' runs get grouped under one `chat:<id>` label for
 	// UI/log display), NOT conversational memory: the underlying agent
 	// still starts each turn from an empty SessionState (see
-	// tasks/buildin/ai-agent/task.ts's oneShotTurn).
+	// dicode-buildin's ai-agent/task.ts oneShotTurn).
 	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
 	eng := &promptCapturingEngine{reply: "turn one done", sessID: "asid-1"}
 	cs := newAuthoringAIControl(t, m, eng)

@@ -594,7 +594,7 @@ func (s *Server) Handler() http.Handler {
 	// the credential surface beyond the documented API-key-only policy (an XSS
 	// or CSRF on another same-origin page would get MCP access without ever
 	// holding an API key). The actual JSON-RPC dispatch lives in the
-	// buildin/mcp dicode task (tasks/buildin/mcp/task.ts).
+	// buildin/mcp dicode task (dicode-buildin's mcp/task.ts).
 	// MCP is a *bool pointer; nil = default enabled once applyDefaults has filled it in.
 	s.cfgMu.RLock()
 	mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
@@ -2372,7 +2372,7 @@ func decodeRPCEnvelope(body []byte) (map[string]any, bool) {
 //     call's own run_id argument is not trusted.
 //   - tools/call for any other (unrecognized, or future) tool name: denied.
 //     This is fail-closed: nothing ties this switch to
-//     tasks/buildin/mcp/task.ts's TOOLS/dispatchTool list, so a future tool
+//     dicode-buildin's mcp/task.ts TOOLS/dispatchTool list, so a future tool
 //     added there that exercises a real scoped capability must not silently
 //     inherit full access just because this switch doesn't know its name
 //     yet. Note this only affects a *scoped* caller — an unscoped caller
@@ -2460,7 +2460,7 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 		return false, id, fmt.Sprintf("capability not granted: %s", name)
 	default:
 		// Fail closed: an unrecognized tool name — including any future
-		// tool added to tasks/buildin/mcp/task.ts that this switch hasn't
+		// tool added to dicode-buildin's mcp/task.ts that this switch hasn't
 		// been taught about — is denied rather than silently inheriting
 		// full access from a scoped token.
 		return false, id, fmt.Sprintf("capability not granted: %s", name)

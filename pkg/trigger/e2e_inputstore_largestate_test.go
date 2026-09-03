@@ -1,7 +1,7 @@
 package trigger
 
 // Drives the run-input offload substrate end-to-end against the REAL
-// tasks/buildin/local-storage Deno task — no mock TaskRunner — with a
+// vendored local-storage Deno task — no mock TaskRunner — with a
 // multi-megabyte payload shaped like a suspended AI conversation's cumulative
 // state. This is the "validate the reused building block before building on
 // it" step for resume_state offload (#570): InputStore + local-storage already
@@ -22,17 +22,17 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// buildinLocalStorageDir anchors the on-disk buildin/local-storage task via
+// buildinLocalStorageDir anchors the vendored local-storage task via
 // runtime.Caller (this file lives in pkg/trigger, so the repo root is ../..).
 func buildinLocalStorageDir(t *testing.T) string {
 	t.Helper()
 	_, self, _, ok := runtime.Caller(0)
 	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot anchor buildin/local-storage path")
+		t.Fatal("runtime.Caller(0) failed; cannot anchor local-storage path")
 	}
-	dir := filepath.Join(filepath.Dir(self), "..", "..", "tasks", "buildin", "local-storage")
+	dir := filepath.Join(filepath.Dir(self), "testdata", "local-storage")
 	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
-		t.Fatalf("buildin/local-storage task.yaml not found at %s: %v", dir, err)
+		t.Fatalf("local-storage task.yaml not found at %s: %v", dir, err)
 	}
 	return dir
 }

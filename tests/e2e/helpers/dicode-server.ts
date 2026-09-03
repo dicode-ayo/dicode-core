@@ -38,6 +38,7 @@ import { execFileSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { ensureBuildinCheckout } from './buildin';
 
 export const REPO_ROOT = path.resolve(__dirname, '../../..');
 export const BINARY = path.join(REPO_ROOT, 'dicode');
@@ -121,11 +122,12 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
   const tasksDir = path.join(tempDir, 'tasks');
   copyDirSync(TASKS_DIR, tasksDir);
 
-  const buildinWebuiTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/webui/task.yaml');
-  const buildinMcpTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/mcp/task.yaml');
-  const buildinAuthProvidersTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/auth-providers/task.yaml');
-  const buildinLocalStorageTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/local-storage/task.yaml');
-  const buildinRunInputsCleanupTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/run-inputs-cleanup/task.yaml');
+  const buildinDir = ensureBuildinCheckout(REPO_ROOT);
+  const buildinWebuiTaskYaml = path.join(buildinDir, 'webui/task.yaml');
+  const buildinMcpTaskYaml = path.join(buildinDir, 'mcp/task.yaml');
+  const buildinAuthProvidersTaskYaml = path.join(buildinDir, 'auth-providers/task.yaml');
+  const buildinLocalStorageTaskYaml = path.join(buildinDir, 'local-storage/task.yaml');
+  const buildinRunInputsCleanupTaskYaml = path.join(buildinDir, 'run-inputs-cleanup/task.yaml');
   const authOauthAppTaskYaml = path.join(REPO_ROOT, 'tasks/auth/_oauth-app/task.yaml');
   const template = fs.readFileSync(path.join(TASKS_DIR, 'taskset.yaml'), 'utf8');
   const content = template

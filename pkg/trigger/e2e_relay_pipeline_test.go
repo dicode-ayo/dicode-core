@@ -4,7 +4,7 @@ package trigger
 // kind: PipelineTask migration (PR6). Composes the REAL buildin/template and
 // buildin/write-local tasks (loaded from disk) into a 3-stage sequential
 // PipelineTask whose terminal stage is a trigger.daemon: true Task — exactly
-// the shape of tasks/buildin/relay-server/task.yaml:
+// the shape of dicode-buildin's relay-server/task.yaml:
 //
 //	stage 1: buildin/template      renders relay.yaml from ${VAR} env
 //	stage 2: buildin/write-local   persists it to ${DATADIR}/relay/relay.yaml
@@ -35,21 +35,20 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// buildinWriteLocalDir returns the absolute path to the on-disk
-// `tasks/buildin/write-local/` task. Anchored the same way as
-// buildinTemplateDir — walk up from this source file to the repo root.
+// buildinWriteLocalDir returns the absolute path to the vendored copy of
+// dicode-buildin's `write-local/` task (see testdata/UPSTREAM.md). Anchored
+// the same way as buildinTemplateDir — walk up from this source file to the
+// package directory.
 // (Used by e2e_pipeline_task_test.go's loadBuildinWriteLocalAs.)
 func buildinWriteLocalDir(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := goruntime.Caller(0)
 	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot anchor buildin/write-local path")
+		t.Fatal("runtime.Caller(0) failed; cannot anchor write-local path")
 	}
-	pkgDir := filepath.Dir(thisFile)               // .../pkg/trigger
-	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
-	dir := filepath.Join(repoRoot, "tasks", "buildin", "write-local")
+	dir := filepath.Join(filepath.Dir(thisFile), "testdata", "write-local")
 	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
-		t.Fatalf("buildin/write-local task.yaml not found at %s: %v", dir, err)
+		t.Fatalf("write-local task.yaml not found at %s: %v", dir, err)
 	}
 	return dir
 }

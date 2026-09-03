@@ -70,7 +70,7 @@ Any task can add itself to the header `<nav>` next to Tasks/Sources/Config/Secre
 
 The UI is a single-page application (SPA) built with [Lit](https://lit.dev) web components. No npm build step — all files are plain ESM modules loaded directly by the browser.
 
-The SPA is itself a dicode task — `buildin/webui` (`tasks/buildin/webui/`, entry point `index.html` loading `app/app.js` as an ES module, components under `app/components/`, routing/websocket helpers under `app/lib/`) — served at the `/hooks/webui` webhook path like any other webhook task. Because it's a task, the reconciler hot-reloads it on change, same as any task in a watched source; no binary rebuild is needed. `pkg/webui`'s own embedded static assets are limited to `dicode.js` and `dicode-oauth-broadcast.js` (the client SDK injected into webhook-served pages), not the SPA itself.
+The SPA is itself a dicode task — `buildin/webui` (`dicode-buildin/webui/`, entry point `index.html` loading `app/app.js` as an ES module, components under `app/components/`, routing/websocket helpers under `app/lib/`) — served at the `/hooks/webui` webhook path like any other webhook task. Because it's a task, the reconciler hot-reloads it on change, same as any task in a watched source; no binary rebuild is needed. `pkg/webui`'s own embedded static assets are limited to `dicode.js` and `dicode-oauth-broadcast.js` (the client SDK injected into webhook-served pages), not the SPA itself.
 
 For the component-level architecture (light-DOM app components vs. the Shadow-DOM `dc-card`/`dc-table`/etc. primitives, and the `DcElement` base class), see [WebUI frontend components](webui-components.md).
 
@@ -100,7 +100,7 @@ All real-time data flows over a single persistent WebSocket at `/ws`:
 - The server pushes log lines, run status changes, and task registration events as JSON messages
 - `lib/ws.js` handles connect, dispatch by message type, and auto-reconnect (3s backoff)
 
-> **Development note:** the frontend is a hot-reloaded task, not embedded in the binary — changes to files under `tasks/buildin/webui/` take effect on the next reconciler pass, no rebuild required.
+> **Development note:** the frontend is a hot-reloaded task, not embedded in the binary — changes to files under `dicode-buildin/webui/` take effect on the next reconciler pass, no rebuild required.
 
 ---
 

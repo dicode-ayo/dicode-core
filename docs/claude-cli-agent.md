@@ -4,8 +4,8 @@ dicode ships two AI-agent buildin tasks:
 
 | Task | Backend | Auth | Billing |
 |---|---|---|---|
-| [`buildin/ai-agent`](../tasks/buildin/ai-agent/) | OpenAI-compatible HTTPS endpoint (OpenAI, Anthropic, Ollama, OpenRouter, …) | Per-task `*_API_KEY` env or secret | Per-token via the chosen provider's API |
-| [`buildin/ai-agent-claude-cli`](../tasks/buildin/ai-agent-claude-cli/) | Local `claude` CLI subprocess | One-year OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`) | Counts against your Claude.ai Pro/Max subscription rate windows |
+| [`buildin/ai-agent`](../dicode-buildin/ai-agent/) | OpenAI-compatible HTTPS endpoint (OpenAI, Anthropic, Ollama, OpenRouter, …) | Per-task `*_API_KEY` env or secret | Per-token via the chosen provider's API |
+| [`buildin/ai-agent-claude-cli`](../dicode-buildin/ai-agent-claude-cli/) | Local `claude` CLI subprocess | One-year OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`) | Counts against your Claude.ai Pro/Max subscription rate windows |
 
 If you have a Claude subscription, the CLI variant lets dicode use the same
 quota you're already paying for — no per-token API charges.
@@ -58,11 +58,11 @@ no Deno, no Claude. Choose the install path that fits your deployment:
   on the daemon's PATH.
 - **Custom Docker image:** build a derivative of the dicode-core image
   with the binary copied in. See the
-  [task README](../tasks/buildin/ai-agent-claude-cli/README.md#option-b--custom-docker-image-containerized-deployments)
+  [task README](../dicode-buildin/ai-agent-claude-cli/README.md#option-b--custom-docker-image-containerized-deployments)
   for a full Dockerfile.
 - **Kubernetes init container:** mount an emptyDir between an Alpine
   init container that runs the Claude installer and the main dicode
-  container. See the [task README](../tasks/buildin/ai-agent-claude-cli/README.md#option-c--kubernetes-init-container-no-image-rebuild).
+  container. See the [task README](../dicode-buildin/ai-agent-claude-cli/README.md#option-c--kubernetes-init-container-no-image-rebuild).
 
 Once installed, drop the OAuth token into dicode's secrets store as
 `CLAUDE_CODE_OAUTH_TOKEN` (via the WebUI or
@@ -102,7 +102,7 @@ Then point `on_failure_chain` at `buildin/auto-fix-claude` instead of
   override that swaps the agent *and* names the capabilities the loop needs —
   `sources_list`, `sources_set_dev_mode`, `tasks_test`, `list_tasks`, and the
   `tasks` it must call. `task-create` and `auto-fix` in
-  `tasks/buildin/taskset.yaml` are the worked examples; copy their `dicode:`
+  `dicode-buildin/taskset.yaml` are the worked examples; copy their `dicode:`
   block. Without it the MCP wiring is present and every tool is denied.
 - **No tool-use beyond `claude -p` defaults.** Print mode disables
   Claude's filesystem / bash tools. For deeper agentic loops, drive the

@@ -24,7 +24,7 @@ has to do manually, and the trade-offs.
 Before proposing changes, it's worth being precise about what's already in
 place, because a lot of the groundwork is done:
 
-- **Relay tunnel.** The [`buildin/relay-client`](../../tasks/buildin/relay-client/) task
+- **Relay tunnel.** The [`buildin/relay-client`](../../dicode-buildin/relay-client/) task
   (built on `npm:dicode-relay/client`) connects outbound
   over WSS to the relay server; inbound HTTP requests at
   `https://relay.dicode.app/u/<uuid>/hooks/<path>` are forwarded down the
@@ -37,8 +37,8 @@ place, because a lot of the groundwork is done:
   On completion it ECIES-encrypts the delivered tokens against the daemon's
   P-256 public key and forwards them as a `request` to `/hooks/oauth-complete`
   on the target daemon.
-- **auth-start / auth-relay tasks.** [`tasks/buildin/auth-start`](../../tasks/buildin/auth-start/) prints an
-  authorize URL; [`tasks/buildin/auth-relay`](../../tasks/buildin/auth-relay/) is the reserved sink at
+- **auth-start / auth-relay tasks.** [`dicode-buildin/auth-start`](../../dicode-buildin/auth-start/) prints an
+  authorize URL; [`dicode-buildin/auth-relay`](../../dicode-buildin/auth-relay/) is the reserved sink at
   `/hooks/oauth-complete` that ECIES-decrypts the envelope in a locked-down
   task (`silent: true`, no net, no fs) and writes secrets via
   `dicode.secrets_set`.
@@ -343,9 +343,9 @@ in the broker env. One-time, but a real step.
 
 1. **Read `SLACK_TEAM_ID` from secrets and include it in the hello message.**
    Small change to the npm `dicode-relay` client (hello field bindings) plus
-   [`tasks/buildin/relay-client`](../../tasks/buildin/relay-client/) to announce it.
+   [`dicode-buildin/relay-client`](../../dicode-buildin/relay-client/) to announce it.
 2. **Accept and persist the `extras` field from OAuth delivery.** Extend
-   [`tasks/buildin/auth-relay`](../../tasks/buildin/auth-relay/) to write each `extras[key]` entry as a
+   [`dicode-buildin/auth-relay`](../../dicode-buildin/auth-relay/) to write each `extras[key]` entry as a
    named secret via `dicode.secrets_set`. ~30 lines.
 3. **Optional: reserved `/hooks/slack-events` webhook path** so arbitrary
    user tasks can't bind it. Same policy question as Approach A; independent
@@ -514,7 +514,7 @@ existing auth-start / auth-relay path with no protocol changes.
 
 ### Daemon-side changes required
 
-**1. Two builtin tasks** in [`tasks/buildin/`](../../tasks/buildin/):
+**1. Two builtin tasks** in [`dicode-buildin/`](../../dicode-buildin/):
 
 - `slack-install-begin` — manual trigger. Signs an authorize URL for the
   `slack-config` provider (the same signed-URL path `auth-start` uses),

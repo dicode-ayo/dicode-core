@@ -686,7 +686,7 @@ Dicode ships a built-in **ai-agent** task that gives you a full chat interface w
 Two vocabulary pieces worth knowing:
 
 - **Tools** are other dicode tasks the agent can execute. Any task becomes a tool automatically — no extra registration.
-- **Skills** are plain markdown files under `tasks/skills/` that get loaded into the agent's system prompt. Use them to teach the agent domain context, conventions, or workflows it wouldn't infer from task descriptions alone.
+- **Skills** are plain markdown files under `dicode-buildin/skills/` that get loaded into the agent's system prompt. Use them to teach the agent domain context, conventions, or workflows it wouldn't infer from task descriptions alone.
 
 The built-in ships provider-agnostic — no network, no API keys. Choose your provider via taskset overrides (see `tasks/examples/taskset.yaml` for working Ollama / OpenAI / Groq presets), or pass `model` / `base_url` / `api_key_env` as params per request. Conversation history is persisted per `session_id` in the task's KV store and compacted into a running summary once it exceeds a configurable token budget.
 
@@ -912,14 +912,14 @@ Tasks without explicit `secrets:` entries continue to use the provider chain —
 
 Notifications are delivered by **tasks**, not a daemon-side subsystem. Three settings point at a delivery task: `ai.notify_task` (a run suspended awaiting your reply), `approval.notify_task` (the approval gate held a task), and `defaults.on_failure_chain` (a run failed). Point any of them at a task that emits the alert — desktop, Telegram, ntfy, Slack, Discord, email, anything you can reach over HTTP.
 
-Both hooks hand the delivery task a rendered `title` and `body`, with the structured fields (`event`, `task_id`, `run_id`, `hash`, `approve_url`, `resume_url`) riding alongside for a task that would rather render its own link than a line of prose. The failure chain is the exception: it delivers through `input` rather than params and sends no rendered text, so a task serving it has to compose its own — see `tasks/buildin/telegram/` for a worked example.
+Both hooks hand the delivery task a rendered `title` and `body`, with the structured fields (`event`, `task_id`, `run_id`, `hash`, `approve_url`, `resume_url`) riding alongside for a task that would rather render its own link than a line of prose. The failure chain is the exception: it delivers through `input` rather than params and sends no rendered text, so a task serving it has to compose its own — see `dicode-buildin/telegram/` for a worked example.
 
 ### Buildins
 
 | Task | Surface | Notes |
 |---|---|---|
 | `buildin/notifications` | Native OS desktop (`notify-send` / `osascript` / `powershell`) | No external service. Works offline. |
-| `buildin/telegram` | Telegram Bot API `sendMessage` | Reaches a headless host. Opt-in: needs a `TELEGRAM_BOT_TOKEN` secret. See [the task README](tasks/buildin/telegram/README.md). |
+| `buildin/telegram` | Telegram Bot API `sendMessage` | Reaches a headless host. Opt-in: needs a `TELEGRAM_BOT_TOKEN` secret. See [the task README](https://github.com/dicode-ayo/dicode-buildin/blob/main/telegram/README.md). |
 | `buildin/alert` | Wrapper that calls `buildin/notifications` via `dicode.run_task` | Demonstrates the chain pattern; copy and adapt for ntfy / Slack / etc. |
 
 Wire it up:
@@ -957,7 +957,7 @@ server:
 └─────────────────────────────┘
 ```
 
-The tray runs as a built-in Deno daemon task (`tasks/buildin/tray/`) using a portable systray helper binary — no CGo or GTK required. Works on Linux, macOS, and Windows. Disabled when running headless (`server.tray: false`).
+The tray runs as a built-in Deno daemon task (`dicode-buildin/tray/`) using a portable systray helper binary — no CGo or GTK required. Works on Linux, macOS, and Windows. Disabled when running headless (`server.tray: false`).
 
 ---
 
@@ -1184,11 +1184,11 @@ Write a sibling test file and run it through the task's runtime:
 
 ```bash
 dicode task test buildin/webui               # via the daemon (CLI → IPC → executor)
-make test-tasks                              # task.test.ts files in tasks/buildin/ and tasks/examples/, plus the repo-prune shell guard
+make test-tasks                              # task.test.ts files in tasks/examples/, plus the repo-prune shell guard
 uv run tasks/examples/hello-python/task.test.py  # Python: directly, no daemon required
 ```
 
-**Deno** (`task.test.ts` / `.js` / `.mjs`) — the harness (`tasks/sdk-test.ts`) provides in-memory mocks for the production SDK: `params.set`, `env.set`, `kv.set/get`, `http.mock` / `mockOnce`, `assert.*`, plus `runTask()` which invokes the task's default export. Each `test()` case gets a fresh mock state. See [tasks/buildin/webui/task.test.ts](tasks/buildin/webui/task.test.ts) and [tasks/buildin/ai-agent/task.test.ts](tasks/buildin/ai-agent/task.test.ts) for working examples.
+**Deno** (`task.test.ts` / `.js` / `.mjs`) — the harness (`tasks/sdk-test.ts`) provides in-memory mocks for the production SDK: `params.set`, `env.set`, `kv.set/get`, `http.mock` / `mockOnce`, `assert.*`, plus `runTask()` which invokes the task's default export. Each `test()` case gets a fresh mock state. See [dicode-buildin/webui/task.test.ts](https://github.com/dicode-ayo/dicode-buildin/blob/main/webui/task.test.ts) and [dicode-buildin/ai-agent/task.test.ts](https://github.com/dicode-ayo/dicode-buildin/blob/main/ai-agent/task.test.ts) for working examples.
 
 **Python** (`task.test.py`) — the harness (`tasks/sdk_test.py`) provides the equivalent mocks (`params`, `env`, `kv`, `http.mock`/`http.mock_once` over httpx, `run_task()`, a `dicode`-shaped mock) via pytest. A `task.test.py` is itself a PEP 723 script (`uv run`-executable) that ends with `run_pytest_main(__file__)` — see [docs/concepts/testing.md § Python](docs/concepts/testing.md#python) for the exact contract, and [tasks/examples/hello-python/task.test.py](tasks/examples/hello-python/task.test.py) for a working example.
 
@@ -1292,13 +1292,13 @@ A skill file gives any AI agent the full context needed to develop dicode tasks 
 
 ### Install
 
-The skill lives at `tasks/skills/dicode-task-dev.md`. It is loaded automatically by the `buildin/dicodai` task (a preset of `buildin/ai-agent` preloaded with `dicode-task-dev,dicode-basics`) so the WebUI chat panel already benefits from it. To use it with a separate AI agent (Claude Code, your own chat UI, etc.) copy it into your project:
+The skill lives at `dicode-buildin/skills/dicode-task-dev.md`. It is loaded automatically by the `buildin/dicodai` task (a preset of `buildin/ai-agent` preloaded with `dicode-task-dev,dicode-basics`) so the WebUI chat panel already benefits from it. To use it with a separate AI agent (Claude Code, your own chat UI, etc.) copy it into your project:
 
 ```bash
-cat tasks/skills/dicode-task-dev.md >> CLAUDE.md
+curl -sL https://raw.githubusercontent.com/dicode-ayo/dicode-buildin/main/skills/dicode-task-dev.md >> CLAUDE.md
 ```
 
-Add more skills by dropping markdown files with YAML frontmatter into `tasks/skills/` and listing them in the ai-agent's `skills` param.
+Add more skills by dropping markdown files with YAML frontmatter into `dicode-buildin/skills/` and listing them in the ai-agent's `skills` param.
 
 ### What the skill teaches the agent
 

@@ -417,7 +417,7 @@ type AuthoringService interface {
 	// as the run-group correlation id (see AuthoringEditResult.AgentSessionID
 	// below) for UI/log grouping. This does NOT give the agent
 	// conversational memory — every one-shot turn still starts from an
-	// empty SessionState; see tasks/buildin/ai-agent/task.ts's oneShotTurn.
+	// empty SessionState; see dicode-buildin's ai-agent/task.ts oneShotTurn.
 	// Real conversational continuity across `task edit` calls is Phase 1
 	// work (session-as-suspended-run, docs/design/ai-task-authoring.md).
 	// Called by handleTaskEdit after a successful AI turn; a blank
@@ -467,7 +467,7 @@ type AuthoringEditResult struct {
 	// authoring session from a prior turn (#568), or "" if no AI turn has
 	// happened on it yet. handleTaskEdit reads this before firing the next
 	// turn and re-sends it as the session_id param — but the underlying
-	// oneShotTurn (tasks/buildin/ai-agent/task.ts) builds a brand-new empty
+	// oneShotTurn (dicode-buildin's ai-agent/task.ts) builds a brand-new empty
 	// SessionState on every call, so this does NOT carry conversational
 	// memory across turns. Its real, worth-keeping effect is tagging every
 	// turn's run under one run-group label (`chat:<id>`) so the WebUI/logs
@@ -572,7 +572,7 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 // against the same open session are tagged under one run-group label
 // (`chat:<id>`) for UI/log grouping. The underlying agent does NOT retain
 // memory between these one-shot turns — oneShotTurn
-// (tasks/buildin/ai-agent/task.ts) builds a brand-new empty SessionState on
+// (dicode-buildin's ai-agent/task.ts) builds a brand-new empty SessionState on
 // every call, by design ("one-shot calls share no history"). Real
 // conversational continuity across `task edit` calls requires the
 // chat-loop/suspend-resume path, which is explicitly Phase 1 work

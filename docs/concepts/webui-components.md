@@ -1,6 +1,6 @@
 # WebUI frontend components
 
-Internal contributor documentation for `tasks/buildin/webui/app/` — the plain
+Internal contributor documentation for `dicode-buildin/webui/app/` — the plain
 Lit 3 SPA served at `/hooks/webui` (see [Web UI & API](webui-api.md) for the
 pages/routes/REST surface). This doc covers the component-level
 architecture: the light-DOM/Shadow-DOM split, the Stage 1 primitives
@@ -87,7 +87,7 @@ badge colors change, both places need updating — noted in both files.
 
 ## The six Stage 1 primitives
 
-All under `tasks/buildin/webui/app/components/`. Each is self-contained,
+All under `dicode-buildin/webui/app/components/`. Each is self-contained,
 importing only `lit`, `../lib/slot-utils.js` (`dc-card` only), and — for
 `dc-table` — `dc-empty-state`.
 

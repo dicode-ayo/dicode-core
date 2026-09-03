@@ -22,7 +22,7 @@ package trigger
 //     `runs.return_value`.
 //
 //  2. The UPSTREAM in the happy-path + embedded-token cases is the
-//     ACTUAL `tasks/buildin/template/` task loaded from disk — the same
+//     ACTUAL `template/` task loaded from disk — the same
 //     spec/code that ships in dicode-core. That exercises the real
 //     library task's `run_result.enabled: false` + in-memory cache
 //     return path, and provides regression
@@ -61,26 +61,20 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// buildinTemplateDir returns the absolute path to the on-disk
-// `tasks/buildin/template/` task that ships with dicode-core. Anchored
-// via runtime.Caller so it works regardless of the test runner's CWD
-// (go test sets CWD to the package dir, but worktree-relative anchors
-// drift if the layout ever changes). The walk-up is fixed: this file
-// lives at `pkg/trigger/`, two levels under the repo root, so the
-// buildin tasks dir is at `../../tasks/buildin/template`.
+// buildinTemplateDir returns the absolute path to the vendored copy of
+// dicode-buildin's `template/` task (see testdata/UPSTREAM.md). Anchored via
+// runtime.Caller so it works regardless of the test runner's CWD (go test
+// sets CWD to the package dir, but worktree-relative anchors drift if the
+// layout ever changes).
 func buildinTemplateDir(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := goruntime.Caller(0)
 	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot anchor buildin/template path")
+		t.Fatal("runtime.Caller(0) failed; cannot anchor template path")
 	}
-	// thisFile is .../pkg/trigger/e2e_input_output_test.go
-	// → repo root is two levels up from the file's directory.
-	pkgDir := filepath.Dir(thisFile)               // .../pkg/trigger
-	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
-	dir := filepath.Join(repoRoot, "tasks", "buildin", "template")
+	dir := filepath.Join(filepath.Dir(thisFile), "testdata", "template")
 	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
-		t.Fatalf("buildin/template task.yaml not found at %s: %v", dir, err)
+		t.Fatalf("template task.yaml not found at %s: %v", dir, err)
 	}
 	return dir
 }
@@ -123,7 +117,7 @@ func inputOutputFixtureDir(t *testing.T, name string) string {
 	return dir
 }
 
-// loadBuildinTemplateAs loads the real `tasks/buildin/template/` task
+// loadBuildinTemplateAs loads the real `template/` task
 // from disk and rebinds its ID + Name so the test can wire a downstream
 // chain trigger that references this upstream by a stable, test-scoped
 // name (LoadDir defaults the ID to filepath.Base of the dir, which
@@ -183,7 +177,7 @@ func loadInputOutputDownstream(t *testing.T, chainValue string) *task.Spec {
 
 // TestE2E_InputOutput_ChainParamsStringSubstitution drives the
 // happy-path success-chain dispatch through real Deno: the REAL
-// `tasks/buildin/template/` task loaded from disk renders a literal
+// `template/` task loaded from disk renders a literal
 // string ("hello from upstream" — no placeholders, so no env wiring
 // needed) and feeds a downstream whose `chain.params.value` is the
 // literal `${input.output}` token. The downstream's task body reads
@@ -384,7 +378,7 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 // The hand-written tests in pkg/task/inputref_test.go cover this at
 // the unit layer; this e2e pins it at the chain-dispatch boundary so a
 // future regression to the narrow grammar can't slip through.
-// Upstream is the REAL `tasks/buildin/template/` task — the rendered
+// Upstream is the REAL `template/` task — the rendered
 // string is what flows into `input.output` via the in-memory cache.
 func TestE2E_InputOutput_EmbeddedTokenInterpolates(t *testing.T) {
 	if testing.Short() {
