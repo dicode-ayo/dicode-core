@@ -117,7 +117,7 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 			}
 			if filename := p.FileName(); filename != "" {
 				meta.Kind = "file"
-				if shouldRedactName(meta.Name) {
+				if shouldRedactName(meta.Name) || containsCredentialValue(filename) {
 					meta.Filename = redactPlaceholder
 					*redacted = append(*redacted, "body_parts."+meta.Name+".filename")
 				} else {

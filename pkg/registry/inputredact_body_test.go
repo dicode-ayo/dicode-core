@@ -216,6 +216,37 @@ func TestRedactBody_Multipart(t *testing.T) {
 	}
 }
 
+// #810 code-review follow-up: a multipart filename carrying a
+// credential-shaped value must be redacted even when its part name isn't on
+// the deny-list — mirrors the same gap already covered for form/JSON/text
+// bodies, just for the filename metadata multipart persists instead of the
+// (never-persisted) part value.
+func TestRedactBody_Multipart_ValueShapeCredentialFilename(t *testing.T) {
+	body := []byte("--BOUNDARY\r\n" +
+		"Content-Disposition: form-data; name=\"upload\"; filename=\"dcap_abc123.txt\"\r\n" +
+		"Content-Type: text/plain\r\n\r\n" +
+		"file contents\r\n" +
+		"--BOUNDARY--\r\n")
+	redacted := []string{}
+	out := redactBody(body, "multipart/form-data; boundary=BOUNDARY", false, &redacted)
+
+	if len(out.BodyParts) != 1 {
+		t.Fatalf("BodyParts len = %d, want 1; parts = %#v", len(out.BodyParts), out.BodyParts)
+	}
+	if out.BodyParts[0].Filename != redactPlaceholder {
+		t.Errorf("filename not redacted: %q", out.BodyParts[0].Filename)
+	}
+	found := false
+	for _, p := range redacted {
+		if p == "body_parts.upload.filename" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in redacted, got %v", "body_parts.upload.filename", redacted)
+	}
+}
+
 // Sanity: an empty body should not panic.
 func TestRedactBody_EmptyBody(t *testing.T) {
 	redacted := []string{}
