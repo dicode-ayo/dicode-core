@@ -78,30 +78,24 @@ remain readable alongside the machine-readable XML.
 ### CI job: `test-tasks`
 
 The `.github/workflows/ci.yml` job `test-tasks` runs `deno test` directly
-(no daemon) against every `task.test.ts` under **both** `tasks/buildin/**`
-and `tasks/examples/**`, plus `tasks/examples/repo-prune/prune-stale-refs.test.sh`
+(no daemon) against every `task.test.ts` under `tasks/examples/**`, plus
+`tasks/examples/repo-prune/prune-stale-refs.test.sh`
 (a shell-level suite that drives the real prune script against a throwaway
 repo — `task.test.ts` only mocks `Deno.Command`, so it never exercises the
 script that actually deletes branches/worktrees). `make test-tasks` runs the
-same three commands locally. Only `runtime: deno` tasks can ship a
+same commands locally. Only `runtime: deno` tasks can ship a
 `task.test.ts` — `runtime: python` tasks ship a `task.test.py` instead (see
 [Python](#python) below); Docker/Podman tasks can't ship a test file at all
 yet (#159 Phase 3).
 
-### CI job: `test-tasks-cli`
+### Daemon-backed task tests
 
-The `.github/workflows/ci.yml` job `test-tasks-cli` boots the dicode daemon
-against the built-in task set (using `ci/dicode-tasktest.yaml`) and runs:
-
-```bash
-./dicode task test buildin/webui --format=junit
-```
-
-The resulting JUnit XML is uploaded as a workflow artifact. The daemon log is
-uploaded on failure for post-mortem inspection. `buildin/webui` is a Deno
-task; there is currently no built-in Python task in the daemon's task set for
-this job to exercise the same way, so this job's daemon-backed coverage stays
-Deno-only for now. Python coverage instead comes from `pkg/tasktest`'s own Go
+The built-in tasks and their tests live in [dicode-buildin](https://github.com/dicode-ayo/dicode-buildin), and its own
+CI boots a daemon against them and runs `./dicode task test buildin/webui
+--format=junit`, uploading the JUnit XML as an artifact and the daemon log on
+failure. `buildin/webui` is a Deno task; there is no built-in Python task for
+that job to exercise the same way, so its daemon-backed coverage stays
+Deno-only. Python coverage instead comes from `pkg/tasktest`'s own Go
 tests (`TestRun_Python`, which drives `runPython` through a real `uv`
 subprocess) plus a dedicated `test-tasks` job step that runs
 `tasks/examples/hello-python/task.test.py` directly via `uv run` (no
@@ -126,8 +120,8 @@ await setupHarness(import.meta.url);
 `setupHarness` dynamically imports the sibling `task.ts`'s default export,
 intercepts `fetch` and `Deno.env.get`, and installs `test`/`params`/`env`/`kv`/
 `http`/`assert`/`runTask`/`dicode` as globals for the rest of the file. See
-[tasks/buildin/webui/task.test.ts](../../tasks/buildin/webui/task.test.ts) and
-[tasks/buildin/blob-storage/task.test.ts](../../tasks/buildin/blob-storage/task.test.ts)
+[dicode-buildin/webui/task.test.ts](../../dicode-buildin/webui/task.test.ts) and
+[dicode-buildin/blob-storage/task.test.ts](../../dicode-buildin/blob-storage/task.test.ts)
 for working examples. This harness ships in this repo for the built-in/example
 tasks; it is not (yet) published as a standalone package for external task
 repos to import.

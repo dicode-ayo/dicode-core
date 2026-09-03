@@ -379,7 +379,7 @@ func (rc *Reconciler) retryPending() {
 //
 // Order dependency: provider tasks must reconcile before their consumers.
 // The buildin source registers providers first because they live under
-// tasks/buildin/secret-providers/* and the taskset.yaml entry order is
+// dicode-buildin's secret-providers/* and the taskset.yaml entry order is
 // preserved. For multi-source setups, a miss on the first reconciler pass
 // causes the consumer to be queued in rc.pending and retried after the
 // next successful registration (see handle and retryPending).

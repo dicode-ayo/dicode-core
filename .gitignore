@@ -15,3 +15,5 @@ tests/e2e/.auth-state.json
 /deno.lock
 !.claude/memory/
 __pycache__/
+# e2e clones dicode-buildin here; see tests/e2e/helpers/buildin.ts
+.buildin-cache/

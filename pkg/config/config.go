@@ -294,7 +294,9 @@ type Config struct {
 	//     entries:
 	//       buildin:
 	//         ref:
-	//           path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+	//           url: https://github.com/dicode-ayo/dicode-buildin
+	//           branch: main
+	//           path: taskset.yaml
 	//       examples:
 	//         ref:
 	//           url: https://github.com/org/examples

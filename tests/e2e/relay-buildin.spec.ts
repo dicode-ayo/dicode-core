@@ -38,12 +38,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
+import { ensureBuildinCheckout } from './helpers/buildin';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const BINARY = path.join(REPO_ROOT, 'dicode');
-const BUILDIN_TASKSET = path.join(REPO_ROOT, 'tasks/buildin/taskset.yaml');
+const BUILDIN_TASKSET = path.join(ensureBuildinCheckout(REPO_ROOT), 'taskset.yaml');
 
 // ─── process handles (set in beforeAll, torn down in afterAll) ───────────────
 

@@ -10,6 +10,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/onboarding"
 )
 
 // TestCmdInit_HappyPath scaffolds a fresh directory and checks every file
@@ -342,7 +343,9 @@ func TestRunInit_WizardDisablesPreset(t *testing.T) {
 	if strings.Contains(body, "tasks/examples/taskset.yaml") {
 		t.Errorf("examples preset was declined but still rendered:\n%s", body)
 	}
-	if !strings.Contains(body, "tasks/buildin/taskset.yaml") {
+	// Matched on URL, not entry path: buildin's path is a bare "taskset.yaml"
+	// at its own repo's root, which every other preset's path also ends with.
+	if !strings.Contains(body, presetURL(t, "buildin")) {
 		t.Errorf("buildin preset was accepted but is missing:\n%s", body)
 	}
 }
@@ -583,4 +586,17 @@ func TestMachineSpecific(t *testing.T) {
 			}
 		})
 	}
+}
+
+// presetURL returns the git URL the named taskset preset renders, so the
+// wizard assertions follow pkg/onboarding rather than restating its values.
+func presetURL(t *testing.T, name string) string {
+	t.Helper()
+	for _, p := range onboarding.TaskSetPresets {
+		if p.Name == name {
+			return p.URL
+		}
+	}
+	t.Fatalf("no taskset preset named %q", name)
+	return ""
 }

@@ -16,7 +16,7 @@ spec:
   entries:
     buildin:
       ref:
-        path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+        path: ${CONFIGDIR}/dicode-buildin/taskset.yaml
       overrides:
         entries:
           relay-client:
@@ -195,7 +195,7 @@ The old `sources:` array was removed in v0.1+. The format change is mechanical:
 sources:
   - name: buildin
     type: local
-    path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+    path: ${CONFIGDIR}/dicode-buildin/taskset.yaml
     watch: true
   - name: examples
     type: git
@@ -214,7 +214,7 @@ spec:
   entries:
     buildin:
       ref:
-        path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+        path: ${CONFIGDIR}/dicode-buildin/taskset.yaml
         watch: true
     examples:
       ref:

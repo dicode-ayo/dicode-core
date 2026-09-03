@@ -24,7 +24,7 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **Performance & Scalability enhancements (partial).** Max concurrent tasks semaphore in `fireAsync()` (#74), `WaitRun()` replaced polling with channel notification (#73), concurrency metrics endpoint (#75). Deno process pool (#77) and batch log writes (#76) are open PRs.
 
-**Built-in AI Agent ✅ Complete.** `tasks/buildin/ai-agent/` — chat task with tool-calling loop; discovers registered tasks as tools, `task.yaml` template variables for provider config, KV-backed conversation history with compaction (#98).
+**Built-in AI Agent ✅ Complete.** `dicode-buildin/ai-agent/` — chat task with tool-calling loop; discovers registered tasks as tools, `task.yaml` template variables for provider config, KV-backed conversation history with compaction (#98).
 
 **Design System ✅ Complete.** `theme.css` design tokens adopted across the WebUI SPA (#92).
 
@@ -393,7 +393,7 @@ Delivered as tasks rather than a daemon-side subsystem. `defaults.on_failure_cha
 
 **Goal**: desktop tray icon with status and quick actions.
 
-Originally implemented as `pkg/tray/` (`fyne.io/systray`, DBus StatusNotifierItem on Linux). That package is gone; the tray is now the `buildin/tray` task (`tasks/buildin/tray/`), a daemon task using `deno.land/x/systray`'s pre-compiled native helper over stdin/stdout — dropping the CGO/GTK build dependency from the dicode binary entirely (issue #59).
+Originally implemented as `pkg/tray/` (`fyne.io/systray`, DBus StatusNotifierItem on Linux). That package is gone; the tray is now the `buildin/tray` task (`dicode-buildin/tray/`), a daemon task using `deno.land/x/systray`'s pre-compiled native helper over stdin/stdout — dropping the CGO/GTK build dependency from the dicode binary entirely (issue #59).
 
 **Deliverable**: dicode has a tray icon on Linux/macOS/Windows desktop systems. Quit from the tray fully stops the process. ✅
 
@@ -405,8 +405,8 @@ Originally implemented as `pkg/tray/` (`fyne.io/systray`, DBus StatusNotifierIte
 
 **Implemented via task-based AI**: the direct Go SSE endpoint (`pkg/webui/ai.go`) has been removed. The WebUI task-detail "AI" chat panel now POSTs to the `buildin/dicodai` webhook (`/hooks/ai/dicodai`) — a preset override of `buildin/ai-agent` preloaded with the `dicode-task-dev` and `dicode-basics` skills and defaulting to OpenAI.
 
-- `buildin/ai-agent` is a generic OpenAI-compatible chat agent (see `tasks/buildin/ai-agent/`) with tool-use loop, skill loading, and per-session conversation persistence in KV.
-- `buildin/dicodai` is a preset (in `tasks/buildin/taskset.yaml`) that preloads the task-developer skill and wires sensible OpenAI defaults.
+- `buildin/ai-agent` is a generic OpenAI-compatible chat agent (see `dicode-buildin/ai-agent/`) with tool-use loop, skill loading, and per-session conversation persistence in KV.
+- `buildin/dicodai` is a preset (in `dicode-buildin/taskset.yaml`) that preloads the task-developer skill and wires sensible OpenAI defaults.
 - The AI chat panel surfaces the agent's text reply only. File writes are no longer automatic — users copy code back to the editor manually.
 
 **Config**: the standalone `ai:` block in `dicode.yaml` was removed. Provider config lives per-task as ai-agent params (`model`, `base_url`, `api_key_env`) and can be overridden via taskset overrides. The `OPENAI_API_KEY` environment variable is all the `dicodai` preset needs to work.
@@ -542,7 +542,7 @@ Wire into WebUI `/generate` endpoint. Show diff, let user confirm, write to loca
 - `buildin/relay-server` — relay server task for self-hosting and integration tests
 - Security: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection, hop-by-hop header filtering, 5 MB body limit
 - Status published via `dicode.kv.set("status", ...)`, served to the WebUI by `pkg/webui/relay_status.go` at `GET /api/relay/status`
-- Tests: `tasks/buildin/relay-client/task.test.ts`
+- Tests: `dicode-buildin/relay-client/task.test.ts`
 
 **Production relay server**: separate Node.js service (`dicode-relay` repo) with OAuth broker support for 14+ providers.
 
@@ -762,4 +762,4 @@ The agent task gets the failed run logs as context and attempts a fix.
 | `task.yaml` agent fields | `agent.prompt`, `agent.skills`, `agent.mcp[]`, `agent.allowed_tasks[]` |
 | MCP scope enforcement | Per-task MCP allowlist enforced by a proxy in the engine |
 | `dicode.stream()` global | WebSocket subscription global for daemon tasks watching events |
-| Agent skill update | Add `runtime: agent` docs + security notes to `tasks/skills/dicode-task-dev.md` |
+| Agent skill update | Add `runtime: agent` docs + security notes to `dicode-buildin/skills/dicode-task-dev.md` |

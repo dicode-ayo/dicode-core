@@ -11,8 +11,8 @@ import (
 )
 
 func TestParseDenoSummary_Passed(t *testing.T) {
-	out := `Check file:///workspaces/dicode-core/tasks/buildin/webui/task.test.ts
-running 7 tests from ./tasks/buildin/webui/task.test.ts
+	out := `Check file:///workspaces/dicode-core/tasks/examples/repo-prune/task.test.ts
+running 7 tests from ./tasks/examples/repo-prune/task.test.ts
 ping returns pong ... ok (1ms)
 
 ok | 7 passed | 0 failed (80ms)

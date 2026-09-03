@@ -33,6 +33,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
+import { ensureBuildinCheckout } from './helpers/buildin';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ function writeDaemonConfig(
   // so local-storage must be registered under the canonical "buildin" namespace.
   // We mount the full buildin taskset under a "buildin" source so IPC security
   // resolves the task ID correctly.
-  const buildinTasksetPath = path.join(REPO_ROOT, 'tasks/buildin/taskset.yaml');
+  const buildinTasksetPath = path.join(ensureBuildinCheckout(REPO_ROOT), 'taskset.yaml');
 
   const cfgPath = path.join(dir, 'dicode.yaml');
   fs.writeFileSync(

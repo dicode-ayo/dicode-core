@@ -13,17 +13,22 @@ type TaskSetPreset struct {
 	DefaultOn bool   // pre-checked in the wizard
 }
 
-// TaskSetPresets is the single edit-point when the three tasksets split into
-// standalone repos. Today all three point at dicode-core with different
-// entry paths.
+// TaskSetPresets is the single edit-point for where each taskset lives.
+// buildin has a repo of its own; examples and auth are still entry paths
+// within dicode-core.
+//
+// The buildin entry's Name is load-bearing beyond the UI: task IDs are
+// namespaced by it, and pkg/approval keys its auto-approve rule and
+// dicode-core's own task references ("buildin/dicodai", …) off that exact
+// string.
 var TaskSetPresets = []TaskSetPreset{
 	{
 		Name:      "buildin",
 		Label:     "Built-in tasks",
 		Desc:      "Tray icon, notifications, web UI, dicodai chat, alert — the daemon's standard inventory.",
-		URL:       "https://github.com/dicode-ayo/dicode-core",
+		URL:       "https://github.com/dicode-ayo/dicode-buildin",
 		Branch:    "main",
-		EntryPath: "tasks/buildin/taskset.yaml",
+		EntryPath: "taskset.yaml",
 		DefaultOn: true,
 	},
 	{

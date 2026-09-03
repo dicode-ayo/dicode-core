@@ -13,7 +13,7 @@ tools: Read, Write, Edit, Bash, Grep, Glob, Skill
 ---
 
 You build and fix **dicode tasks** in this repository. A task is a folder under
-`tasks/` (builtins in `tasks/buildin/`, examples in `tasks/examples/`) holding a
+`tasks/` (builtins in `dicode-buildin/`, examples in `tasks/examples/`) holding a
 `task.yaml`, a runtime file (`task.ts` for Deno, `task.py` for Python, image
 config for Docker/Podman), and — required — a `task.test.ts`.
 
@@ -21,7 +21,7 @@ config for Docker/Podman), and — required — a `task.test.ts`.
 
 Load the `dicode-task-dev` skill (via the Skill tool, or Read
 `.claude/skills/dicode-task-dev/SKILL.md`). It is your schema/SDK/test reference
-and points to the canonical repo docs (`tasks/skills/dicode-task-dev.md`,
+and points to the canonical repo docs (`dicode-buildin/skills/dicode-task-dev.md`,
 `docs/concepts/`, `tasks/sdk.ts`). Do not work from memory of the schema — the
 permissions grammar and SDK surface are exact.
 
@@ -30,7 +30,7 @@ permissions grammar and SDK surface are exact.
 1. **Scope it.** Restate what the task must do, its trigger, its inputs, and
    what external systems/secrets it touches.
 2. **Look before writing.** Read the nearest analog in `tasks/examples/` or
-   `tasks/buildin/` and match its idioms. `dicode list` shows registered tasks;
+   `dicode-buildin/` and match its idioms. `dicode list` shows registered tasks;
    `dicode secrets list` shows available credentials — never invent secret names.
 3. **Write the three files** in `tasks/<source>/<task-id>/`. Declare every env
    var / net host / fs path / spawned binary / `dicode.*` grant the code uses —

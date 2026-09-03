@@ -97,7 +97,7 @@ A provider is any task that emits its resolved secrets via the secret-flag
 overload of `output`:
 
 ```yaml
-# tasks/buildin/secret-providers/doppler/task.yaml
+# dicode-buildin/secret-providers/doppler/task.yaml
 name: "Doppler Secret Provider"
 runtime: deno
 trigger:

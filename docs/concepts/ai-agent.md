@@ -10,7 +10,7 @@ Unlike the existing "AI generates code" feature (see [docs/concepts/ai-generatio
 
 - **A chat page** at `/hooks/ai` (plus per-provider presets at `/hooks/ai/ollama`, `/hooks/ai/openai`, `/hooks/ai/groq`). Send a message, get a reply. Sessions persist across turns.
 - **Tool use** — the model sees every registered task as a callable tool. Ask "check my weekly-report runs from last month" and the agent calls `dicode.get_runs("weekly-report")` via the corresponding task and answers based on the actual data, not a hallucination.
-- **Skills** — drop markdown files into `tasks/skills/` and pass their names via the `skills` param. The agent is told each skill's name and description and reads the ones it needs through the `dicode_read_skill` tool. Use them to give the agent durable context it should know about every time (domain glossary, team conventions, current priorities).
+- **Skills** — drop markdown files into `dicode-buildin/skills/` and pass their names via the `skills` param. The agent is told each skill's name and description and reads the ones it needs through the `dicode_read_skill` tool. Use them to give the agent durable context it should know about every time (domain glossary, team conventions, current priorities).
 - **Session persistence** — each conversation is keyed by `session_id` and stored in the task's KV store. Hybrid id model: pass your own, or omit it to have the task generate and return one.
 - **Lazy compaction** — when the conversation exceeds `max_history_tokens`, older turns are replaced by a running summary generated via a second model call. Controlled by the `compaction_model` param (defaults to the main model).
 - **Provider-agnostic** — works with OpenAI, Anthropic (via openai-compat), Ollama, LM Studio, Groq, OpenRouter, Together, DeepSeek, and any other endpoint that speaks the OpenAI chat completions API. Pick your provider via taskset overrides.
@@ -79,7 +79,7 @@ These are two different concepts that dicode uses with specific meanings:
 | ------- | ---------- | -------------- | --------------------- |
 | **Tool** | A dicode task the agent can execute | `tasks/**/task.yaml` | As an OpenAI tool schema built from the task's params; invoked via `dicode.run_task()` |
 | **Built-in tool** | A dicode SDK operation the agent can perform directly | `permissions.dicode` in the agent's own `task.yaml` | As an OpenAI tool schema, offered only when the matching capability was granted |
-| **Skill** | A markdown file with domain context | `tasks/skills/*.md` | Advertised by name and description in the system prompt; the body is fetched on demand via `dicode_read_skill` |
+| **Skill** | A markdown file with domain context | `dicode-buildin/skills/*.md` | Advertised by name and description in the system prompt; the body is fetched on demand via `dicode_read_skill` |
 
 This mirrors the convention used by Claude Code and the broader agent ecosystem. Think of tools as *capabilities* and skills as *knowledge*.
 
@@ -139,7 +139,7 @@ Some arguments behind these tools are withheld from the model on purpose:
 
 ### Skills (prompt markdown)
 
-Drop a file into `tasks/skills/` and reference it by name without the extension:
+Drop a file into `dicode-buildin/skills/` and reference it by name without the extension:
 
 ```bash
 curl -X POST http://localhost:8080/hooks/ai \
@@ -167,7 +167,7 @@ Missing or unreadable skills still appear in the index, carrying `(not loaded: �
 
 The shared skills directory is configured through the `skills_dir` param, whose default is `${TASK_SET_DIR}/../skills` — expanded at task-load time to a sibling `skills/` directory next to the taskset that loaded the ai-agent. Override per-run to point at a different pool. See [../task-template-vars.md](../task-template-vars.md) for the full list of template variables available in task.yaml.
 
-A starter skill ships at `tasks/skills/dicode-basics.md` covering core dicode concepts an agent should know to be useful.
+A starter skill ships at `dicode-buildin/skills/dicode-basics.md` covering core dicode concepts an agent should know to be useful.
 
 ---
 

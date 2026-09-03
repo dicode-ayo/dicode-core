@@ -281,7 +281,7 @@ Go implementation at `pkg/relay/server.go` was removed in favour of the
 TypeScript service; see [`docs/design/oauth-broker.md`](oauth-broker.md) for
 the rationale.
 
-`tasks/buildin/relay-server` runs this same service in-process under dicode's
+`dicode-buildin/relay-server` runs this same service in-process under dicode's
 own Deno runtime — the quickest way to self-host. Its status endpoint
 password defaults to a documented dev value (`dicode-relay-dev`) when
 `RELAY_STATUS_PASSWORD` isn't set in the local secrets store. The task refuses

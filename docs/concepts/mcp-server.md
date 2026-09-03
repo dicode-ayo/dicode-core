@@ -6,7 +6,7 @@ Dicode exposes its core operations as [MCP (Model Context Protocol)](https://mod
 
 ## Enabling the MCP server
 
-The `/mcp` endpoint forwards to the `buildin/mcp` dicode task (`tasks/buildin/mcp/task.ts`), which speaks JSON-RPC 2.0; the HTTP boundary is served by the WebUI process. It is enabled by default.
+The `/mcp` endpoint forwards to the `buildin/mcp` dicode task (`dicode-buildin/mcp/task.ts`), which speaks JSON-RPC 2.0; the HTTP boundary is served by the WebUI process. It is enabled by default.
 
 ```yaml
 server:
@@ -182,7 +182,7 @@ The `/mcp` endpoint requires a `dck_` API key (Bearer) when `server.auth: true` 
 
 ### Ephemeral per-run tokens are capability-scoped
 
-A task that declares `permissions.env: [{name: DICODE_MCP_API_KEY}]` gets a fresh Bearer key minted at run start and revoked at run end, instead of a static secret — see `tasks/buildin/ai-agent-claude-cli` for an example consumer. That key's MCP tool surface is scoped 1:1 to the task's own declared `permissions.dicode`:
+A task that declares `permissions.env: [{name: DICODE_MCP_API_KEY}]` gets a fresh Bearer key minted at run start and revoked at run end, instead of a static secret — see `dicode-buildin/ai-agent-claude-cli` for an example consumer. That key's MCP tool surface is scoped 1:1 to the task's own declared `permissions.dicode`:
 
 - `list_tasks` / `get_task` require `permissions.dicode.list_tasks: true`.
 - `run_task` requires the target task ID to appear in `permissions.dicode.tasks` (or `["*"]` for any task).
@@ -190,7 +190,7 @@ A task that declares `permissions.env: [{name: DICODE_MCP_API_KEY}]` gets a fres
 - `switch_dev_mode` requires `permissions.dicode.sources_set_dev_mode: true`, and additionally requires the token to carry the run it was minted for — a token without one is refused rather than allowed to supply its own `run_id`.
 - `test_task` requires `permissions.dicode.tasks_test: true`. The REST endpoint `POST /api/tasks/{id}/test` is a separate surface reachable with the same Bearer token; it checks the same flag, so the two carry one gate between them.
 
-A task with no `permissions.dicode` block at all gets a token that can call none of the scoped tools — `buildin/ai-agent-claude-cli` is one such task, which is why the CLI preset is chat-only until an override declares what it needs. An unrecognized tool name is denied by default, so a tool added to `tasks/buildin/mcp/task.ts` without a matching case in `mcpScopeCheck` fails closed rather than inheriting full access.
+A task with no `permissions.dicode` block at all gets a token that can call none of the scoped tools — `buildin/ai-agent-claude-cli` is one such task, which is why the CLI preset is chat-only until an override declares what it needs. An unrecognized tool name is denied by default, so a tool added to `dicode-buildin/mcp/task.ts` without a matching case in `mcpScopeCheck` fails closed rather than inheriting full access.
 
 Enforcement happens in `pkg/webui`'s `/mcp` handler, before the request ever reaches the `buildin/mcp` task — the task holds the dicode permissions every tool it serves needs, so it isn't relied on to self-restrict. A denied call gets a JSON-RPC error back (HTTP 200, `error.code: -32001`) rather than being forwarded. The same handler rewrites `switch_dev_mode`'s `run_id` before forwarding; that is the one argument a scoped caller cannot choose.
 

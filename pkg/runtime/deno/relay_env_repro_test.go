@@ -61,7 +61,7 @@ export default async function main() {
 	}
 
 	// Fix: env_read_exposed + named entries → import succeeds AND DICODE_DATADIR
-	// is forwarded (mirrors tasks/buildin/relay-server-body/task.yaml).
+	// is forwarded (mirrors dicode-buildin's relay-server-body/task.yaml).
 	exposed := &task.Spec{
 		ID: "relay-exposed", Name: "relay-exposed", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 120 * time.Second,

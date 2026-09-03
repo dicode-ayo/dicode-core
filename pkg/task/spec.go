@@ -509,7 +509,7 @@ type WebuiNav struct {
 
 // WebuiConfig lets a task contribute a first-class navigation entry to the
 // main webui header, linking to this task's own webhook-served page (see
-// tasks/buildin/auth-providers for a self-contained SPA task this targets).
+// dicode-buildin's auth-providers for a self-contained SPA task this targets).
 type WebuiConfig struct {
 	Nav *WebuiNav `yaml:"nav,omitempty" json:"nav,omitempty"`
 }

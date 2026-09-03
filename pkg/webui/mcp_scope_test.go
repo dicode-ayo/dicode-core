@@ -306,7 +306,7 @@ func TestMcpScopeCheck(t *testing.T) {
 			// json.Unmarshal into map[string]any fails for a top-level
 			// array, so mcpScopeCheck allows it through unchanged — this
 			// is safe despite looking like a bypass because
-			// tasks/buildin/mcp/task.ts's handle() reads req.method off
+			// dicode-buildin's mcp/task.ts handle() reads req.method off
 			// the array itself (not off its elements): arrays have no
 			// .method property, so `method` is undefined/"" in JS and the
 			// switch always falls to the "-32601 method not found"

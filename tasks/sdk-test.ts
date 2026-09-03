@@ -1,7 +1,7 @@
 import { parse as parseYaml } from "jsr:@std/yaml@1";
 
 /**
- * sdk-test.ts — Deno test harness for `tasks/buildin/*\/task.test.ts`.
+ * sdk-test.ts — Deno test harness for `tasks/*\/*\/task.test.ts`.
  *
  * The production Deno SDK (pkg/runtime/deno/sdk/shim.ts) bridges globals
  * over a Unix socket to the daemon. Task tests need the same surface but

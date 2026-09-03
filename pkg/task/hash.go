@@ -135,8 +135,8 @@ func walkTree(root, labelPrefix string) ([]hashEntry, error) {
 // repo-committed symlinks as real on-disk links (see internal/pathguard's
 // doc comment), so a git-committed symlink *inside* the boundary could
 // physically redirect an in-bounds-looking include somewhere else entirely
-// (e.g. tasks/buildin/evil-link -> /etc, then hash_include:
-// ["../evil-link/passwd"] is lexically inside tasks/buildin/ but physically
+// (e.g. <taskset>/evil-link -> /etc, then hash_include:
+// ["../evil-link/passwd"] is lexically inside the taskset but physically
 // reads /etc/passwd). pathguard.WithinResolved — the same helper
 // pkg/trigger/webhook.go and pkg/webui/task_delete.go already use for this
 // exact git-sourced-symlink class of bug — canonicalizes symlinks on both

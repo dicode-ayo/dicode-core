@@ -701,7 +701,7 @@ const ifMissingPrereqTimeout = 60 * time.Second
 
 // ifMissingErrorFormat is the prefix used by the errors resolveIfMissing
 // returns when a prereq is missing/failed. UI consumers (notably
-// tasks/buildin/ai-agent/chat.js `detectSetup`) regex-match this prefix
+// dicode-buildin's ai-agent chat.js `detectSetup`) regex-match this prefix
 // to render a "Set up <Provider>" card instead of a raw error log.
 //
 // STABLE INTERFACE — do not rephrase without updating every consumer.
