@@ -81,6 +81,14 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
+	// enabled is the resolved enabled flag observed alongside hash. Tracked
+	// separately from hash because Enabled is deliberately excluded from
+	// ContentHash (see resolvedSecurityFields) — a taskset override can flip
+	// a pending task from disabled to enabled without changing its hash, and
+	// that transition must still re-fire the pending hook: the task goes
+	// from a hold nothing depends on to one that genuinely blocks real
+	// triggers (#822).
+	enabled bool
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -189,11 +197,19 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// than strand pre-existing tasks behind a gate with no approve UI.
 		by = ApprovedByBootstrap
 	default:
+		enabled := k.IsEnabled()
+
 		g.mu.Lock()
 		prev, was := g.pending[id]
 		g.mu.Unlock()
 
-		changed := !was || prev.hash != hash
+		// Re-fire on a genuine hash change, and also whenever the resolved
+		// enabled flag flips while the task stays pending: enabled is
+		// deliberately excluded from ContentHash, so a taskset override that
+		// only flips enabled (e.g. false→true) would otherwise leave a task
+		// that now genuinely blocks real triggers with no notification ever
+		// fired for it (#822).
+		changed := !was || prev.hash != hash || prev.enabled != enabled
 
 		// Resolved on every pend, not only when the hash changes: the recorded
 		// commit is the baseline the next comparison runs from, and one that
@@ -206,7 +222,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash and commit are written together in one critical section: a
 		// concurrent Approve/ApproveIfHash can never observe a pending[id]
 		// whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, enabled: enabled}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -276,7 +292,8 @@ func headCommitOf(k task.Kinded) string {
 // Approve approves a pending task: records its observed hash in the lock and
 // arms its triggers. Returns an error when the task is not pending.
 func (g *Gate) Approve(id string) error {
-	return g.approve(id, "", ApprovedByManual)
+	_, err := g.approve(id, "", ApprovedByManual)
+	return err
 }
 
 // ApproveIfHash approves a pending task only when the hash observed at
@@ -288,29 +305,53 @@ func (g *Gate) ApproveIfHash(id, hash string) error {
 	if hash == "" {
 		return fmt.Errorf("approve %q: empty hash", id)
 	}
-	return g.approve(id, hash, ApprovedByToken)
+	_, err := g.approve(id, hash, ApprovedByToken)
+	return err
 }
 
-// approve is the shared approval path. A non-empty wantHash must match the
-// pending entry's observed hash exactly.
-func (g *Gate) approve(id, wantHash, by string) error {
+// ApproveReporting approves a pending task exactly like Approve, and also
+// reports the resolved enabled flag of the instance it approved.
+//
+// The enabled value is captured as part of the SAME approval operation that
+// records the hash and arms the task — read from the pending entry's stored
+// enabled snapshot, never a live re-read — rather than via a later separate
+// lookup (the pre-fix `AdmittedEnabled` path). That separation was a TOCTOU:
+// between an approve call and a subsequent lookup, a concurrent Admit (e.g.
+// the reconciler re-admitting the same task id on its next ~30s poll) could
+// replace the looked-up state with a newer generation, so the caller — `dicode
+// task approve` reporting whether the approval it just performed actually
+// armed any triggers — could report the enabled state of the WRONG task
+// generation. Wired to `SetTaskApprover` instead of plain Approve for exactly
+// this reason; see pkg/ipc/control_task_approve.go.
+func (g *Gate) ApproveReporting(id string) (enabled bool, err error) {
+	return g.approve(id, "", ApprovedByManual)
+}
+
+// approve is the shared approval path behind Approve, ApproveIfHash, and
+// ApproveReporting. A non-empty wantHash must match the pending entry's
+// observed hash exactly. Always returns the enabled flag observed alongside
+// the pending entry it read (ent.enabled, the stored snapshot — see
+// pendingEntry's doc comment), even on a returned error, so ApproveReporting
+// never needs a second, independently-racing read to report it.
+func (g *Gate) approve(id, wantHash, by string) (enabled bool, err error) {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
 	g.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("task %q is not pending approval", id)
+		return false, fmt.Errorf("task %q is not pending approval", id)
 	}
+	enabled = ent.enabled
 	if ent.hash == "" {
-		return fmt.Errorf("task %q has no computable content hash; cannot approve", id)
+		return enabled, fmt.Errorf("task %q has no computable content hash; cannot approve", id)
 	}
 	if wantHash != "" && ent.hash != wantHash {
-		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
+		return enabled, fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
 	}
 	if err := g.lock.Record(id, ent.hash, by, ent.commit); err != nil {
-		return fmt.Errorf("record approval for %q: %w", id, err)
+		return enabled, fmt.Errorf("record approval for %q: %w", id, err)
 	}
 	if err := g.arm(ent.kinded); err != nil {
-		return fmt.Errorf("arm %q: %w", id, err)
+		return enabled, fmt.Errorf("arm %q: %w", id, err)
 	}
 	// Clear only the entry we approved: a concurrent Admit may have re-pended
 	// the task at a newer hash, and that newer version must stay held.
@@ -324,7 +365,7 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		delete(g.pending, id)
 	}
 	g.mu.Unlock()
-	return nil
+	return enabled, nil
 }
 
 // Forget handles task removal: drops the task from the pending set and from
@@ -363,13 +404,43 @@ func (g *Gate) IsPending(id string) bool {
 // PendingHash returns the content hash observed when id was held pending,
 // and whether id is pending at all. Approval tokens are bound to this hash.
 func (g *Gate) PendingHash(id string) (string, bool) {
+	hash, _, ok := g.PendingInfo(id)
+	return hash, ok
+}
+
+// PendingEnabled reports the resolved enabled flag observed when id was held
+// pending, and whether id is pending at all. False means the task is
+// disabled (task.yaml or a taskset/dicode.yaml override) — the trigger
+// engine registers it with zero triggers regardless of approval state
+// (#822), so a pending listing can surface that instead of implying the
+// hold is blocking something that would otherwise run.
+func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
+	_, enabled, ok = g.PendingInfo(id)
+	return enabled, ok
+}
+
+// PendingInfo returns the content hash and resolved enabled flag observed
+// when id was held pending, and whether id is pending at all, all read under
+// one locked call. Callers that need both fields (e.g. `dicode task pending`)
+// must use this rather than PendingHash + PendingEnabled: two separate locked
+// calls can straddle a concurrent Approve/Forget and observe the id pending
+// for one call but not the other, which — since PendingEnabled then reports
+// ok=false and its zero value false — silently mislabels an enabled task as
+// disabled. See PendingHash/PendingEnabled for field semantics.
+func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	ent, ok := g.pending[id]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	return ent.hash, true
+	// ent.enabled — the resolved-enabled snapshot recorded alongside hash in
+	// the same critical section (see pendingEntry's doc comment) — not
+	// ent.kinded.IsEnabled(): a live re-read of ent.kinded could observe a
+	// mutation from a different generation than the one hash describes,
+	// exactly the cross-generation mismatch this method's contract promises
+	// callers it won't return.
+	return ent.hash, ent.enabled, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not

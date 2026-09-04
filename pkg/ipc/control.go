@@ -46,9 +46,15 @@ type ControlServer struct {
 	resumer         Resumer          // nil if engine not wired (tests)
 	log             *zap.Logger
 
-	// taskApprover is the approval gate's Approve, wired via SetTaskApprover.
-	// Nil when the gate is not configured (tests).
-	taskApprover func(taskID string) error
+	// taskApprover is the approval gate's ApproveReporting, wired via
+	// SetTaskApprover. It performs the approval and, in the same call,
+	// returns the resolved enabled flag of the instance it approved —
+	// captured atomically as part of the approval rather than via a separate
+	// later lookup, so a concurrent re-admission of the same task id cannot
+	// make cli.task.approve report the wrong generation's enabled state (the
+	// TOCTOU the old taskEnabled lookup below had). Nil when the gate is not
+	// configured (tests).
+	taskApprover func(taskID string) (enabled bool, err error)
 
 	// pendingApprovals reports the tasks the approval gate is holding (id +
 	// full content hash), wired via SetPendingApprovals. Nil when the gate is

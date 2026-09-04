@@ -909,6 +909,31 @@ the operator never reviewed.
 goes over the control-socket IPC and is the deliberate escape hatch for when the
 dashboard cannot render a review at all.
 
+### Disabled tasks
+
+A task whose *resolved* `enabled` is `false` (`task.yaml`'s own default, or a
+`spec.entries.<source>.overrides.entries.<task>.enabled: false` taskset
+override) is still gated like any other unapproved change: it is held in the
+pending set, and `dicode task pending` / `GET /api/tasks/{id}/pending-state`
+still list it, so re-enabling it later still requires an explicit approval of
+whatever content is pending at that point. `enabled` is deliberately *not*
+folded into the content hash (`ContentHash`), so flipping it alone never
+retroactively approves anything — see `resolvedSecurityFields` in
+`pkg/approval/gate.go`.
+
+What changes is the noise: the trigger engine registers a disabled task with
+zero triggers regardless of approval state ("task registered (disabled — no
+triggers scheduled)", `pkg/trigger/engine.go`), so a hold that will arm
+nothing either way is not something for an operator to act on urgently. The
+gate therefore logs it at `INFO` instead of the `WARN` a real hold gets, and
+`approval.notify_task` — whose entire point is "something you wanted to run
+isn't running" — is skipped for it, though the dashboard's live
+`approval:pending` broadcast still fires so the row updates without a poll.
+`dicode task pending` marks the row and `dicode task approve` reports
+`"approved (task is disabled — nothing armed)"` rather than the normal
+`"triggers armed"` wording, since approving a disabled task arms nothing
+(#822).
+
 ---
 
 ## Database Schema Summary
