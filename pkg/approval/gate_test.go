@@ -578,33 +578,85 @@ func TestPendingEnabledReflectsResolvedFlag(t *testing.T) {
 	}
 }
 
-// TestAdmittedEnabledTracksMostRecentAdmit is a regression for #822: `dicode
-// task approve` needs to know whether the task it just approved is disabled
-// so it can avoid claiming "triggers armed" for one that arms none.
-func TestAdmittedEnabledTracksMostRecentAdmit(t *testing.T) {
-	g, _, _ := newTestGate(t, enabledPolicy())
+// TestApproveReporting_ImmuneToConcurrentReadmit is the regression for
+// CodeRabbit's TOCTOU finding on PR #830: reporting a just-approved task's
+// enabled state via a SEPARATE later lookup (the pre-fix `AdmittedEnabled`,
+// read after `Approve` returned) could race a concurrent Gate.Admit — e.g.
+// the reconciler re-admitting the same task id on its next poll cycle after
+// a content edit — and report the enabled flag of the WRONG generation: the
+// one that superseded the approved instance, not the one approval actually
+// handled.
+//
+// ApproveReporting must instead report the enabled flag captured atomically
+// as part of the approval itself. This test proves that atomicity without a
+// real goroutine race: the fake arm callback — invoked synchronously from
+// inside approve(), after the entry has been read but before approve()
+// returns — re-admits the SAME task id with edited content (a new hash) and
+// a flipped enabled flag, exactly the ordering a real concurrent reconciler
+// poll could produce. ApproveReporting's return value must still reflect the
+// instance it actually approved.
+func TestApproveReporting_ImmuneToConcurrentReadmit(t *testing.T) {
+	lock, err := LoadLock(filepath.Join(t.TempDir(), LockFileName))
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	root := t.TempDir()
+	spec := writeTaskDir(t, root, "repo/deploy", "v1")
+	spec.Enabled = false // the instance actually pending / being approved
 
-	if _, ok := g.AdmittedEnabled("repo/deploy"); ok {
-		t.Fatal("AdmittedEnabled before any Admit must report unknown")
+	var g *Gate
+	reAdmitted := false
+	arm := func(k task.Kinded) error {
+		if reAdmitted {
+			return nil // the recursive arm call from the inner Admit below
+		}
+		reAdmitted = true
+		// Simulate a concurrent reconciler re-admitting the SAME task id —
+		// content edited (new hash) and enabled flipped true — while the
+		// outer approve() call is still in flight (it has read the pending
+		// entry but not yet returned).
+		next := writeTaskDir(t, root, "repo/deploy", "v2 — concurrently edited")
+		next.Enabled = true
+		if _, err := g.Admit(next); err != nil {
+			t.Fatalf("concurrent re-admit during approve: %v", err)
+		}
+		return nil
+	}
+	g = NewGate(enabledPolicy(), lock, arm, nil)
+
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit = (%v, %v), want pending", armed, err)
+	}
+	// Captured before ApproveReporting runs: the concurrent re-admit inside
+	// the arm callback below overwrites this same directory's content
+	// on-disk, so re-deriving ContentHash(spec) AFTER approval would compute
+	// the newer generation's hash, not the one actually approved.
+	origHash, ok := g.PendingHash("repo/deploy")
+	if !ok {
+		t.Fatal("expected repo/deploy to be pending before approval")
 	}
 
-	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
-	spec.Enabled = false
-	if _, err := g.Admit(spec); err != nil {
-		t.Fatalf("Admit: %v", err)
+	enabled, err := g.ApproveReporting("repo/deploy")
+	if err != nil {
+		t.Fatalf("ApproveReporting: %v", err)
 	}
-	if enabled, ok := g.AdmittedEnabled("repo/deploy"); !ok || enabled {
-		t.Fatalf("AdmittedEnabled = (%v, %v), want (false, true)", enabled, ok)
+	if enabled {
+		t.Fatal("ApproveReporting must report the approved instance's enabled=false, not the concurrently re-admitted true")
 	}
 
-	// Re-admitted enabled (e.g. the operator flips the override back on) —
-	// AdmittedEnabled must track the latest resolution, not the first one.
-	spec.Enabled = true
-	if _, err := g.Admit(spec); err != nil {
-		t.Fatalf("Admit: %v", err)
+	// The concurrently re-admitted (edited, enabled=true) generation was
+	// never reviewed by the approval that just ran — it must stay held.
+	if !g.IsPending("repo/deploy") {
+		t.Fatal("the concurrently re-admitted newer generation must remain pending")
 	}
-	if enabled, ok := g.AdmittedEnabled("repo/deploy"); !ok || !enabled {
-		t.Fatalf("AdmittedEnabled = (%v, %v), want (true, true) after re-enabling", enabled, ok)
+	if pendingEnabled, ok := g.PendingEnabled("repo/deploy"); !ok || !pendingEnabled {
+		t.Fatalf("PendingEnabled = (%v, %v), want (true, true) for the newer generation", pendingEnabled, ok)
+	}
+
+	// The original (approved) hash — observed at pend time, before the
+	// concurrent edit — is what actually landed in the lock.
+	if !lock.Approved("repo/deploy", origHash) {
+		t.Fatal("the approved instance's hash must be recorded in the lock")
 	}
 }
 

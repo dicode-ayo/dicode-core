@@ -13,27 +13,40 @@ type TaskApproveResult struct {
 	// Enabled is the approved task's resolved enabled flag, so the CLI can
 	// report accurately whether approval actually armed any triggers: a
 	// disabled task (task.yaml or a taskset override) arms none regardless
-	// of approval state (#822). Defaults to true when no lookup is wired
-	// (SetTaskEnabled not called, or a lookup miss), matching the
-	// historical unconditional "triggers armed" wording.
-	Enabled bool `json:"enabled"`
+	// of approval state (#822).
+	//
+	// A pointer, not a plain bool: this repo supports a version-mixed
+	// CLI/daemon pair during an upgrade (see waitDaemonReady), and a daemon
+	// built before this field existed omits "enabled" from the JSON
+	// entirely. Decoding that into a plain bool would silently read Go's
+	// zero value false — reporting every approval from an old daemon as
+	// "nothing armed", which is wrong; the old daemon armed triggers
+	// normally, it just didn't report this field. A *bool decodes an absent
+	// key as nil, which the CLI (cmd/dicode/main.go) treats as "unknown,
+	// assume enabled" — the historical pre-this-field behavior — while an
+	// explicit false still displays as disabled.
+	//
+	// The daemon SERVER (handleTaskApprove below) always sets this to a
+	// non-nil value on success; nil is only ever produced by decoding an
+	// older daemon's response.
+	Enabled *bool `json:"enabled"`
 }
 
-// SetTaskApprover wires the approval gate's Approve for cli.task.approve
-// dispatch. The control socket is a trusted local channel (0600 socket +
-// peer-UID / pre-shared-token handshake), so no further auth is layered on.
-// Nil leaves the method returning a clear error (tests without the gate).
-func (cs *ControlServer) SetTaskApprover(a func(taskID string) error) { cs.taskApprover = a }
-
-// SetTaskEnabled wires a lookup for a just-approved task's resolved enabled
-// flag — see the taskEnabled field doc.
-func (cs *ControlServer) SetTaskEnabled(f func(taskID string) (enabled, ok bool)) {
-	cs.taskEnabled = f
+// SetTaskApprover wires the approval gate's ApproveReporting for
+// cli.task.approve dispatch. The control socket is a trusted local channel
+// (0600 socket + peer-UID / pre-shared-token handshake), so no further auth
+// is layered on. Nil leaves the method returning a clear error (tests
+// without the gate).
+func (cs *ControlServer) SetTaskApprover(a func(taskID string) (enabled bool, err error)) {
+	cs.taskApprover = a
 }
 
 // handleTaskApprove approves a task held pending by the approval gate. The
 // gate records the observed content hash in dicode.lock and arms the task's
-// triggers; a non-pending task id is an error.
+// triggers; a non-pending task id is an error. The approver's returned
+// enabled flag — captured atomically as part of the same approval operation,
+// not a later separate lookup — is what Enabled reports; see taskApprover's
+// field doc for why that atomicity matters.
 func (cs *ControlServer) handleTaskApprove(req Request) (TaskApproveResult, error) {
 	if req.TaskID == "" {
 		return TaskApproveResult{}, errors.New("taskID required")
@@ -41,15 +54,10 @@ func (cs *ControlServer) handleTaskApprove(req Request) (TaskApproveResult, erro
 	if cs.taskApprover == nil {
 		return TaskApproveResult{}, errors.New("approval gate not configured")
 	}
-	if err := cs.taskApprover(req.TaskID); err != nil {
+	enabled, err := cs.taskApprover(req.TaskID)
+	if err != nil {
 		return TaskApproveResult{TaskID: req.TaskID}, err
 	}
 	cs.log.Info("task approved via control socket", zap.String("task", req.TaskID))
-	enabled := true
-	if cs.taskEnabled != nil {
-		if e, ok := cs.taskEnabled(req.TaskID); ok {
-			enabled = e
-		}
-	}
-	return TaskApproveResult{TaskID: req.TaskID, Approved: true, Enabled: enabled}, nil
+	return TaskApproveResult{TaskID: req.TaskID, Approved: true, Enabled: &enabled}, nil
 }

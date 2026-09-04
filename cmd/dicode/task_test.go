@@ -127,6 +127,57 @@ func dialTestClientWithEngine(t *testing.T, auth ipc.AuthoringService, eng ipc.E
 	return c, func() { c.Close(); cancel() }
 }
 
+// dialTestClientForApproval boots a minimal ControlServer wired only for
+// cli.task.approve / cli.task.pending (approver and pending are optional;
+// nil leaves that side unwired) and returns a connected ControlClient, for
+// exercising cmdTaskApprove / cmdTaskPending over the real wire protocol.
+func dialTestClientForApproval(t *testing.T, approver func(string) (bool, error), pending func() []ipc.PendingTask) (*ipc.ControlClient, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+
+	cs, err := ipc.NewControlServer(socketPath, tokenPath, reg, noopEngine{}, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "", "")
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+	if approver != nil {
+		cs.SetTaskApprover(approver)
+	}
+	if pending != nil {
+		cs.SetPendingApprovals(pending)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("control socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c, err := ipc.Dial(socketPath, tokenPath)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial: %v", err)
+	}
+	return c, func() { c.Close(); cancel() }
+}
+
 // noopEngine satisfies ipc.EngineRunner for tests that don't fire tasks.
 type noopEngine struct{}
 
@@ -573,6 +624,132 @@ func TestApproveMessage_ReflectsEnabled(t *testing.T) {
 	}
 	if !strings.Contains(disabled, `"repo/deploy"`) {
 		t.Errorf("disabled message = %q, want the task id quoted", disabled)
+	}
+}
+
+// TestResolveEnabled_NilTreatedAsEnabled is the regression for PR #830
+// CodeRabbit finding 3: PendingTask.Enabled / TaskApproveResult.Enabled are
+// *bool so a daemon predating the field (a real scenario — this repo
+// supports a version-mixed CLI/daemon pair mid-upgrade) decodes as nil
+// rather than the ambiguous zero value false. resolveEnabled must treat nil
+// as "unknown, assume enabled" (the historical wording) and only an
+// explicit false as disabled.
+func TestResolveEnabled_NilTreatedAsEnabled(t *testing.T) {
+	if !resolveEnabled(nil) {
+		t.Error("resolveEnabled(nil) = false, want true (unknown treated as enabled)")
+	}
+	trueVal, falseVal := true, false
+	if !resolveEnabled(&trueVal) {
+		t.Error("resolveEnabled(&true) = false, want true")
+	}
+	if resolveEnabled(&falseVal) {
+		t.Error("resolveEnabled(&false) = true, want false")
+	}
+}
+
+// TestTaskApproveResult_WireCompat_EnabledAbsentDecodesNil and its pending
+// sibling below are the wire-level regression for finding 3: a JSON response
+// with "enabled" absent entirely (what an older daemon predating the field
+// actually sends — a Go struct literal can't represent "field omitted", so
+// this goes through remarshal from a hand-built map, exactly like the real
+// decode path in cmdTaskApprove/cmdTaskPending) must decode Enabled as nil,
+// not false — and an explicit "enabled": false must decode as a non-nil
+// pointer to false. Both are then run through resolveEnabled to confirm the
+// CLI-visible outcome: absent → enabled/armed, explicit false → disabled.
+func TestTaskApproveResult_WireCompat_EnabledAbsentDecodesNil(t *testing.T) {
+	// No "enabled" key at all — the exact shape an old daemon's response
+	// takes.
+	raw := map[string]any{"taskID": "repo/deploy", "approved": true}
+	var r ipc.TaskApproveResult
+	if err := remarshal(raw, &r); err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if r.Enabled != nil {
+		t.Fatalf("Enabled = %v, want nil for an absent wire field", *r.Enabled)
+	}
+	if !resolveEnabled(r.Enabled) {
+		t.Error("resolveEnabled must treat an absent Enabled as enabled, not disabled")
+	}
+}
+
+func TestTaskApproveResult_WireCompat_EnabledFalseDecodesExplicit(t *testing.T) {
+	raw := map[string]any{"taskID": "repo/deploy", "approved": true, "enabled": false}
+	var r ipc.TaskApproveResult
+	if err := remarshal(raw, &r); err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if r.Enabled == nil || *r.Enabled {
+		t.Fatalf("Enabled = %v, want non-nil false for an explicit wire field", r.Enabled)
+	}
+	if resolveEnabled(r.Enabled) {
+		t.Error("resolveEnabled must treat an explicit false as disabled")
+	}
+}
+
+func TestPendingTask_WireCompat_EnabledAbsentDecodesNil(t *testing.T) {
+	raw := []map[string]any{{"taskID": "repo/deploy", "hash": "abc"}}
+	var tasks []ipc.PendingTask
+	if err := remarshal(raw, &tasks); err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Enabled != nil {
+		t.Fatalf("tasks = %+v, want one row with Enabled=nil", tasks)
+	}
+	if !resolveEnabled(tasks[0].Enabled) {
+		t.Error("resolveEnabled must treat an absent Enabled as enabled, not disabled")
+	}
+}
+
+func TestPendingTask_WireCompat_EnabledFalseDecodesExplicit(t *testing.T) {
+	raw := []map[string]any{{"taskID": "repo/off", "hash": "def", "enabled": false}}
+	var tasks []ipc.PendingTask
+	if err := remarshal(raw, &tasks); err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Enabled == nil || *tasks[0].Enabled {
+		t.Fatalf("tasks = %+v, want one row with Enabled=&false", tasks)
+	}
+	if resolveEnabled(tasks[0].Enabled) {
+		t.Error("resolveEnabled must treat an explicit false as disabled")
+	}
+}
+
+// TestCmdTaskApprove_EndToEnd_DisabledShowsNoTriggersArmed exercises the
+// production path end to end over a real control socket: taskApprover
+// (approvalGate.ApproveReporting in the daemon) reports Enabled=false in the
+// SAME call that performs the approval, and cmdTaskApprove's stdout must say
+// so rather than claiming "triggers armed".
+func TestCmdTaskApprove_EndToEnd_DisabledShowsNoTriggersArmed(t *testing.T) {
+	c, done := dialTestClientForApproval(t, func(id string) (bool, error) {
+		return false, nil
+	}, nil)
+	defer done()
+
+	out, _, err := captureOutput(t, func() error { return cmdTaskApprove(c, []string{"repo/deploy"}) })
+	if err != nil {
+		t.Fatalf("cmdTaskApprove: %v", err)
+	}
+	if !strings.Contains(out, "disabled") || !strings.Contains(out, "nothing armed") {
+		t.Errorf("stdout = %q, want it to say disabled / nothing armed", out)
+	}
+}
+
+// TestCmdTaskPending_EndToEnd_DisabledRowAnnotated is the pending-listing
+// counterpart: a held task the gate reports Enabled=false for must render
+// with the "no triggers would arm" status column.
+func TestCmdTaskPending_EndToEnd_DisabledRowAnnotated(t *testing.T) {
+	falseVal := false
+	c, done := dialTestClientForApproval(t, nil, func() []ipc.PendingTask {
+		return []ipc.PendingTask{{TaskID: "repo/off", Hash: "abc123", Enabled: &falseVal}}
+	})
+	defer done()
+
+	out, _, err := captureOutput(t, func() error { return cmdTaskPending(c) })
+	if err != nil {
+		t.Fatalf("cmdTaskPending: %v", err)
+	}
+	if !strings.Contains(out, "repo/off") || !strings.Contains(out, "no triggers would arm") {
+		t.Errorf("stdout = %q, want the disabled row annotated", out)
 	}
 }
 

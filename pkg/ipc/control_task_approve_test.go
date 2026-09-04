@@ -8,40 +8,40 @@ import (
 	"go.uber.org/zap"
 )
 
-func newApproveTestServer(approver func(string) error) *ControlServer {
+func newApproveTestServer(approver func(string) (bool, error)) *ControlServer {
 	return &ControlServer{
 		taskApprover: approver,
 		log:          zap.NewNop(),
 	}
 }
 
-// TestTaskApprove_EnabledDefaultsTrueWithNoLookup guards the historical
-// wording ("triggers armed") for callers that never wire SetTaskEnabled —
-// today only tests, since the daemon always wires it, but the default must
-// stay accurate should that ever change.
-func TestTaskApprove_EnabledDefaultsTrueWithNoLookup(t *testing.T) {
-	cs := newApproveTestServer(func(string) error { return nil })
+// TestTaskApprove_ReportsEnabledFromApprover is the regression for #822 and
+// its TOCTOU follow-up (PR #830 CodeRabbit finding 1): the approver
+// (approvalGate.ApproveReporting in production) returns the enabled flag in
+// the SAME call that performs the approval, and handleTaskApprove must relay
+// that value directly rather than looking it up separately afterward.
+func TestTaskApprove_ReportsEnabledFromApprover(t *testing.T) {
+	cs := newApproveTestServer(func(string) (bool, error) { return true, nil })
 
 	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve", TaskID: "repo/deploy"})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	out := res.(TaskApproveResult)
-	if !out.Enabled {
-		t.Fatalf("result = %+v, want Enabled=true with no taskEnabled lookup wired", out)
+	if out.Enabled == nil || !*out.Enabled {
+		t.Fatalf("result = %+v, want Enabled=&true", out)
 	}
 }
 
-// TestTaskApprove_ReportsDisabledFromLookup is the regression for #822:
+// TestTaskApprove_ReportsDisabledFromApprover is the regression for #822:
 // cli.task.approve must report Enabled=false for a disabled task so the CLI
 // can avoid claiming "triggers armed".
-func TestTaskApprove_ReportsDisabledFromLookup(t *testing.T) {
-	cs := newApproveTestServer(func(string) error { return nil })
-	cs.SetTaskEnabled(func(id string) (bool, bool) {
+func TestTaskApprove_ReportsDisabledFromApprover(t *testing.T) {
+	cs := newApproveTestServer(func(id string) (bool, error) {
 		if id != "repo/deploy" {
-			t.Fatalf("taskEnabled called with unexpected id %q", id)
+			t.Fatalf("approver called with unexpected id %q", id)
 		}
-		return false, true
+		return false, nil
 	})
 
 	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve", TaskID: "repo/deploy"})
@@ -49,33 +49,16 @@ func TestTaskApprove_ReportsDisabledFromLookup(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	out := res.(TaskApproveResult)
-	if out.Enabled {
-		t.Fatalf("result = %+v, want Enabled=false", out)
-	}
-}
-
-// TestTaskApprove_LookupMissDefaultsEnabledTrue covers a taskEnabled lookup
-// that reports "unknown" (ok=false) — must not be mistaken for a confirmed
-// disabled task.
-func TestTaskApprove_LookupMissDefaultsEnabledTrue(t *testing.T) {
-	cs := newApproveTestServer(func(string) error { return nil })
-	cs.SetTaskEnabled(func(string) (bool, bool) { return false, false })
-
-	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve", TaskID: "repo/deploy"})
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	out := res.(TaskApproveResult)
-	if !out.Enabled {
-		t.Fatalf("result = %+v, want Enabled=true on a lookup miss", out)
+	if out.Enabled == nil || *out.Enabled {
+		t.Fatalf("result = %+v, want Enabled=&false", out)
 	}
 }
 
 func TestTaskApprove_Success(t *testing.T) {
 	var approved string
-	cs := newApproveTestServer(func(id string) error {
+	cs := newApproveTestServer(func(id string) (bool, error) {
 		approved = id
-		return nil
+		return true, nil
 	})
 
 	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve", TaskID: "repo/deploy"})
@@ -96,7 +79,7 @@ func TestTaskApprove_Success(t *testing.T) {
 
 func TestTaskApprove_NotPendingErrorPropagates(t *testing.T) {
 	gateErr := errors.New(`task "repo/deploy" is not pending approval`)
-	cs := newApproveTestServer(func(string) error { return gateErr })
+	cs := newApproveTestServer(func(string) (bool, error) { return false, gateErr })
 
 	_, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve", TaskID: "repo/deploy"})
 	if !errors.Is(err, gateErr) {
@@ -106,7 +89,7 @@ func TestTaskApprove_NotPendingErrorPropagates(t *testing.T) {
 
 func TestTaskApprove_RequiresTaskID(t *testing.T) {
 	called := false
-	cs := newApproveTestServer(func(string) error { called = true; return nil })
+	cs := newApproveTestServer(func(string) (bool, error) { called = true; return true, nil })
 
 	if _, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.approve"}); err == nil {
 		t.Fatal("expected error without taskID")

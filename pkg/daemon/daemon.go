@@ -915,10 +915,16 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 	ctrlSrv.SetReadySignal(rec.Ready())
 
 	// `dicode task approve` — the control socket is a trusted local channel.
-	ctrlSrv.SetTaskApprover(approvalGate.Approve)
-	// Lets cli.task.approve report accurately whether the approval actually
-	// armed any triggers — a disabled task arms none regardless (#822).
-	ctrlSrv.SetTaskEnabled(approvalGate.AdmittedEnabled)
+	// ApproveReporting (not plain Approve + a separate enabled lookup)
+	// captures the resolved enabled flag atomically as part of the same
+	// approval operation, so cli.task.approve can report accurately whether
+	// the approval actually armed any triggers — a disabled task arms none
+	// regardless (#822) — without the TOCTOU a later, separate lookup (the
+	// old SetTaskEnabled/AdmittedEnabled wiring) was exposed to: a concurrent
+	// re-admit of the same task id between the two calls could report the
+	// enabled state of the wrong generation. See ApproveReporting's doc
+	// comment (pkg/approval/gate.go).
+	ctrlSrv.SetTaskApprover(approvalGate.ApproveReporting)
 
 	// `dicode task pending` + `dicode list` annotation — surface the tasks the
 	// gate is holding so a headless operator can discover an id to approve.
@@ -937,7 +943,11 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			if !ok {
 				enabled = true
 			}
-			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash, Enabled: enabled})
+			// This daemon always knows the enabled flag by the time it builds
+			// this response, so ipc.PendingTask.Enabled — a *bool so an older
+			// daemon's response can decode as nil over the wire — is always
+			// set to an explicit, non-nil value here.
+			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash, Enabled: &enabled})
 		}
 		return out
 	})

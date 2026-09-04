@@ -292,7 +292,8 @@ func headCommitOf(k task.Kinded) string {
 // Approve approves a pending task: records its observed hash in the lock and
 // arms its triggers. Returns an error when the task is not pending.
 func (g *Gate) Approve(id string) error {
-	return g.approve(id, "", ApprovedByManual)
+	_, err := g.approve(id, "", ApprovedByManual)
+	return err
 }
 
 // ApproveIfHash approves a pending task only when the hash observed at
@@ -304,29 +305,53 @@ func (g *Gate) ApproveIfHash(id, hash string) error {
 	if hash == "" {
 		return fmt.Errorf("approve %q: empty hash", id)
 	}
-	return g.approve(id, hash, ApprovedByToken)
+	_, err := g.approve(id, hash, ApprovedByToken)
+	return err
 }
 
-// approve is the shared approval path. A non-empty wantHash must match the
-// pending entry's observed hash exactly.
-func (g *Gate) approve(id, wantHash, by string) error {
+// ApproveReporting approves a pending task exactly like Approve, and also
+// reports the resolved enabled flag of the instance it approved.
+//
+// The enabled value is captured as part of the SAME approval operation that
+// records the hash and arms the task — read from the pending entry's stored
+// enabled snapshot, never a live re-read — rather than via a later separate
+// lookup (the pre-fix `AdmittedEnabled` path). That separation was a TOCTOU:
+// between an approve call and a subsequent lookup, a concurrent Admit (e.g.
+// the reconciler re-admitting the same task id on its next ~30s poll) could
+// replace the looked-up state with a newer generation, so the caller — `dicode
+// task approve` reporting whether the approval it just performed actually
+// armed any triggers — could report the enabled state of the WRONG task
+// generation. Wired to `SetTaskApprover` instead of plain Approve for exactly
+// this reason; see pkg/ipc/control_task_approve.go.
+func (g *Gate) ApproveReporting(id string) (enabled bool, err error) {
+	return g.approve(id, "", ApprovedByManual)
+}
+
+// approve is the shared approval path behind Approve, ApproveIfHash, and
+// ApproveReporting. A non-empty wantHash must match the pending entry's
+// observed hash exactly. Always returns the enabled flag observed alongside
+// the pending entry it read (ent.enabled, the stored snapshot — see
+// pendingEntry's doc comment), even on a returned error, so ApproveReporting
+// never needs a second, independently-racing read to report it.
+func (g *Gate) approve(id, wantHash, by string) (enabled bool, err error) {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
 	g.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("task %q is not pending approval", id)
+		return false, fmt.Errorf("task %q is not pending approval", id)
 	}
+	enabled = ent.enabled
 	if ent.hash == "" {
-		return fmt.Errorf("task %q has no computable content hash; cannot approve", id)
+		return enabled, fmt.Errorf("task %q has no computable content hash; cannot approve", id)
 	}
 	if wantHash != "" && ent.hash != wantHash {
-		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
+		return enabled, fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
 	}
 	if err := g.lock.Record(id, ent.hash, by, ent.commit); err != nil {
-		return fmt.Errorf("record approval for %q: %w", id, err)
+		return enabled, fmt.Errorf("record approval for %q: %w", id, err)
 	}
 	if err := g.arm(ent.kinded); err != nil {
-		return fmt.Errorf("arm %q: %w", id, err)
+		return enabled, fmt.Errorf("arm %q: %w", id, err)
 	}
 	// Clear only the entry we approved: a concurrent Admit may have re-pended
 	// the task at a newer hash, and that newer version must stay held.
@@ -340,7 +365,7 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		delete(g.pending, id)
 	}
 	g.mu.Unlock()
-	return nil
+	return enabled, nil
 }
 
 // Forget handles task removal: drops the task from the pending set and from
@@ -409,22 +434,13 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	if !ok {
 		return "", false, false
 	}
-	return ent.hash, ent.kinded.IsEnabled(), true
-}
-
-// AdmittedEnabled reports the resolved enabled flag of the most recently
-// admitted task with the given id, and whether the gate has admitted one at
-// all. Used by `dicode task approve` to report accurately whether an
-// approval actually armed any triggers: a disabled task arms none
-// regardless of approval (#822).
-func (g *Gate) AdmittedEnabled(id string) (enabled, ok bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	k, ok := g.admitted[id]
-	if !ok {
-		return false, false
-	}
-	return k.IsEnabled(), true
+	// ent.enabled — the resolved-enabled snapshot recorded alongside hash in
+	// the same critical section (see pendingEntry's doc comment) — not
+	// ent.kinded.IsEnabled(): a live re-read of ent.kinded could observe a
+	// mutation from a different generation than the one hash describes,
+	// exactly the cross-generation mismatch this method's contract promises
+	// callers it won't return.
+	return ent.hash, ent.enabled, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not

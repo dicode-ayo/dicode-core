@@ -12,7 +12,14 @@ type PendingTask struct {
 	// regardless of approval state (#822), so an operator reading this
 	// listing can tell "held, and nothing would arm anyway" apart from a
 	// real hold blocking something that would otherwise run.
-	Enabled bool `json:"enabled"`
+	//
+	// A pointer for the same version-skew reason as TaskApproveResult.Enabled
+	// (see its doc comment in control_task_approve.go): a daemon predating
+	// this field omits "enabled" from the JSON, and decoding that into a
+	// plain bool would silently read false — mislabeling every pending task
+	// from an old daemon as disabled. The daemon SERVER always sets this to a
+	// non-nil value; nil only ever comes from an older daemon's response.
+	Enabled *bool `json:"enabled"`
 }
 
 // SetPendingApprovals wires the approval gate's pending set for cli.task.pending

@@ -632,7 +632,7 @@ func cmdTaskPending(c *ipc.ControlClient) error {
 	fmt.Printf("%-40s %-16s %s\n", "TASK ID", "HASH", "STATUS")
 	for _, t := range tasks {
 		status := ""
-		if !t.Enabled {
+		if !resolveEnabled(t.Enabled) {
 			// Nothing would arm even once approved (#822) — surface that so
 			// a headless operator doesn't read this row as blocking
 			// something that would otherwise run.
@@ -663,8 +663,24 @@ func cmdTaskApprove(c *ipc.ControlClient, args []string) error {
 	if err := remarshal(resp.Result, &r); err != nil {
 		return err
 	}
-	fmt.Print(approveMessage(r.TaskID, r.Enabled))
+	fmt.Print(approveMessage(r.TaskID, resolveEnabled(r.Enabled)))
 	return nil
+}
+
+// resolveEnabled interprets the wire Enabled pointer shared by
+// ipc.PendingTask and ipc.TaskApproveResult for display. Both fields are
+// *bool rather than bool specifically so a daemon predating the field (a
+// real scenario during an upgrade — this repo supports mixed CLI/daemon
+// versions, see waitDaemonReady) decodes as nil rather than the ambiguous
+// zero value false: nil is treated here as "unknown, assume enabled" — the
+// historical pre-field "triggers armed" wording — while an explicit false
+// still reports as disabled. See PendingTask.Enabled / TaskApproveResult.Enabled
+// (pkg/ipc) for the server-side half of this contract.
+func resolveEnabled(e *bool) bool {
+	if e == nil {
+		return true
+	}
+	return *e
 }
 
 // approveMessage renders cmdTaskApprove's confirmation. A disabled task
