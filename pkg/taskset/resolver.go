@@ -15,6 +15,7 @@ import (
 	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/go-git/go-git/v5/plumbing"
 	"go.uber.org/zap"
 )
 
@@ -602,6 +603,14 @@ func (r *Resolver) applyTokenEnvAllowlist(url, tokenEnv string) string {
 	return tokenEnv
 }
 
+// refName is the fully-qualified git reference a target names.
+func (t gitTarget) refName() plumbing.ReferenceName {
+	if t.Kind == refTag {
+		return plumbing.NewTagReferenceName(t.Name)
+	}
+	return plumbing.NewBranchReferenceName(t.Name)
+}
+
 // containedPath reports whether target stays within root, rejecting both
 // lexical escapes (`..`, absolute overrides) and symlink escapes. The lexical
 // check alone is insufficient because go-git materializes repo-committed
@@ -690,8 +699,8 @@ func repoCloneDir(dataDir, url string, tgt gitTarget, allowAuth bool) string {
 
 // cloneDirDomain is the domain-separation prefix for one (kind, trust tier)
 // bucket of the clone-directory hash space. The trusted-branch bucket has no
-// prefix of its own — it keeps the seed dicode used before tags existed, so
-// operator sources need no on-disk migration.
+// prefix of its own: its seed must stay byte-for-byte what operator sources
+// already hash to, or every one of them re-clones into a new directory.
 //
 // A new refKind must add its own pair here.
 // TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory fails if it doesn't.
@@ -709,9 +718,9 @@ func cloneDirDomain(kind refKind, allowAuth bool) string {
 
 // Pull clones or fetches the latest commits for the given git ref and returns
 // the local directory. It also updates the clone cache so subsequent Resolve
-// calls can find the directory without re-cloning. A pinned (tag) ref cannot
-// advance, so for one of those this only ensures the clone sits on the pinned
-// commit.
+// calls can find the directory without re-cloning. A pinned (tag) ref is
+// fetched on the same cadence as a branch one — a re-cut release reaches the
+// clone.
 // For local refs it is a no-op and returns filepath.Dir(ref.Path).
 //
 // Pull is only ever called by callers holding an operator-configured ref

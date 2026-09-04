@@ -208,11 +208,12 @@ func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
 // regardless; classifying these as Permanent just avoids burning the
 // 30-second retry budget every poll interval.
 //
-// Conservatively scoped: only the unambiguous "your credentials/URL are
-// wrong" sentinels from go-git's transport layer, plus gitops.ValidateRemoteHost's
-// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost) — a
-// deterministic, zero-I/O check whose outcome cannot change within a single
-// poll interval, so retrying it burns the full retry budget for no benefit
+// Conservatively scoped: only the unambiguous "your credentials/URL/branch are
+// wrong" sentinels — go-git's transport layer, gitops.ValidateRemoteHost's
+// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost), and a
+// branch the remote does not publish (gitops.ErrRefNotFound). None of these
+// can change within a single poll interval, so retrying burns the full retry
+// budget for no benefit
 // (see #510: without this case a single SSRF-blocked source stalled the
 // reconciler's initial sync by ~30s, since GitSource.Start calls cloneOrPull
 // synchronously and sources start up sequentially). Everything else (network
@@ -225,7 +226,8 @@ func isPermanentGitError(err error) bool {
 		errors.Is(err, gogittransport.ErrInvalidAuthMethod),
 		errors.Is(err, gogittransport.ErrRepositoryNotFound),
 		errors.Is(err, gitops.ErrBlockedHost),
-		errors.Is(err, gitops.ErrNoRemoteHost):
+		errors.Is(err, gitops.ErrNoRemoteHost),
+		errors.Is(err, gitops.ErrRefNotFound):
 		return true
 	}
 	return false

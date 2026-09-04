@@ -155,9 +155,9 @@ func readFile(t *testing.T, dir, name string) string {
 func branchRef(name string) plumbing.ReferenceName { return plumbing.NewBranchReferenceName(name) }
 func tagRef(name string) plumbing.ReferenceName    { return plumbing.NewTagReferenceName(name) }
 
-// TestCloneAtRef_ChecksOutTheNamedRef is the core guarantee: the worktree
-// holds the named ref's content, and a tag is not confused with the branch it
-// was cut from.
+// TestCloneAtRef_PinsToTagCommit is the core guarantee of a pinned source: the
+// worktree holds the tagged commit's content, not whatever the branch it was
+// cut from has advanced to since.
 func TestCloneAtRef_PinsToTagCommit(t *testing.T) {
 	for _, annotated := range []bool{false, true} {
 		name := "lightweight"
@@ -181,11 +181,10 @@ func TestCloneAtRef_PinsToTagCommit(t *testing.T) {
 	}
 }
 
-// TestCloneAtRef_FollowsAMovedRef covers the deliberate decision that a
-// re-pointed ref is followed rather than pinned to what the clone first saw.
-// Not following would have been enforced only by the clone cache surviving,
-// so two daemons on one config could silently run different commits; the
-// approval gate re-pends the changed content instead.
+// TestCloneAtRef_FollowsAMovedRef pins the contract that a re-pointed ref
+// reaches the clone: a re-cut tag, an advanced branch, and a rewound one.
+// Content the operator has not approved is stopped at the approval gate, not
+// here.
 func TestCloneAtRef_FollowsAMovedRef(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -241,10 +240,45 @@ func TestCloneAtRef_FollowsAMovedRef(t *testing.T) {
 	}
 }
 
-// TestCloneAtRef_UnmovedRefLeavesTheWorktreeAlone is load-bearing rather than
-// an optimization: pkg/taskset's watch loop only re-resolves when fsnotify
-// reports a change, so a refresh that rewrote every file on each poll tick
-// would drive a re-resolve every tick for every source.
+// TestCloneAtRef_RecoversFromAnInterruptedRefresh reproduces the state a crash
+// between the fetch and the reset leaves behind, by fetching without resetting.
+// The next refresh has to finish the checkout: an implementation that compared
+// the fetched commit against a ref the fetch itself advanced would see them
+// agree and leave the worktree stale until the branch happened to move again.
+func TestCloneAtRef_RecoversFromAnInterruptedRefresh(t *testing.T) {
+	f := newTagFixture(t)
+	f.commit(t, "version", "one")
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	if err := CloneAtRef(context.Background(), clone, f.url, branchRef("main"), nil); err != nil {
+		t.Fatalf("initial CloneAtRef: %v", err)
+	}
+	f.commit(t, "version", "two")
+
+	// The fetch half of a refresh, with the reset never reached.
+	repo, err := gogit.PlainOpen(clone)
+	if err != nil {
+		t.Fatalf("open clone: %v", err)
+	}
+	if err := fetchRef(context.Background(), repo, branchRef("main"), nil); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got := readFile(t, clone, "version"); got != "one" {
+		t.Fatalf("worktree content = %q after a fetch alone, want the stale %q", got, "one")
+	}
+
+	if err := CloneAtRef(context.Background(), clone, f.url, branchRef("main"), nil); err != nil {
+		t.Fatalf("refresh after interruption: %v", err)
+	}
+	if got := readFile(t, clone, "version"); got != "two" {
+		t.Errorf("worktree content = %q, want %q — the interrupted refresh was never completed", got, "two")
+	}
+}
+
+// TestCloneAtRef_UnmovedRefLeavesTheWorktreeAlone guards the invariant the
+// watch loop rests on: pkg/taskset re-resolves when fsnotify reports a change,
+// so a refresh that rewrote every file on each poll tick would drive a
+// re-resolve every tick for every source.
 func TestCloneAtRef_UnmovedRefLeavesTheWorktreeAlone(t *testing.T) {
 	f := newTagFixture(t)
 	f.commit(t, "version", "one")
@@ -273,8 +307,8 @@ func TestCloneAtRef_UnmovedRefLeavesTheWorktreeAlone(t *testing.T) {
 }
 
 // TestCloneAtRef_UnknownTagKeepsTheClone is the churn guard from #825: an
-// unknown tag must not read as a reclonable "reference not found" and send
-// the existing clone through wipe-and-re-clone against the remote.
+// unknown tag must not read as a reclonable "reference not found" and send the
+// existing clone through wipe-and-re-clone against the remote on every poll.
 func TestCloneAtRef_UnknownTagKeepsTheClone(t *testing.T) {
 	f := newTagFixture(t)
 	f.commit(t, "version", "pinned")

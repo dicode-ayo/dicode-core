@@ -381,11 +381,10 @@ func TestSource_PinnedTagIgnoresBranchAdvance(t *testing.T) {
 	}
 }
 
-// TestSource_PinnedTagFollowsARecutTag is the other half of the pin's
-// contract, and the deliberate limit on it: the ref is re-read on every poll,
-// so a release re-cut on the remote reaches the source. Immutability is the
-// approval gate's job — the re-resolved task lands with a new content hash and
-// re-pends there.
+// TestSource_PinnedTagFollowsARecutTag is the limit of what a pin promises:
+// the ref is re-read on every poll, so a release re-cut on the remote reaches
+// the source. The re-resolved task carries a new content hash and re-pends at
+// the approval gate.
 func TestSource_PinnedTagFollowsARecutTag(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commitTree(t, tasksetRepoFiles("0 8 * * *"), "release")

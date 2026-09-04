@@ -570,3 +570,35 @@ spec:
 		t.Errorf("ref.tag = %q, want %q", got, "v1.0.0")
 	}
 }
+
+// TestLoadTaskSet_RejectsBranchAndTagOnADevRef closes the gap a dev_ref opened:
+// dev mode substitutes it wholesale, so a contradiction there reaches the
+// resolver exactly as one on the entry's own ref would.
+func TestLoadTaskSet_RejectsBranchAndTagOnADevRef(t *testing.T) {
+	content := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    pinned:
+      ref:
+        url: https://github.com/org/repo
+        tag: v1.0.0
+        dev_ref:
+          url: https://github.com/org/repo
+          branch: main
+          tag: v2.0.0
+`
+	p := writeFile(t, t.TempDir(), "ts.yaml", content)
+	_, err := LoadTaskSet(p)
+	if err == nil {
+		t.Fatal("LoadTaskSet = nil, want a dev_ref branch/tag mutual-exclusion error")
+	}
+	for _, want := range []string{"dev_ref", "ref.branch", "ref.tag"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}

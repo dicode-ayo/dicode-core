@@ -193,14 +193,8 @@ func (m *SourceManager) deleteGit(ctx context.Context, taskID, sourceName string
 	runID := sanitizeRunID(taskID)
 	branch := deleteBranchPrefix + taskID
 	// The removal has to be cut from what the source actually runs, which on a
-	// pinned source is the tagged commit and never the default branch.
-	base := ref.Branch
-	if base == "" {
-		base = ref.Tag
-	}
-	if base == "" {
-		base = "main"
-	}
+	// pinned source is the tag rather than any branch.
+	base := ref.TrackedName()
 
 	if err := src.SetDevMode(ctx, true, taskset.DevModeOpts{Branch: branch, Base: base, RunID: runID}); err != nil {
 		return ipc.TaskDeleteOutcome{}, fmt.Errorf("clone source for delete: %w", err)

@@ -26,23 +26,19 @@ var ErrRefNotFound = errors.New("ref not found on remote")
 // ref is fully qualified — refs/heads/<branch> or refs/tags/<tag>.
 //
 // Refreshing is a fetch of that one ref followed by a hard reset onto it,
-// branches and tags alike. The clone is a throwaway mirror this package has
-// always overwritten — nothing written into it survives a refresh — so a reset
-// is what both cases want, and it drops the ways a merge can fail against a
-// remote that rewound.
+// branches and tags alike. Nothing written into the clone survives a refresh.
 //
-// A ref the remote re-points is therefore followed. Immutability is not this
-// layer's job: the approval gate re-pends any task whose content hash changed,
-// and dicode.lock records the version an operator approved.
+// A ref the remote re-points is followed. Freezing content is the approval
+// gate's job, not this layer's.
 //
-// The worktree is left alone when the ref did not move, so fsnotify only fires
-// on a refresh that actually changed files — pkg/taskset's watch loop depends
-// on that to skip a re-resolve after a no-op poll.
+// The worktree is left alone when the ref did not move: pkg/taskset's watch
+// loop re-resolves on fsnotify, so a refresh that rewrote unchanged files
+// would drive a re-resolve on every poll tick for every source.
 //
 // auth may be nil for public repos.
 //
-// Clones are full (no Depth limit) so go-git always has the ancestry it needs
-// when the remote advances. See #175.
+// Clones are full (no Depth limit) so go-git has the ancestry it needs when
+// the remote advances. See #175.
 func CloneAtRef(ctx context.Context, dir, url string, ref plumbing.ReferenceName, auth *http.BasicAuth) error {
 	if err := ValidateRemoteHost(url); err != nil {
 		return err
@@ -82,6 +78,12 @@ func CloneAtRef(ctx context.Context, dir, url string, ref plumbing.ReferenceName
 	return nil
 }
 
+// syncRef is where a refresh parks the commit it fetched. It is a ref the
+// worktree does not track, so HEAD only ever moves as part of the reset — an
+// interrupted refresh leaves HEAD behind the fetched commit, and the next
+// refresh still sees the two differ and completes the checkout.
+const syncRef = plumbing.ReferenceName("refs/dicode/sync-target")
+
 // syncToRef fetches ref into the clone at dir and hard-resets the worktree
 // onto it, or returns without touching the worktree when the ref has not moved.
 func syncToRef(ctx context.Context, dir string, ref plumbing.ReferenceName, auth *http.BasicAuth) error {
@@ -89,21 +91,19 @@ func syncToRef(ctx context.Context, dir string, ref plumbing.ReferenceName, auth
 	if err != nil {
 		return fmt.Errorf("open repo: %w", err)
 	}
-	// HEAD is read before the fetch: fetching a branch updates the very ref a
-	// symbolic HEAD resolves through, so a comparison made afterwards would
-	// always report "unchanged" and the worktree would never be updated.
-	before := plumbing.ZeroHash
-	if head, headErr := repo.Head(); headErr == nil {
-		before = head.Hash()
-	}
 	if err := fetchRef(ctx, repo, ref, auth); err != nil {
 		return err
 	}
-	hash, err := repo.ResolveRevision(plumbing.Revision(ref))
+	hash, err := repo.ResolveRevision(plumbing.Revision(syncRef))
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrRefNotFound, ref)
+		// The fetch just wrote this ref, so a miss here is the object
+		// database failing to read it back rather than a ref the remote does
+		// not publish — it must stay reclonable instead of being reported as
+		// a mistyped ref.
+		return fmt.Errorf("resolve fetched %s: %w", ref, err)
 	}
-	if before == *hash {
+	head, err := repo.Head()
+	if err == nil && head.Hash() == *hash {
 		return nil
 	}
 	wt, err := repo.Worktree()
@@ -118,12 +118,12 @@ func syncToRef(ctx context.Context, dir string, ref plumbing.ReferenceName, auth
 	return nil
 }
 
-// fetchRef fetches one ref by name, overwriting the local copy so a rewound
+// fetchRef fetches one ref by name into syncRef, overwriting it so a rewound
 // branch or a re-cut tag is followed rather than refused as a non-fast-forward.
 func fetchRef(ctx context.Context, repo *gogit.Repository, ref plumbing.ReferenceName, auth *http.BasicAuth) error {
 	opts := &gogit.FetchOptions{
 		RemoteName: "origin",
-		RefSpecs:   []gogitconfig.RefSpec{gogitconfig.RefSpec("+" + ref + ":" + ref)},
+		RefSpecs:   []gogitconfig.RefSpec{gogitconfig.RefSpec("+" + ref + ":" + syncRef)},
 		Force:      true,
 	}
 	if auth != nil {

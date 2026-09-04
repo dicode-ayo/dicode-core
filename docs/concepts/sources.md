@@ -39,7 +39,7 @@ spec:
 | `url` | required (git) | HTTPS or SSH git URL |
 | `branch` | `main` | Branch to track (git only); mutually exclusive with `tag` |
 | `tag` | | Tag to pin to (git only); mutually exclusive with `branch` |
-| `poll_interval` | `30s` | How often to fetch (git only); ignored on a pinned ref |
+| `poll_interval` | `30s` | How often to fetch (git only); applies to pinned refs too |
 | `auth.token_env` | | Env var holding a personal access token |
 | `auth.ssh_key` | | Path to an SSH private key |
 | `watch` | `true` | Enable fsnotify live reload (local refs) |

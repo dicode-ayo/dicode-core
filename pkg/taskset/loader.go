@@ -243,23 +243,22 @@ func isValidSCPHost(s string) bool {
 }
 
 // ValidateRefTarget checks the remote ref a git entry tracks: branch and tag
-// are mutually exclusive, and a tag must be a legal git ref name. Local refs
-// track nothing and always pass.
+// are mutually exclusive, and a tag must be a legal git ref name. A dev_ref is
+// checked the same way, since dev mode substitutes it wholesale. Local refs
+// track nothing and always pass. A branch name is not checked — an illegal one
+// fails its own clone with git's message.
 //
-// It runs at config-load on every ref in dicode.yaml and in every
-// taskset.yaml, so a mistyped or contradictory pin is rejected against the
-// line that declares it rather than surfacing 30 seconds later as a clone
-// failure against the remote. pkg/webui's add-source handler runs it too, so
-// the API cannot accept a ref the next config load would reject.
+// Every config-load path and pkg/webui's add-source handler run it, so the API
+// cannot accept a ref the next config load would reject.
 //
-// The error names the fields but not the file: the config-load call sites add
-// their own file and entry prefix, and a ref typed into the add-source form
-// has neither.
-//
-// A branch name is not checked: an illegal one already fails its own clone
-// with git's own message, and tightening that here would reject refs the
-// daemon currently accepts.
+// The error names the fields but not the file; callers that have a file and
+// entry to name prefix it themselves.
 func ValidateRefTarget(ref *Ref) error {
+	if ref.DevRef != nil {
+		if err := ValidateRefTarget(ref.DevRef); err != nil {
+			return fmt.Errorf("dev_ref: %w", err)
+		}
+	}
 	if !ref.IsGit() {
 		return nil
 	}

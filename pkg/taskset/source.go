@@ -527,14 +527,11 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	co := &gogit.CheckoutOptions{Branch: branchRef}
 	if err := wt.Checkout(co); err != nil {
 		// branch doesn't exist — create it locally from Base
+		// The fix has to be cut from what the source actually runs, which on a
+		// pinned source is the tag rather than any branch.
 		base := opts.Base
 		if base == "" {
-			// A pinned source has no branch to fork from; the commit it
-			// actually runs is the one the fix should be built on.
-			base = s.rootRef.Branch
-			if base == "" {
-				base = s.rootRef.Tag
-			}
+			base = s.rootRef.TrackedName()
 		}
 		if base == "" {
 			return "", fmt.Errorf("checkout %q failed and no base branch resolvable: %w", opts.Branch, err)

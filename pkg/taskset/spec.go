@@ -77,14 +77,8 @@ func SourceID(name string, ref *Ref) string {
 }
 
 // refKind is the ref namespace a git target lives in. Both kinds refresh the
-// same way, but they must be told apart before the refresh: the namespace
-// selects the refspec, and it is what keeps a branch and a tag of one name
-// from being confused for each other.
-//
-// Resolving a bare name instead would mean asking the remote which namespace
-// it lives in, under git's rev-parse precedence — so a repo holding both a
-// branch and a tag named "release" would decide, on dicode's behalf, which
-// one a source tracks.
+// same way, but the namespace selects the refspec and keeps a branch and a tag
+// of one name from resolving to each other.
 type refKind uint8
 
 const (
@@ -102,8 +96,7 @@ func (k refKind) String() string {
 }
 
 // gitTarget names the remote ref a clone tracks: Kind the namespace, Name the
-// ref within it. Another kind of target costs one more constant rather than
-// one more field and one more mutual-exclusion rule.
+// ref within it.
 //
 // It is comparable so it can key the resolver's clone cache, where a branch
 // and a tag of the same name must never share an entry.
@@ -117,10 +110,9 @@ type gitTarget struct {
 // with — a branch of the same name.
 func (t gitTarget) String() string { return t.Kind.String() + ":" + t.Name }
 
-// IsPinned reports whether this ref names a release rather than a branch.
-// The commit it resolves to is still re-read on every poll — a re-cut tag is
-// followed — so this says which field the operator set, not that the content
-// is frozen.
+// IsPinned reports whether this ref names a tag rather than a branch. The
+// commit it resolves to is still re-read on every poll, so this reports which
+// field the operator set, not that the content is frozen.
 func (r *Ref) IsPinned() bool { return r.Tag != "" }
 
 // target returns the remote ref this git ref resolves against, defaulting to
@@ -134,6 +126,11 @@ func (r *Ref) target() gitTarget {
 	}
 	return gitTarget{Kind: refBranch, Name: "main"}
 }
+
+// TrackedName returns the branch or tag this ref follows, defaulting to
+// "main". Callers that need something to fork a dev branch from want this
+// rather than Branch, which is empty on a pinned ref.
+func (r *Ref) TrackedName() string { return r.target().Name }
 
 // effectivePoll returns the poll interval, defaulting to 30s.
 func (r *Ref) effectivePoll() time.Duration {

@@ -2880,9 +2880,7 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		branch, tag := strings.TrimSpace(body.Branch), strings.TrimSpace(body.Tag)
-		// Only an unpinned ref gets the "main" default; defaulting a branch
-		// onto a pin would contradict it and trip the check below, exactly as
-		// it would in applyDefaults.
+		// Mirrors applyDefaults: a pinned ref must not also carry a branch.
 		if branch == "" && tag == "" {
 			branch = "main"
 		}
@@ -2893,8 +2891,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			PollInterval: 30 * 1e9,
 			Auth:         taskset.RefAuth{TokenEnv: body.TokenEnv},
 		}
-		// Same rules config-load applies, so this handler cannot write an
-		// entry that stops the daemon booting on its next start.
+		// Same rules config-load applies: this handler must not write an entry
+		// that stops the daemon booting on its next start.
 		if err := taskset.ValidateRefTarget(&ref); err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return

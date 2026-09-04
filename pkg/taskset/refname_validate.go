@@ -108,11 +108,8 @@ func refNameViolation(name string) string {
 	return ""
 }
 
-// ValidateBranchPrefix is invoked at config-load on each task's branch_prefix
-// to reject glob/regex constructs that would make ValidateBranchName ambiguous.
-//
-// Currently exported for use by the auto-fix taskset override (#238); not yet
-// wired into the live config-load path.
+// ValidateBranchPrefix rejects glob/regex constructs in a task's branch_prefix
+// that would make ValidateBranchName's literal-prefix match ambiguous.
 func ValidateBranchPrefix(prefix string) error {
 	if prefix == "" {
 		return nil
