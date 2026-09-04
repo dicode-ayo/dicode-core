@@ -3,6 +3,7 @@ package gitops
 import (
 	"context"
 	"errors"
+	"github.com/go-git/go-git/v5/plumbing"
 	"os"
 	"strings"
 	"testing"
@@ -128,14 +129,14 @@ func TestValidateRemoteHost_RejectsMissingHost(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_RejectsMaliciousSSHRemote is the core regression test for
+// TestCloneAtRef_RejectsMaliciousSSHRemote is the core regression test for
 // #489: before this fix, an ssh:// or SCP-shorthand remote reached
-// CloneOrPull with zero host validation at any layer (the dial-time guard in
+// CloneAtRef with zero host validation at any layer (the dial-time guard in
 // dialguard.go only covers http/https, and the literal-host guard was only
-// ever wired into ListBranches). This proves CloneOrPull now rejects such a
+// ever wired into ListBranches). This proves CloneAtRef rejects such a
 // URL before any clone is attempted — the target directory must never be
 // populated with a .git subdirectory.
-func TestCloneOrPull_RejectsMaliciousSSHRemote(t *testing.T) {
+func TestCloneAtRef_RejectsMaliciousSSHRemote(t *testing.T) {
 	cases := []string{
 		"git@127.0.0.1:org/repo.git",
 		"ssh://git@127.0.0.1/org/repo.git",
@@ -143,15 +144,15 @@ func TestCloneOrPull_RejectsMaliciousSSHRemote(t *testing.T) {
 	for _, url := range cases {
 		t.Run(url, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			err := CloneOrPull(context.Background(), tmpDir, url, "main", nil)
+			err := CloneAtRef(context.Background(), tmpDir, url, plumbing.NewBranchReferenceName("main"), nil)
 			if err == nil {
-				t.Fatalf("CloneOrPull(%q) = nil, want private/internal rejection", url)
+				t.Fatalf("CloneAtRef(%q) = nil, want private/internal rejection", url)
 			}
 			if !strings.Contains(err.Error(), "private or internal address") {
-				t.Fatalf("CloneOrPull(%q) error = %q, want private/internal rejection", url, err)
+				t.Fatalf("CloneAtRef(%q) error = %q, want private/internal rejection", url, err)
 			}
 			if _, statErr := os.Stat(tmpDir + "/.git"); statErr == nil {
-				t.Fatalf("CloneOrPull(%q) populated %s/.git — a clone was attempted", url, tmpDir)
+				t.Fatalf("CloneAtRef(%q) populated %s/.git — a clone was attempted", url, tmpDir)
 			}
 		})
 	}
@@ -215,17 +216,17 @@ func TestValidateRemoteHost_RejectsTrailingDotSuffixBypass(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_PublicHostPassesHostGuard proves CloneOrPull's new
+// TestCloneAtRef_PublicHostPassesHostGuard proves CloneAtRef's
 // ValidateRemoteHost call does not reject a legitimate public host — the
 // SSRF guard must not be a false-positive tax on normal operation. Rather
 // than driving a real (slow, non-hermetic, likely network-less-in-CI) clone
 // attempt against github.com, this asserts the same host-guard function
-// CloneOrPull now calls passes for a public URL, which is what actually
-// determines whether CloneOrPull would proceed past the guard to the real
+// CloneAtRef calls passes for a public URL, which is what actually
+// determines whether CloneAtRef would proceed past the guard to the real
 // clone/dial stage.
-func TestCloneOrPull_PublicHostPassesHostGuard(t *testing.T) {
+func TestCloneAtRef_PublicHostPassesHostGuard(t *testing.T) {
 	url := "https://github.com/example/repo.git"
 	if err := ValidateRemoteHost(url); err != nil {
-		t.Fatalf("ValidateRemoteHost(%q) = %v, want nil (CloneOrPull must not reject public hosts)", url, err)
+		t.Fatalf("ValidateRemoteHost(%q) = %v, want nil (CloneAtRef must not reject public hosts)", url, err)
 	}
 }

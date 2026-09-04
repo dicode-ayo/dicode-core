@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -730,7 +731,7 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	// itself as covering (security review of #753's first draft: this path
 	// was missed entirely, so a root ref's token_env went unchecked).
 	effectiveTokenEnv := r.applyTokenEnvAllowlist(ref.URL, ref.Auth.TokenEnv)
-	if err := syncClone(ctx, dir, ref.URL, tgt, effectiveTokenEnv); err != nil {
+	if err := gitops.CloneAtRef(ctx, dir, ref.URL, tgt.refName(), gitops.HTTPAuth(effectiveTokenEnv)); err != nil {
 		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, tgt, err)
 	}
 	key := repoKey{URL: ref.URL, Target: tgt, AllowAuth: true}
@@ -776,7 +777,7 @@ func (r *Resolver) ensureClone(ctx context.Context, url string, tgt gitTarget, _
 
 	dir := repoCloneDir(r.dataDir, url, tgt, allowAuth)
 
-	if err := syncClone(ctx, dir, url, tgt, effectiveTokenEnv); err != nil {
+	if err := gitops.CloneAtRef(ctx, dir, url, tgt.refName(), gitops.HTTPAuth(effectiveTokenEnv)); err != nil {
 		return "", fmt.Errorf("clone %s@%s: %w", url, tgt, err)
 	}
 

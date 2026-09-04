@@ -1,31 +1,13 @@
 package taskset
 
 import (
-	"context"
-
-	"github.com/dicode/dicode/internal/gitops"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
-// syncClone brings the clone at dir onto tgt, cloning it first if it is not
-// there yet. tokenEnv is the name of an env var holding an HTTP auth token;
-// pass "" for public repos.
-//
-// The two targets refresh differently: a branch is pulled, because the remote
-// head moves; a tag names one commit for good, so it is checked out and only
-// fetched when the clone has never seen it.
-//
-// Delegates to internal/gitops, which handles re-clone-on-corrupt recovery
-// (see #175, #176).
-func syncClone(ctx context.Context, dir, url string, tgt gitTarget, tokenEnv string) error {
-	auth := gitops.HTTPAuth(tokenEnv)
-	if tgt.isPinned() {
-		return gitops.CloneAtTag(ctx, dir, url, tgt.Name, auth)
+// refName is the fully-qualified git reference a target names.
+func (t gitTarget) refName() plumbing.ReferenceName {
+	if t.Kind == refTag {
+		return plumbing.NewTagReferenceName(t.Name)
 	}
-	return gitops.CloneOrPull(ctx, dir, url, tgt.Name, auth)
-}
-
-// isReclonableError reports whether the local clone is in a state that
-// blowing-it-away-and-re-cloning fixes.
-func isReclonableError(err error) bool {
-	return gitops.IsReclonableError(err)
+	return plumbing.NewBranchReferenceName(t.Name)
 }

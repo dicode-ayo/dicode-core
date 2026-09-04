@@ -7,15 +7,10 @@ import (
 
 // PullStatus is the UI-facing snapshot of a Source's most recent
 // git-pull attempt. Used to render a health indicator in the webui.
-//
-// Pinned marks a source whose ref names a tag. Such a source resolves once
-// and is never polled again, so its LastPullAt necessarily ages: a viewer
-// must read the age as "pinned here since", not as a stale pull.
 type PullStatus struct {
 	LastPullAt time.Time `json:"last_pull_at,omitempty"`
 	OK         bool      `json:"ok"`
 	Error      string    `json:"error,omitempty"`
-	Pinned     bool      `json:"pinned,omitempty"`
 }
 
 // pullStatusState guards the mutable health fields under its own mutex

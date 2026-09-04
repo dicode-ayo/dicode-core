@@ -54,11 +54,6 @@ type SourceInfo struct {
 	DevMode bool   `json:"dev_mode"`
 	DevPath string `json:"dev_path,omitempty"`
 
-	// Pinned marks a source tracking an immutable tag rather than a branch.
-	// It is never polled, so its LastPullAt ages by design — a viewer must
-	// read that age as "pinned here since", not as a pull gone stale.
-	Pinned bool `json:"pinned,omitempty"`
-
 	LastPullAt    *time.Time `json:"last_pull_at,omitempty"`
 	LastPullOK    bool       `json:"last_pull_ok,omitempty"`
 	LastPullError string     `json:"last_pull_error,omitempty"`
@@ -179,7 +174,6 @@ func (m *SourceManager) List() []SourceInfo {
 			Path:   ref.Path,
 			Branch: ref.Branch,
 			Tag:    ref.Tag,
-			Pinned: ref.IsPinned(),
 		}
 		if src, ok := m.tasksets[name]; ok {
 			info.Type = "taskset"

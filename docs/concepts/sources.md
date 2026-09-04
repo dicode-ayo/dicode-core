@@ -59,13 +59,15 @@ spec:
         path: taskset.yaml
 ```
 
-A tag names one commit for good, so a pinned source has nothing to poll for: it resolves once and is never fetched again, and a tag the remote later re-points is not followed. Bumping the pin is an edit to `dicode.yaml`.
+A pinned source is polled on the same cadence as any other — only the ref it reads differs, so the branch advancing no longer reaches it. Bumping the pin is an edit to `dicode.yaml`.
+
+**A tag the remote re-points is followed.** Pinning selects which ref a source reads; it does not freeze content. What freezes content is the approval gate: a re-cut release changes the task's content hash, so the task re-pends and will not run until it is approved again, and `dicode.lock` records the version that was. The exception is the `buildin` namespace, which the gate auto-approves — pin that one to a repo you control.
+
+Freezing a source against a re-cut tag by not re-reading the ref would have been enforced only by the local clone surviving: a wiped data dir, a fresh machine, or the re-clone recovery path all pick up the tag's current commit. Two daemons on one `dicode.yaml` could then run different commits with nothing to show it. A commit SHA is the honest way to name an exact tree, and `dicode.lock` is the durable record of what was approved.
 
 `POST /api/settings/sources` takes `tag` in place of `branch`, so a source can be added pinned without hand-editing the file. It applies the same rules as config-load, so the API cannot write an entry the next boot would reject.
 
-`GET /api/sources` reports a pinned source with `"pinned": true` and its `tag`. Its `last_pull_at` therefore ages by design — read it as "pinned here since", not as a pull gone stale.
-
-Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every attempt.
+Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every poll.
 
 `auth.token_env` is only honoured on a ref declared directly in `dicode.yaml` or in a source's root `taskset.yaml` — never on a `ref` discovered while resolving an already-resolved `TaskSet` entry further down the tree. A dropped `token_env` on a nested ref is logged as a warning rather than failing the resolve. This keeps a source that only grants write access to its own task tree (e.g. an AI authoring session) from being able to name an arbitrary daemon env var as a git credential and hand it to a host of its choosing on the next reconcile — see [#740](https://github.com/dicode-ayo/dicode-core/issues/740).
 

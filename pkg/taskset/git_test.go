@@ -120,8 +120,8 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 	bare.commit(t, "c", "three", "commit 3")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
-		t.Fatalf("syncClone: %v", err)
+	if err := gitops.CloneAtRef(context.Background(), clone, bare.url, plumbing.NewBranchReferenceName("main"), nil); err != nil {
+		t.Fatalf("CloneAtRef: %v", err)
 	}
 
 	if got := countCommits(t, clone); got < 3 {
@@ -136,7 +136,7 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 // pull fails with a reconcile-style error ("pull: object not found")
 // no matter how long you wait.
 //
-// syncClone must detect that failure class, wipe the directory, and
+// CloneAtRef must detect that failure class, wipe the directory, and
 // re-clone from scratch — otherwise operators have to manually
 // `rm -rf ~/.dicode/tasksets` after every upgrade.
 //
@@ -151,7 +151,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
+	if err := gitops.CloneAtRef(context.Background(), clone, bare.url, plumbing.NewBranchReferenceName("main"), nil); err != nil {
 		t.Fatalf("initial clone: %v", err)
 	}
 
@@ -174,9 +174,9 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 	bare.commit(t, "b", "two", "commit 2")
 	bare.commit(t, "c", "three", "commit 3")
 
-	// syncClone must detect the broken clone and recover.
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
-		t.Fatalf("syncClone did not recover from corrupted clone: %v", err)
+	// CloneAtRef must detect the broken clone and recover.
+	if err := gitops.CloneAtRef(context.Background(), clone, bare.url, plumbing.NewBranchReferenceName("main"), nil); err != nil {
+		t.Fatalf("CloneAtRef did not recover from corrupted clone: %v", err)
 	}
 
 	if got := countCommits(t, clone); got < 3 {
@@ -185,7 +185,7 @@ func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
 }
 
 // TestIsReclonableError spot-checks the error-signature heuristic used
-// by syncClone to decide whether to wipe and re-clone vs propagate.
+// by CloneAtRef to decide whether to wipe and re-clone vs propagate.
 // Keeps the production error messages observed in the wild locked in.
 func TestIsReclonableError(t *testing.T) {
 	cases := []struct {
@@ -220,8 +220,8 @@ func TestIsReclonableError(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		if got := isReclonableError(tc.err); got != tc.want {
-			t.Errorf("%s: isReclonableError(%q) = %v; want %v", tc.name, tc.err, got, tc.want)
+		if got := gitops.IsReclonableError(tc.err); got != tc.want {
+			t.Errorf("%s: IsReclonableError(%q) = %v; want %v", tc.name, tc.err, got, tc.want)
 		}
 	}
 }
@@ -237,14 +237,14 @@ func TestCloneOrPull_PullAfterRemoteAdvance(t *testing.T) {
 	bare.commit(t, "a", "one", "commit 1")
 
 	clone := filepath.Join(t.TempDir(), "clone")
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
-		t.Fatalf("initial syncClone: %v", err)
+	if err := gitops.CloneAtRef(context.Background(), clone, bare.url, plumbing.NewBranchReferenceName("main"), nil); err != nil {
+		t.Fatalf("initial CloneAtRef: %v", err)
 	}
 
 	bare.commit(t, "b", "two", "commit 2")
 	bare.commit(t, "c", "three", "commit 3")
 
-	if err := syncClone(context.Background(), clone, bare.url, gitTarget{Kind: refBranch, Name: "main"}, ""); err != nil {
+	if err := gitops.CloneAtRef(context.Background(), clone, bare.url, plumbing.NewBranchReferenceName("main"), nil); err != nil {
 		t.Fatalf("pull after remote advance: %v", err)
 	}
 
@@ -302,6 +302,38 @@ func (r *seededBareRepo) tagHead(t *testing.T, name string) {
 	}
 }
 
+// retagHead moves an existing tag onto the current HEAD and force-pushes it.
+func (r *seededBareRepo) retagHead(t *testing.T, name string) {
+	t.Helper()
+	if err := r.wt.DeleteTag(name); err != nil {
+		t.Fatalf("delete tag: %v", err)
+	}
+	r.tagHead(t, name)
+}
+
+// stopOnCleanup cancels a started source and waits for its watch loop to close
+// the event channel. Without that join a poll tick can re-create the clone
+// directory while t.TempDir()'s own cleanup is removing it, failing the test on
+// a non-empty directory.
+func stopOnCleanup(t *testing.T, cancel context.CancelFunc, ch <-chan source.Event) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case _, open := <-ch:
+				if !open {
+					return
+				}
+			case <-deadline:
+				t.Error("source did not stop within 5s of context cancel")
+				return
+			}
+		}
+	})
+}
+
 func tasksetRepoFiles(cron string) map[string]string {
 	return map[string]string{
 		"taskset.yaml":           "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n    deploy:\n      ref:\n        path: tasks/deploy/task.yaml\n",
@@ -310,10 +342,10 @@ func tasksetRepoFiles(cron string) map[string]string {
 	}
 }
 
-// TestSource_PinnedTagDoesNotFollowTheBranch is #825's headline guarantee: a
+// TestSource_PinnedTagIgnoresBranchAdvance is #825's headline guarantee: a
 // source pinned to a tag registers the tagged commit's tasks and stays there
 // while the branch it was cut from moves on underneath it.
-func TestSource_PinnedTagDoesNotFollowTheBranch(t *testing.T) {
+func TestSource_PinnedTagIgnoresBranchAdvance(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commitTree(t, tasksetRepoFiles("0 8 * * *"), "release")
 	bare.tagHead(t, "v1.0.0")
@@ -323,14 +355,14 @@ func TestSource_PinnedTagDoesNotFollowTheBranch(t *testing.T) {
 	src := NewSource("pinned", "infra", ref, "", t.TempDir(), false, 50*time.Millisecond, zap.NewNop())
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch, err := src.Start(ctx)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stopOnCleanup(t, cancel, ch)
 
-	// Long enough for several poll intervals: an unpinned source would have
-	// pulled the newer commit and emitted an update by now.
+	// Long enough for several poll intervals. The pinned source polls like any
+	// other; what it must not do is pick up the branch's newer commit.
 	events := collectEvents(t, ch, 500*time.Millisecond)
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want exactly the one Added for the pinned commit: %+v", len(events), events)
@@ -344,11 +376,43 @@ func TestSource_PinnedTagDoesNotFollowTheBranch(t *testing.T) {
 	}
 
 	ps := src.PullStatus()
-	if !ps.Pinned {
-		t.Error("PullStatus().Pinned = false on a tag-pinned source")
-	}
 	if !ps.OK || ps.LastPullAt.IsZero() {
 		t.Errorf("PullStatus() = %+v, want a recorded successful resolve", ps)
+	}
+}
+
+// TestSource_PinnedTagFollowsARecutTag is the other half of the pin's
+// contract, and the deliberate limit on it: the ref is re-read on every poll,
+// so a release re-cut on the remote reaches the source. Immutability is the
+// approval gate's job — the re-resolved task lands with a new content hash and
+// re-pends there.
+func TestSource_PinnedTagFollowsARecutTag(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commitTree(t, tasksetRepoFiles("0 8 * * *"), "release")
+	bare.tagHead(t, "v1.0.0")
+
+	ref := &Ref{URL: bare.url, Tag: "v1.0.0", Path: "taskset.yaml", PollInterval: 50 * time.Millisecond}
+	src := NewSource("pinned", "infra", ref, "", t.TempDir(), false, 50*time.Millisecond, zap.NewNop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stopOnCleanup(t, cancel, ch)
+	if events := collectEvents(t, ch, 200*time.Millisecond); len(events) != 1 {
+		t.Fatalf("got %d events before the re-cut, want the one Added: %+v", len(events), events)
+	}
+
+	bare.commitTree(t, tasksetRepoFiles("0 9 * * *"), "hotfix")
+	bare.retagHead(t, "v1.0.0")
+
+	events := collectEvents(t, ch, 600*time.Millisecond)
+	if len(events) != 1 || events[0].Kind != source.EventUpdated {
+		t.Fatalf("got %+v after the tag was re-cut, want one EventUpdated", events)
+	}
+	if got := asSpec(events[0].Kinded).Trigger.Cron; got != "0 9 * * *" {
+		t.Errorf("resolved cron = %q, want the re-cut tag's %q", got, "0 9 * * *")
 	}
 }
 
@@ -364,11 +428,11 @@ func TestSource_UnknownTagReportsItAndRegistersNothing(t *testing.T) {
 	src := NewSource("pinned", "infra", ref, "", t.TempDir(), false, 50*time.Millisecond, zap.NewNop())
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch, err := src.Start(ctx)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	stopOnCleanup(t, cancel, ch)
 	if events := collectEvents(t, ch, 300*time.Millisecond); len(events) != 0 {
 		t.Fatalf("got %d events for an unresolvable tag, want none: %+v", len(events), events)
 	}

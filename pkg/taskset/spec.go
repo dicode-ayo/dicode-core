@@ -76,16 +76,21 @@ func SourceID(name string, ref *Ref) string {
 	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
-// refKind is how a git target is resolved and refreshed. It is the whole
-// reason dicode distinguishes ref namespaces at all: git treats a branch and
-// a tag as the same kind of thing, but a branch must be re-pulled on every
-// poll tick while a tag must never move.
+// refKind is the ref namespace a git target lives in. Both kinds refresh the
+// same way, but they must be told apart before the refresh: the namespace
+// selects the refspec, and it is what keeps a branch and a tag of one name
+// from being confused for each other.
+//
+// Resolving a bare name instead would mean asking the remote which namespace
+// it lives in, under git's rev-parse precedence — so a repo holding both a
+// branch and a tag named "release" would decide, on dicode's behalf, which
+// one a source tracks.
 type refKind uint8
 
 const (
-	// refBranch is a moving head, pulled on every poll tick.
+	// refBranch lives under refs/heads.
 	refBranch refKind = iota
-	// refTag is an immutable pin, resolved once and never polled.
+	// refTag lives under refs/tags.
 	refTag
 )
 
@@ -96,9 +101,9 @@ func (k refKind) String() string {
 	return "branch"
 }
 
-// gitTarget names the remote ref a clone tracks. Kind carries the refresh
-// policy and Name the ref itself, so another kind of target costs one more
-// constant rather than one more field and one more mutual-exclusion rule.
+// gitTarget names the remote ref a clone tracks: Kind the namespace, Name the
+// ref within it. Another kind of target costs one more constant rather than
+// one more field and one more mutual-exclusion rule.
 //
 // It is comparable so it can key the resolver's clone cache, where a branch
 // and a tag of the same name must never share an entry.
@@ -107,16 +112,15 @@ type gitTarget struct {
 	Name string
 }
 
-// isPinned reports whether this target names an immutable commit.
-func (t gitTarget) isPinned() bool { return t.Kind == refTag }
-
 // String renders the target for error messages, diagnostics, and cache keys.
 // The kind is always spelled out, so a tag can never be read as — or collide
 // with — a branch of the same name.
 func (t gitTarget) String() string { return t.Kind.String() + ":" + t.Name }
 
-// IsPinned reports whether this ref names an immutable commit. A pinned ref
-// has nothing to poll for: the remote cannot move it.
+// IsPinned reports whether this ref names a release rather than a branch.
+// The commit it resolves to is still re-read on every poll — a re-cut tag is
+// followed — so this says which field the operator set, not that the content
+// is frozen.
 func (r *Ref) IsPinned() bool { return r.Tag != "" }
 
 // target returns the remote ref this git ref resolves against, defaulting to
