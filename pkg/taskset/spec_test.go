@@ -1,6 +1,9 @@
 package taskset
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSourceID_NameQualified_NoCollisionOnSharedPath is the regression guard
 // for issue #621: two different dicode.yaml entries (or an existing entry
@@ -63,5 +66,39 @@ func TestSourceID_ColonInName_StillNoCollision(t *testing.T) {
 	idB := SourceID("a", &Ref{Path: "b:c"})
 	if idA == idB {
 		t.Fatalf("SourceID collided despite different (name, ref) pairs: idA=%q idB=%q", idA, idB)
+	}
+}
+
+// TestRefKinds_AllComplete guards the table every refKind consumer reads
+// through: a kind added without an entry would silently render an empty label,
+// build a reference name with no namespace prefix, and hash into another
+// kind's clone directory.
+func TestRefKinds_AllComplete(t *testing.T) {
+	for _, kind := range []refKind{refBranch, refTag} {
+		info, ok := refKinds[kind]
+		if !ok {
+			t.Errorf("refKind %d has no refKinds entry", kind)
+			continue
+		}
+		if info.label == "" {
+			t.Errorf("refKind %d has no label", kind)
+		}
+		if !strings.HasPrefix(info.prefix, "refs/") || !strings.HasSuffix(info.prefix, "/") {
+			t.Errorf("refKind %q prefix = %q, want a refs/…/ namespace", info.label, info.prefix)
+		}
+		if info.untrustedDomain == "" {
+			t.Errorf("refKind %q has no untrusted clone-directory domain", info.label)
+		}
+	}
+	// Exactly one bucket may carry the legacy seed; a second empty
+	// trustedDomain would collide two kinds onto one directory.
+	legacy := 0
+	for _, info := range refKinds {
+		if info.trustedDomain == "" {
+			legacy++
+		}
+	}
+	if legacy != 1 {
+		t.Errorf("%d refKinds claim the legacy trusted seed, want exactly 1", legacy)
 	}
 }

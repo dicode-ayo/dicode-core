@@ -1490,3 +1490,88 @@ func TestLoad_PublicURL_EmptyIsValid(t *testing.T) {
 		t.Errorf("PublicURL = %q, want empty", cfg.Server.PublicURL)
 	}
 }
+
+// writeConfigFile writes content as a dicode.yaml in a fresh temp dir and
+// returns its path.
+func writeConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "dicode.yaml")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return p
+}
+
+// TestLoad_PinnedRefKeepsTagAndSkipsBranchDefault covers the two halves of a
+// pin surviving config load: the tag reaches the parsed ref, and the "main"
+// default that every other git ref picks up is not applied on top of it.
+func TestLoad_PinnedRefKeepsTagAndSkipsBranchDefault(t *testing.T) {
+	p := writeConfigFile(t, `
+spec:
+  entries:
+    buildin:
+      ref:
+        url: https://example.com/repo
+        tag: v0.1.0
+        path: taskset.yaml
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ref := cfg.Spec.Entries["buildin"].Ref
+	if ref.Tag != "v0.1.0" {
+		t.Errorf("ref.tag = %q, want %q", ref.Tag, "v0.1.0")
+	}
+	if ref.Branch != "" {
+		t.Errorf("ref.branch = %q, want it left unset on a pinned ref", ref.Branch)
+	}
+	if !ref.IsPinned() {
+		t.Error("ref.IsPinned() = false, want true")
+	}
+}
+
+// TestLoad_RejectsBranchAndTagTogether keeps the contradiction a config-load
+// error naming both fields, rather than a clone failure 30 seconds later.
+func TestLoad_RejectsBranchAndTagTogether(t *testing.T) {
+	p := writeConfigFile(t, `
+spec:
+  entries:
+    buildin:
+      ref:
+        url: https://example.com/repo
+        branch: main
+        tag: v0.1.0
+        path: taskset.yaml
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("Load = nil, want a branch/tag mutual-exclusion error")
+	}
+	for _, want := range []string{"ref.branch", "ref.tag", "buildin"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestLoad_RejectsMalformedTag stops an unusable pin at the line that declares
+// it: a tag git could never name is not something to discover mid-clone.
+func TestLoad_RejectsMalformedTag(t *testing.T) {
+	p := writeConfigFile(t, `
+spec:
+  entries:
+    buildin:
+      ref:
+        url: https://example.com/repo
+        tag: "v1..0"
+        path: taskset.yaml
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("Load = nil, want an invalid-tag error")
+	}
+	if !strings.Contains(err.Error(), "ref.tag") {
+		t.Errorf("error %q does not name ref.tag", err)
+	}
+}

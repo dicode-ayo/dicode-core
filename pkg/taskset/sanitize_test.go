@@ -11,8 +11,12 @@ func TestSanitizeErrorString_StripsUserinfo(t *testing.T) {
 		in, want string
 	}{
 		{
-			in:   `pull https://github.com/org/repo@main: authentication required`,
-			want: `pull https://github.com/org/repo@main: authentication required`,
+			in:   `pull https://github.com/org/repo@branch:main: authentication required`,
+			want: `pull https://github.com/org/repo@branch:main: authentication required`,
+		},
+		{
+			in:   `pull https://github.com/org/repo@tag:v1.0.0: authentication required`,
+			want: `pull https://github.com/org/repo@tag:v1.0.0: authentication required`,
 		},
 		{
 			in:   `git clone failed: https://oauth2:ghp_abc123@github.com/org/repo.git`,

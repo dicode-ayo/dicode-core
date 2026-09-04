@@ -238,7 +238,7 @@ Response:
 }
 ```
 
-**GET `/api/sources`** items also carry pull-health and load-failure fields (#649) — `last_pull_at`/`last_pull_ok`/`last_pull_error` are omitted until a pull has actually been attempted, and `failed_count`/`failures` are omitted while everything under that source parses cleanly:
+**GET `/api/sources`** items also carry pull-health and load-failure fields (#649) — `last_pull_at`/`last_pull_ok`/`last_pull_error` are omitted until a pull has actually been attempted, and `failed_count`/`failures` are omitted while everything under that source parses cleanly. A source pinned to a tag reports its `tag` in place of `branch`; it is polled on the same cadence as any other source, so its pull-health fields read the same way:
 
 ```json
 {

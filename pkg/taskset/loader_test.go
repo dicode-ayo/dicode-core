@@ -515,3 +515,90 @@ func TestValidateRefURL_SCPInvalidHost(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadTaskSet_RejectsBranchAndTagTogether keeps a nested taskset's refs
+// under the same rule dicode.yaml's are: a ref cannot both track a branch and
+// pin a tag, and the error names both fields so the operator knows which to
+// drop.
+func TestLoadTaskSet_RejectsBranchAndTagTogether(t *testing.T) {
+	content := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    pinned:
+      ref:
+        url: https://github.com/org/repo
+        branch: main
+        tag: v1.0.0
+`
+	p := writeFile(t, t.TempDir(), "ts.yaml", content)
+	_, err := LoadTaskSet(p)
+	if err == nil {
+		t.Fatal("LoadTaskSet = nil, want a branch/tag mutual-exclusion error")
+	}
+	for _, want := range []string{"ref.branch", "ref.tag", "pinned"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestLoadTaskSet_AcceptsTagAlone is the other half: pinning is a legal shape,
+// not merely one that fails differently.
+func TestLoadTaskSet_AcceptsTagAlone(t *testing.T) {
+	content := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    pinned:
+      ref:
+        url: https://github.com/org/repo
+        tag: v1.0.0
+`
+	p := writeFile(t, t.TempDir(), "ts.yaml", content)
+	ts, err := LoadTaskSet(p)
+	if err != nil {
+		t.Fatalf("LoadTaskSet: %v", err)
+	}
+	if got := ts.Spec.Entries["pinned"].Ref.Tag; got != "v1.0.0" {
+		t.Errorf("ref.tag = %q, want %q", got, "v1.0.0")
+	}
+}
+
+// TestLoadTaskSet_RejectsBranchAndTagOnADevRef closes the gap a dev_ref opened:
+// dev mode substitutes it wholesale, so a contradiction there reaches the
+// resolver exactly as one on the entry's own ref would.
+func TestLoadTaskSet_RejectsBranchAndTagOnADevRef(t *testing.T) {
+	content := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    pinned:
+      ref:
+        url: https://github.com/org/repo
+        tag: v1.0.0
+        dev_ref:
+          url: https://github.com/org/repo
+          branch: main
+          tag: v2.0.0
+`
+	p := writeFile(t, t.TempDir(), "ts.yaml", content)
+	_, err := LoadTaskSet(p)
+	if err == nil {
+		t.Fatal("LoadTaskSet = nil, want a dev_ref branch/tag mutual-exclusion error")
+	}
+	for _, want := range []string{"dev_ref", "ref.branch", "ref.tag"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package taskset
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,8 +131,8 @@ func TestRepoCloneDir_TrustTiersNeverShareADirectory(t *testing.T) {
 	url := "https://example.com/private-repo.git"
 	branch := "main"
 
-	trusted := repoCloneDir(dataDir, url, branch, true)
-	untrusted := repoCloneDir(dataDir, url, branch, false)
+	trusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: branch}, AllowAuth: true})
+	untrusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: branch}})
 	if trusted == untrusted {
 		t.Fatalf("trusted and untrusted dirs for the same (url, branch) must differ, both got %q", trusted)
 	}
@@ -164,8 +165,8 @@ func TestRepoCloneDir_NoCrossTierCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	url := "https://example.com/private-repo.git"
 
-	trusted := repoCloneDir(dataDir, url, "@untrusted", true)
-	untrusted := repoCloneDir(dataDir, url, "", false)
+	trusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: "@untrusted"}, AllowAuth: true})
+	untrusted := repoCloneDir(dataDir, repoKey{URL: url})
 	if trusted == untrusted {
 		t.Fatalf("trusted dir for branch %q collided with untrusted dir for empty branch: %q", "@untrusted", trusted)
 	}
@@ -188,12 +189,12 @@ func TestEnsureClone_UntrustedCannotReuseAuthenticatedCache(t *testing.T) {
 
 	r := newResolver(t)
 
-	trustedDir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "GH_TOKEN", true)
+	trustedDir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "GH_TOKEN")
 	if err != nil {
 		t.Fatalf("trusted ensureClone: %v", err)
 	}
 
-	untrustedDir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "", false)
+	untrustedDir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}}, "")
 	if err != nil {
 		t.Fatalf("untrusted ensureClone: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestEnsureClone_TokenEnvAllowlist_BlocksUnlistedVar(t *testing.T) {
 	r := NewResolver(t.TempDir(), false, logger)
 	r.SetAllowedTokenEnvs([]string{"GH_TOKEN"})
 
-	dir, err := r.ensureClone(context.Background(), bare.url, "main", 0, "OPENAI_API_KEY", true)
+	dir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "OPENAI_API_KEY")
 	if err != nil {
 		t.Fatalf("ensureClone: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestEnsureClone_TokenEnvAllowlist_PermitsListedVar(t *testing.T) {
 			r := NewResolver(t.TempDir(), false, logger)
 			r.SetAllowedTokenEnvs(tc.allowlist)
 
-			if _, err := r.ensureClone(context.Background(), bare.url, "main", 0, "GH_TOKEN", true); err != nil {
+			if _, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "GH_TOKEN"); err != nil {
 				t.Fatalf("ensureClone: %v", err)
 			}
 			if n := logs.FilterMessageSnippet("allowed_token_envs allowlist").Len(); n != 0 {
@@ -591,7 +592,7 @@ spec:
 // into ensureClone (nested refs) but not Pull, which fetches a SOURCE'S
 // ROOT ref — the primary case source_security.allowed_token_envs documents
 // itself as covering. Before the fix, Pull passed ref.Auth.TokenEnv straight
-// to cloneOrPull with no allowlist check at all.
+// to syncClone with no allowlist check at all.
 func TestPull_TokenEnvAllowlist_BlocksUnlistedVar(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commit(t, "marker.txt", "content", "seed")
@@ -627,5 +628,33 @@ func TestPull_TokenEnvAllowlist_PermitsListedVar(t *testing.T) {
 	}
 	if n := logs.FilterMessageSnippet("allowed_token_envs allowlist").Len(); n != 0 {
 		t.Errorf("token_env named in allowlist must not be blocked on Pull's root-ref path, got %d warnings", n)
+	}
+}
+
+// TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory is what cloneDirDomain's
+// doc comment points at: every (refKind, trust tier) bucket must hash into its
+// own directory for one and the same ref name. `branch: v1.0.0` and
+// `tag: v1.0.0` name different commits, so serving one out of the other's
+// directory would hand a pinned source whatever the branch has moved to — and
+// serving an untrusted resolution out of a trusted one's directory is the #740
+// credential leak.
+//
+// Adding a refKind without giving it a domain in cloneDirDomain collapses two
+// buckets onto one directory, and fails here.
+func TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	url := "https://example.com/repo.git"
+	const name = "v1.0.0"
+
+	seen := make(map[string]string)
+	for _, kind := range []refKind{refBranch, refTag} {
+		for _, allowAuth := range []bool{true, false} {
+			bucket := fmt.Sprintf("%s/allowAuth=%v", kind, allowAuth)
+			dir := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: kind, Name: name}, AllowAuth: allowAuth})
+			if prev, dup := seen[dir]; dup {
+				t.Errorf("%s and %s share clone directory %q for ref name %q", bucket, prev, dir, name)
+			}
+			seen[dir] = bucket
+		}
 	}
 }

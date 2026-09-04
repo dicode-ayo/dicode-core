@@ -22,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 	gogit "github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	gogittransport "github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"go.uber.org/zap"
@@ -42,7 +43,7 @@ const (
 	defaultPoll = 30 * time.Second
 
 	// cloneRetryMaxElapsed caps total time spent on bounded retries inside
-	// cloneOrPull. Long enough to ride out a transient hiccup, short enough
+	// syncRepo. Long enough to ride out a transient hiccup, short enough
 	// that the next poll tick happens roughly on schedule even if every
 	// attempt fails.
 	cloneRetryMaxElapsed = 30 * time.Second
@@ -63,10 +64,10 @@ type GitSource struct {
 	mu       sync.Mutex
 	snapshot map[string]string // taskID → hash
 
-	// cloneOrPullOp, when non-nil, is invoked by cloneOrPull instead of
-	// the production tryCloneOrPull path. Tests use this to verify retry
+	// syncRepoOp, when non-nil, is invoked by syncRepo instead of
+	// the production trySyncRepo path. Tests use this to verify retry
 	// behaviour without standing up a real git server.
-	cloneOrPullOp cloneOrPullFn
+	syncRepoOp syncRepoFn
 
 	log *zap.Logger
 }
@@ -108,7 +109,7 @@ func (g *GitSource) ID() string { return g.id }
 
 // Start clones (or opens) the repo, does an initial scan, then polls.
 func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
-	if err := g.cloneOrPull(ctx); err != nil {
+	if err := g.syncRepo(ctx); err != nil {
 		// Don't fatal — the repo might be accessible later. Log and continue.
 		g.log.Warn("git source: initial clone/pull failed", zap.String("url", g.id), zap.Error(err))
 	}
@@ -129,7 +130,7 @@ func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
 // interactive paths (UI buttons, request handlers) should pass a ctx with a
 // shorter deadline if they need to fail fast.
 func (g *GitSource) Sync(ctx context.Context) error {
-	if err := g.cloneOrPull(ctx); err != nil {
+	if err := g.syncRepo(ctx); err != nil {
 		return err
 	}
 	_, err := g.diff()
@@ -145,7 +146,7 @@ func (g *GitSource) poll(ctx context.Context, ch chan<- source.Event) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := g.cloneOrPull(ctx); err != nil {
+			if err := g.syncRepo(ctx); err != nil {
 				g.log.Warn("git source: pull failed", zap.String("url", g.id), zap.Error(err))
 				continue
 			}
@@ -156,15 +157,15 @@ func (g *GitSource) poll(ctx context.Context, ch chan<- source.Event) {
 	}
 }
 
-// cloneOrPullFn is the function signature cloneOrPull invokes for the actual
+// syncRepoFn is the function signature syncRepo invokes for the actual
 // network call. Extracted to a field so tests can inject a mock and verify
 // retry behaviour without standing up a real git server.
-type cloneOrPullFn func(ctx context.Context) error
+type syncRepoFn func(ctx context.Context) error
 
-func (g *GitSource) cloneOrPull(ctx context.Context) error {
-	op := g.cloneOrPullOp
+func (g *GitSource) syncRepo(ctx context.Context) error {
+	op := g.syncRepoOp
 	if op == nil {
-		op = g.tryCloneOrPull
+		op = g.trySyncRepo
 	}
 
 	bo := backoff.NewExponentialBackOff()
@@ -194,11 +195,12 @@ func (g *GitSource) cloneOrPull(ctx context.Context) error {
 	return err
 }
 
-// tryCloneOrPull executes a single clone-or-pull attempt against the remote.
-// Returns nil on success or NoErrAlreadyUpToDate; any other error indicates
-// a failure the caller (cloneOrPull) may want to retry.
-func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
-	return gitops.CloneOrPull(ctx, g.localDir, g.url, g.branch, gitops.HTTPAuth(g.tokenEnv))
+// trySyncRepo executes a single clone-or-refresh attempt against the remote.
+// Returns nil on success; any error indicates a failure the caller
+// (syncRepo) may want to retry.
+func (g *GitSource) trySyncRepo(ctx context.Context) error {
+	ref := plumbing.NewBranchReferenceName(g.branch)
+	return gitops.CloneAtRef(ctx, g.localDir, g.url, ref, gitops.HTTPAuth(g.tokenEnv))
 }
 
 // isPermanentGitError reports whether err is a configuration-style failure
@@ -206,13 +208,13 @@ func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
 // regardless; classifying these as Permanent just avoids burning the
 // 30-second retry budget every poll interval.
 //
-// Conservatively scoped: only the unambiguous "your credentials/URL are
-// wrong" sentinels from go-git's transport layer, plus gitops.ValidateRemoteHost's
-// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost) — a
-// deterministic, zero-I/O check whose outcome cannot change within a single
-// poll interval, so retrying it burns the full retry budget for no benefit
-// (see #510: without this case a single SSRF-blocked source stalled the
-// reconciler's initial sync by ~30s, since GitSource.Start calls cloneOrPull
+// Conservatively scoped: only the unambiguous "your credentials/URL/branch are
+// wrong" sentinels — go-git's transport layer, gitops.ValidateRemoteHost's
+// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost), and a
+// branch the remote does not publish (gitops.ErrRefNotFound). None can change
+// within a single poll interval, so retrying burns the full budget for no
+// benefit (see #510: without this case a single SSRF-blocked source stalled
+// the reconciler's initial sync by ~30s, since GitSource.Start syncs
 // synchronously and sources start up sequentially). Everything else (network
 // timeout, 5xx, packfile decode error mid-clone, partial response, …) is
 // treated as transient.
@@ -223,7 +225,8 @@ func isPermanentGitError(err error) bool {
 		errors.Is(err, gogittransport.ErrInvalidAuthMethod),
 		errors.Is(err, gogittransport.ErrRepositoryNotFound),
 		errors.Is(err, gitops.ErrBlockedHost),
-		errors.Is(err, gitops.ErrNoRemoteHost):
+		errors.Is(err, gitops.ErrNoRemoteHost),
+		errors.Is(err, gitops.ErrRefNotFound):
 		return true
 	}
 	return false
@@ -258,7 +261,7 @@ func (g *GitSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) err
 // any connection is attempted — this function is reachable from the REST API
 // with a caller-supplied URL, so it must not be usable to probe the daemon's
 // internal network (#475). Uses gitops.ValidateRemoteHost, the same shared
-// guard CloneOrPull calls (#489), so there is exactly one place that can
+// guard CloneAtRef calls (#489), so there is exactly one place that can
 // drift out of sync.
 func ListBranches(ctx context.Context, repoURL, tokenEnv string) ([]string, error) {
 	if err := gitops.ValidateRemoteHost(repoURL); err != nil {

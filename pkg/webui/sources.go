@@ -50,6 +50,7 @@ type SourceInfo struct {
 	URL     string `json:"url,omitempty"`
 	Path    string `json:"path,omitempty"`
 	Branch  string `json:"branch,omitempty"`
+	Tag     string `json:"tag,omitempty"`
 	DevMode bool   `json:"dev_mode"`
 	DevPath string `json:"dev_path,omitempty"`
 
@@ -172,6 +173,7 @@ func (m *SourceManager) List() []SourceInfo {
 			URL:    ref.URL,
 			Path:   ref.Path,
 			Branch: ref.Branch,
+			Tag:    ref.Tag,
 		}
 		if src, ok := m.tasksets[name]; ok {
 			info.Type = "taskset"
@@ -286,6 +288,7 @@ func (m *SourceManager) Sources() []ipc.SourceSummary {
 			// not hand over the credential reaching it.
 			URL:     taskset.SanitizeURL(info.URL),
 			Branch:  info.Branch,
+			Tag:     info.Tag,
 			DevMode: info.DevMode,
 		})
 	}

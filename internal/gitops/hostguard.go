@@ -15,7 +15,7 @@ import (
 // Callers use errors.Is(err, ErrBlockedHost) to recognise the rejection as a
 // permanent, non-retryable configuration error rather than a transient
 // network failure — see pkg/source/git's isPermanentGitError, which classifies
-// cloneOrPull's retry loop this way so a blocked host doesn't burn the full
+// the retry loop this way so a blocked host doesn't burn the full
 // ~30s retry budget on every poll tick (#489 follow-up).
 var ErrBlockedHost = errors.New("blocked host")
 
@@ -47,8 +47,8 @@ var ErrNoRemoteHost = errors.New("no remote host")
 // Call this from every entry point that accepts a caller/config-supplied
 // git remote URL before any network operation happens — both the
 // branch-preview helper (pkg/source/git.ListBranches) and the actual
-// clone/pull path (CloneOrPull) call this same function, so there is
-// exactly one place that can drift out of sync (#489 found CloneOrPull
+// clone/refresh path (CloneAtRef) call this same function, so there is
+// exactly one place that can drift out of sync (#489 found the clone path
 // skipping the check entirely while ListBranches had it).
 func ValidateRemoteHost(rawURL string) error {
 	ep, err := transport.NewEndpoint(rawURL)

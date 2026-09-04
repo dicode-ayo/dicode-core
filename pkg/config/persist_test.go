@@ -169,3 +169,30 @@ func TestMergeTaskOverride_AtomicWrite(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeTaskOverride_PreservesPinnedTag guards the pin against the
+// whole-document rewrite MergeTaskOverride performs: a source pinned to a tag
+// must come back out of that round-trip still pinned, and still without the
+// branch the loader defaults onto unpinned git refs.
+func TestMergeTaskOverride_PreservesPinnedTag(t *testing.T) {
+	pinned := strings.Replace(baseYAML,
+		"        url: https://example.com/repo\n",
+		"        url: https://example.com/repo\n        tag: v1.2.3\n", 1)
+	p, mt := writeTempYAML(t, pinned)
+
+	if err := MergeTaskOverride(p, "examples/hello", []byte(`{"enabled": false}`), mt); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	ref := cfg.Spec.Entries["examples"].Ref
+	if ref.Tag != "v1.2.3" {
+		t.Errorf("ref.tag = %q after round-trip, want %q", ref.Tag, "v1.2.3")
+	}
+	if ref.Branch != "" {
+		t.Errorf("ref.branch = %q on a pinned ref, want it left unset", ref.Branch)
+	}
+}

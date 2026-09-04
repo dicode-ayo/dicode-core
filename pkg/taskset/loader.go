@@ -1,6 +1,7 @@
 package taskset
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -241,6 +242,37 @@ func isValidSCPHost(s string) bool {
 	return true
 }
 
+// ValidateRefTarget checks the remote ref a git entry tracks: branch and tag
+// are mutually exclusive, and a tag must be a legal git ref name. A dev_ref is
+// checked the same way, since dev mode substitutes it wholesale. Local refs
+// track nothing and always pass. A branch name is not checked — an illegal one
+// fails its own clone with git's message.
+//
+// Every config-load path and pkg/webui's add-source handler run it, so the API
+// cannot accept a ref the next config load would reject.
+//
+// The error names the fields but not the file; callers that have a file and
+// entry to name prefix it themselves.
+func ValidateRefTarget(ref *Ref) error {
+	if ref.DevRef != nil {
+		if err := ValidateRefTarget(ref.DevRef); err != nil {
+			return fmt.Errorf("dev_ref: %w", err)
+		}
+	}
+	if !ref.IsGit() {
+		return nil
+	}
+	if ref.Tag != "" && ref.Branch != "" {
+		return errors.New("ref.branch and ref.tag are mutually exclusive — set ref.branch to track a moving branch, ref.tag to pin an immutable release")
+	}
+	if ref.Tag != "" {
+		if err := ValidateTagName(ref.Tag); err != nil {
+			return fmt.Errorf("ref.tag %q: %w", ref.Tag, err)
+		}
+	}
+	return nil
+}
+
 func validateTaskSet(ts *TaskSetSpec, path string) error {
 	if ts.Spec.Entries == nil {
 		return fmt.Errorf("%s: spec.entries is required", path)
@@ -261,6 +293,9 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 		if entry.Ref != nil && entry.Ref.URL != "" {
 			if err := ValidateRefURL(path, key, entry.Ref.URL); err != nil {
 				return err
+			}
+			if err := ValidateRefTarget(entry.Ref); err != nil {
+				return fmt.Errorf("%s: entry %q: %w", path, key, err)
 			}
 		}
 	}

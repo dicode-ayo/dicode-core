@@ -466,7 +466,8 @@ func (s *Source) latestCloneRunIDLocked() string {
 
 // enableClone clones this source's git repo into ${dataDir}/dev-clones/<namespace>/<runID>/
 // and returns the path to the cloned taskset.yaml. If opts.Branch doesn't exist
-// remotely, it is created locally from opts.Base (or the source's tracked branch).
+// remotely, it is created locally from opts.Base (or the source's tracked
+// branch, or the tag it is pinned to).
 // Pure go-git — no `git` binary.
 func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, error) {
 	if opts.RunID == "" {
@@ -487,7 +488,7 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	// SSRF guard (#489/#510): enableClone drives a real go-git clone against
 	// a caller-influenced URL (reachable via SetDevMode from pkg/webui/sources.go
 	// and pkg/webui/task_delete.go), so it must go through the same shared
-	// literal-host check as CloneOrPull and ListBranches before any network
+	// literal-host check as CloneAtRef and ListBranches before any network
 	// operation happens — otherwise it's a third, unmitigated SSRF entry point.
 	if err := gitops.ValidateRemoteHost(s.rootRef.URL); err != nil {
 		return "", fmt.Errorf("validate remote host: %w", err)
@@ -526,18 +527,23 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	co := &gogit.CheckoutOptions{Branch: branchRef}
 	if err := wt.Checkout(co); err != nil {
 		// branch doesn't exist — create it locally from Base
+		// The fix has to be cut from what the source actually runs, which on a
+		// pinned source is the tag rather than any branch.
 		base := opts.Base
 		if base == "" {
-			base = s.rootRef.Branch
+			base = s.rootRef.TrackedName()
 		}
 		if base == "" {
 			return "", fmt.Errorf("checkout %q failed and no base branch resolvable: %w", opts.Branch, err)
 		}
-		// Try local branch ref first, then fall back to remote tracking ref.
+		// Try local branch ref first, then the remote tracking ref, then a tag.
 		baseHash, resolveErr := repo.ResolveRevision(plumbing.Revision(plumbing.NewBranchReferenceName(base)))
 		if resolveErr != nil {
 			remoteRef := plumbing.NewRemoteReferenceName("origin", base)
 			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(remoteRef))
+		}
+		if resolveErr != nil {
+			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(plumbing.NewTagReferenceName(base)))
 			if resolveErr != nil {
 				return "", fmt.Errorf("resolve base %q: %w", base, resolveErr)
 			}

@@ -2884,7 +2884,7 @@ func TestIPC_SourcesList_ReturnsSummaries(t *testing.T) {
 // next field copied over from webui.SourceInfo — which does carry paths —
 // would not be one of them.
 func TestIPC_SourcesList_WithholdsHostPaths(t *testing.T) {
-	want := []string{"Name", "Type", "URL", "Branch", "DevMode"}
+	want := []string{"Name", "Type", "URL", "Branch", "Tag", "DevMode"}
 
 	typ := reflect.TypeOf(SourceSummary{})
 	got := make([]string, 0, typ.NumField())

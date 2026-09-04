@@ -13,9 +13,12 @@ import (
 // Ref points to a yaml file (kind: Task or kind: TaskSet).
 // If URL is non-empty it is a git ref; otherwise Path is an absolute local path.
 type Ref struct {
-	URL          string        `yaml:"url,omitempty"`
-	Path         string        `yaml:"path"`
+	URL  string `yaml:"url,omitempty"`
+	Path string `yaml:"path"`
+	// Branch tracks a moving head; Tag pins to one immutable commit. They are
+	// mutually exclusive, and a git ref with neither tracks branch "main".
 	Branch       string        `yaml:"branch,omitempty"`
+	Tag          string        `yaml:"tag,omitempty"`
 	PollInterval time.Duration `yaml:"poll_interval,omitempty"`
 	Auth         RefAuth       `yaml:"auth,omitempty"`
 	// DevRef is substituted in place of this ref when dev mode is active.
@@ -73,13 +76,77 @@ func SourceID(name string, ref *Ref) string {
 	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
-// effectiveBranch returns the branch, defaulting to "main".
-func (r *Ref) effectiveBranch() string {
-	if r.Branch != "" {
-		return r.Branch
-	}
-	return "main"
+// DefaultBranch is the branch a git ref tracks when it names neither a branch
+// nor a tag.
+const DefaultBranch = "main"
+
+// refKind is the ref namespace a git target lives in. Both kinds refresh the
+// same way, but the namespace selects the refspec and keeps a branch and a tag
+// of one name from resolving to each other.
+type refKind uint8
+
+const (
+	// refBranch lives under refs/heads.
+	refBranch refKind = iota
+	// refTag lives under refs/tags.
+	refTag
+)
+
+// refKinds holds everything that varies per namespace: the label used in
+// messages and cache keys, the reference prefix, and the clone-directory
+// domain for each trust tier. An empty trustedDomain marks the bucket whose
+// seed predates the others and must not change — see repoCloneDir.
+//
+// A new refKind needs a complete entry here. TestRefKinds_AllComplete and
+// TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory both fail without one.
+var refKinds = map[refKind]struct {
+	label           string
+	prefix          string
+	trustedDomain   string
+	untrustedDomain string
+}{
+	refBranch: {"branch", "refs/heads/", "", "dicode-untrusted-clone-v1"},
+	refTag:    {"tag", "refs/tags/", "dicode-tag-clone-v1", "dicode-untrusted-tag-clone-v1"},
 }
+
+func (k refKind) String() string { return refKinds[k].label }
+
+// gitTarget names the remote ref a clone tracks: Kind the namespace, Name the
+// ref within it.
+//
+// It is comparable so it can key the resolver's clone cache, where a branch
+// and a tag of the same name must never share an entry.
+type gitTarget struct {
+	Kind refKind
+	Name string
+}
+
+// String renders the target for error messages, diagnostics, and cache keys.
+// The kind is always spelled out, so a tag can never be read as — or collide
+// with — a branch of the same name.
+func (t gitTarget) String() string { return t.Kind.String() + ":" + t.Name }
+
+// IsPinned reports whether this ref names a tag rather than a branch. The
+// commit it resolves to is still re-read on every poll, so this reports which
+// field the operator set, not that the content is frozen.
+func (r *Ref) IsPinned() bool { return r.Tag != "" }
+
+// target returns the remote ref this git ref resolves against, defaulting to
+// branch "main" when neither branch nor tag is set.
+func (r *Ref) target() gitTarget {
+	if r.IsPinned() {
+		return gitTarget{Kind: refTag, Name: r.Tag}
+	}
+	if r.Branch != "" {
+		return gitTarget{Kind: refBranch, Name: r.Branch}
+	}
+	return gitTarget{Kind: refBranch, Name: DefaultBranch}
+}
+
+// TrackedName returns the branch or tag this ref follows, defaulting to
+// DefaultBranch. Branch is empty on a pinned ref, so callers that need something to
+// fork a dev branch from must use this.
+func (r *Ref) TrackedName() string { return r.target().Name }
 
 // effectivePoll returns the poll interval, defaulting to 30s.
 func (r *Ref) effectivePoll() time.Duration {

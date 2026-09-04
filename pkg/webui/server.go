@@ -2855,6 +2855,7 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		Path     string `json:"path"`
 		URL      string `json:"url"`
 		Branch   string `json:"branch"`
+		Tag      string `json:"tag"`
 		TokenEnv string `json:"token_env"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -2878,15 +2879,23 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
 			return
 		}
-		branch := body.Branch
-		if branch == "" {
-			branch = "main"
+		branch, tag := strings.TrimSpace(body.Branch), strings.TrimSpace(body.Tag)
+		// Mirrors applyDefaults: a pinned ref must not also carry a branch.
+		if branch == "" && tag == "" {
+			branch = taskset.DefaultBranch
 		}
 		ref = taskset.Ref{
 			URL:          url,
 			Branch:       branch,
+			Tag:          tag,
 			PollInterval: 30 * 1e9,
 			Auth:         taskset.RefAuth{TokenEnv: body.TokenEnv},
+		}
+		// Same rules config-load applies: this handler must not write an entry
+		// that stops the daemon booting on its next start.
+		if err := taskset.ValidateRefTarget(&ref); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 	} else if path := strings.TrimSpace(body.Path); path != "" {
 		watchTrue := true

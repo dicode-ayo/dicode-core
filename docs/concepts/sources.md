@@ -37,12 +37,37 @@ spec:
 |---|---|---|
 | `path` | required (local) | Absolute path to `taskset.yaml`; `${CONFIGDIR}` and `${HOME}` expanded |
 | `url` | required (git) | HTTPS or SSH git URL |
-| `branch` | `main` | Branch to track (git only) |
-| `poll_interval` | `30s` | How often to fetch (git only) |
+| `branch` | `main` | Branch to track (git only); mutually exclusive with `tag` |
+| `tag` | | Tag to pin to (git only); mutually exclusive with `branch` |
+| `poll_interval` | `30s` | How often to fetch (git only); applies to pinned refs too |
 | `auth.token_env` | | Env var holding a personal access token |
 | `auth.ssh_key` | | Path to an SSH private key |
 | `watch` | `true` | Enable fsnotify live reload (local refs) |
 | `dev_ref` | | Substitute ref when dev mode is active |
+
+### Pinning a source to a release
+
+A `branch` ref follows whatever its head becomes on the next poll. Set `tag` instead to run exactly one release:
+
+```yaml
+spec:
+  entries:
+    buildin:
+      ref:
+        url: https://github.com/dicode-ayo/dicode-buildin
+        tag: v0.1.0
+        path: taskset.yaml
+```
+
+A pinned source is polled on the same cadence as any other — only the ref it reads differs, so the branch advancing no longer reaches it. Bumping the pin is an edit to `dicode.yaml`.
+
+**A tag the remote re-points is followed.** Pinning selects which ref a source reads; it does not freeze content. What freezes content is the approval gate: a re-cut release changes the task's content hash, so the task re-pends and will not run until it is approved again, and `dicode.lock` records the version that was. The exception is the `buildin` namespace, which the gate auto-approves before any hash check, so a re-cut release there runs without an approval step — pin that one to a repo you control ([#832](https://github.com/dicode-ayo/dicode-core/issues/832)).
+
+Freezing a source against a re-cut tag by not re-reading the ref would have been enforced only by the local clone surviving: a wiped data dir, a fresh machine, or the re-clone recovery path all pick up the tag's current commit. Two daemons on one `dicode.yaml` could then run different commits with nothing to show it. A commit SHA is the honest way to name an exact tree, and `dicode.lock` is the durable record of what was approved.
+
+`POST /api/settings/sources` takes `tag` in place of `branch`, so a source can be added pinned without hand-editing the file. It applies the same rules as config-load, so the API cannot write an entry the next boot would reject.
+
+Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every poll.
 
 `auth.token_env` is only honoured on a ref declared directly in `dicode.yaml` or in a source's root `taskset.yaml` — never on a `ref` discovered while resolving an already-resolved `TaskSet` entry further down the tree. A dropped `token_env` on a nested ref is logged as a warning rather than failing the resolve. This keeps a source that only grants write access to its own task tree (e.g. an AI authoring session) from being able to name an arbitrary daemon env var as a git credential and hand it to a host of its choosing on the next reconcile — see [#740](https://github.com/dicode-ayo/dicode-core/issues/740).
 

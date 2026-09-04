@@ -346,7 +346,7 @@ spec:
 // item 2: enableClone (reached via SetDevMode from pkg/webui/sources.go and
 // pkg/webui/task_delete.go) drove a real go-git PlainCloneContext against
 // s.rootRef.URL with zero host validation — a third, unmitigated SSRF entry
-// point alongside CloneOrPull and ListBranches (#489). This proves a
+// point alongside CloneAtRef and ListBranches (#489). This proves a
 // malicious ssh/scp-shorthand rootRef.URL is rejected before any clone is
 // attempted: no clone directory should ever be created on disk.
 func TestSetDevMode_Branch_RejectsSSRFHost(t *testing.T) {
@@ -428,5 +428,42 @@ spec:
 	}
 	if got := filepath.Base(src.RepoPath()); got != "a" {
 		t.Errorf("after disabling b, expected a to be primary, RepoPath base = %q", got)
+	}
+}
+
+// TestSetDevMode_PinnedSourceForksFromTheTag covers clone-mode on a source
+// that has no branch to fork from. The fix branch must start at the commit the
+// source actually runs — the pinned one — not at whatever the default branch
+// has moved on to.
+func TestSetDevMode_PinnedSourceForksFromTheTag(t *testing.T) {
+	bare := newSeededBareRepo(t)
+	bare.commitTree(t, map[string]string{"taskset.yaml": "pinned"}, "release")
+	bare.tagHead(t, "v1.0.0")
+	bare.commitTree(t, map[string]string{"taskset.yaml": "moved on"}, "advance")
+
+	src := NewSource(bare.url, "ns", &Ref{URL: bare.url, Tag: "v1.0.0"}, "", t.TempDir(), false, 30*time.Second, zap.NewNop())
+	runID := "run-pinned"
+	if err := src.SetDevMode(context.Background(), true, DevModeOpts{Branch: "fix/pinned", RunID: runID}); err != nil {
+		t.Fatalf("enable clone-mode on a pinned source: %v", err)
+	}
+
+	clonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+	repo, err := gogit.PlainOpen(clonePath)
+	if err != nil {
+		t.Fatalf("open clone repo: %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("repo.Head: %v", err)
+	}
+	if got := head.Name().Short(); got != "fix/pinned" {
+		t.Errorf("HEAD = %q, want fix/pinned", got)
+	}
+	body, err := os.ReadFile(filepath.Join(clonePath, "taskset.yaml"))
+	if err != nil {
+		t.Fatalf("read cloned taskset.yaml: %v", err)
+	}
+	if string(body) != "pinned" {
+		t.Errorf("fix branch forked from %q, want the pinned commit's %q", string(body), "pinned")
 	}
 }

@@ -13,31 +13,31 @@ import (
 	"go.uber.org/zap"
 )
 
-// Tests for the bounded retry wrapper around cloneOrPull.
+// Tests for the bounded retry wrapper around syncRepo.
 //
-// The production tryCloneOrPull path is exercised via the existing tests in
+// The production trySyncRepo path is exercised via the existing tests in
 // git_test.go (which use a real file:// remote). These tests focus on the
 // retry semantics: how many attempts are made, that auth-style failures
 // short-circuit, and that the operation doesn't burn the entire MaxElapsed
 // budget on a permanent error.
 //
-// Each test injects a mock cloneOrPullOp on a freshly-constructed GitSource
+// Each test injects a mock syncRepoOp on a freshly-constructed GitSource
 // so the real go-git code path never runs.
 
-func newTestGitSource(t *testing.T, op cloneOrPullFn) *GitSource {
+func newTestGitSource(t *testing.T, op syncRepoFn) *GitSource {
 	t.Helper()
 	gs, err := New(t.TempDir(), "https://example.invalid/repo.git", "main", time.Second, "", "", zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	gs.cloneOrPullOp = op
+	gs.syncRepoOp = op
 	return gs
 }
 
-// TestCloneOrPull_TransientErrorRetries verifies that a transient error
+// TestSyncRepo_TransientErrorRetries verifies that a transient error
 // triggers at least one retry and eventually succeeds when the operation
 // recovers.
-func TestCloneOrPull_TransientErrorRetries(t *testing.T) {
+func TestSyncRepo_TransientErrorRetries(t *testing.T) {
 	var calls atomic.Int32
 	gs := newTestGitSource(t, func(ctx context.Context) error {
 		n := calls.Add(1)
@@ -50,20 +50,20 @@ func TestCloneOrPull_TransientErrorRetries(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := gs.cloneOrPull(ctx); err != nil {
-		t.Fatalf("cloneOrPull: %v", err)
+	if err := gs.syncRepo(ctx); err != nil {
+		t.Fatalf("syncRepo: %v", err)
 	}
 	if got := calls.Load(); got != 3 {
 		t.Errorf("call count = %d; want 3 (2 retries before success)", got)
 	}
 }
 
-// TestCloneOrPull_AuthErrorIsPermanent verifies that an authentication
+// TestSyncRepo_AuthErrorIsPermanent verifies that an authentication
 // failure surfaces immediately without retrying. Auth errors are not
 // retried so a misconfigured token doesn't burn the
 // 30-second retry budget on every poll tick — and so the operator gets a
 // fast, clear failure signal in the logs.
-func TestCloneOrPull_AuthErrorIsPermanent(t *testing.T) {
+func TestSyncRepo_AuthErrorIsPermanent(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
@@ -89,7 +89,7 @@ func TestCloneOrPull_AuthErrorIsPermanent(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			err := gs.cloneOrPull(ctx)
+			err := gs.syncRepo(ctx)
 			elapsed := time.Since(start)
 
 			if err == nil {
@@ -109,10 +109,10 @@ func TestCloneOrPull_AuthErrorIsPermanent(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_BoundedByMaxElapsed verifies that a permanently failing
+// TestSyncRepo_BoundedByMaxElapsed verifies that a permanently failing
 // transient error eventually gives up — we don't loop forever, so a broken
 // upstream doesn't pin the poll goroutine in retry purgatory.
-func TestCloneOrPull_BoundedByMaxElapsed(t *testing.T) {
+func TestSyncRepo_BoundedByMaxElapsed(t *testing.T) {
 	var calls atomic.Int32
 	gs := newTestGitSource(t, func(ctx context.Context) error {
 		calls.Add(1)
@@ -123,7 +123,7 @@ func TestCloneOrPull_BoundedByMaxElapsed(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := gs.cloneOrPull(ctx)
+	err := gs.syncRepo(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -145,11 +145,11 @@ func TestCloneOrPull_BoundedByMaxElapsed(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_ContextCancelStopsRetry verifies that cancelling ctx
+// TestSyncRepo_ContextCancelStopsRetry verifies that cancelling ctx
 // during retry exits promptly rather than waiting for the next backoff
 // interval. Important for graceful shutdown — a daemon stop shouldn't
 // have to wait for a retry cycle to finish.
-func TestCloneOrPull_ContextCancelStopsRetry(t *testing.T) {
+func TestSyncRepo_ContextCancelStopsRetry(t *testing.T) {
 	var calls atomic.Int32
 	gs := newTestGitSource(t, func(ctx context.Context) error {
 		calls.Add(1)
@@ -160,7 +160,7 @@ func TestCloneOrPull_ContextCancelStopsRetry(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := gs.cloneOrPull(ctx)
+	err := gs.syncRepo(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -173,15 +173,15 @@ func TestCloneOrPull_ContextCancelStopsRetry(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_SSRFBlockedHostDoesNotRetry is the core regression test
+// TestSyncRepo_SSRFBlockedHostDoesNotRetry is the core regression test
 // for #510: before isPermanentGitError recognised gitops.ErrBlockedHost /
 // gitops.ErrNoRemoteHost, a deterministic, zero-I/O SSRF rejection from
 // ValidateRemoteHost was retried for the full ~30s cloneRetryMaxElapsed
-// window on every poll tick — and since GitSource.Start calls cloneOrPull
+// window on every poll tick — and since GitSource.Start calls syncRepo
 // synchronously and sources start up sequentially in the reconciler, a
 // single SSRF-blocked source stalled the whole initial sync by ~30s. This
 // proves the op is now called exactly once and returns promptly.
-func TestCloneOrPull_SSRFBlockedHostDoesNotRetry(t *testing.T) {
+func TestSyncRepo_SSRFBlockedHostDoesNotRetry(t *testing.T) {
 	var calls atomic.Int32
 	blockedErr := gitops.ValidateRemoteHost("ssh://git@127.0.0.1/org/repo.git")
 	if blockedErr == nil {
@@ -196,7 +196,7 @@ func TestCloneOrPull_SSRFBlockedHostDoesNotRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err := gs.cloneOrPull(ctx)
+	err := gs.syncRepo(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -225,7 +225,7 @@ func TestIsPermanentGitError_PermanentSentinels(t *testing.T) {
 		fmt.Errorf("pull: %w", gogittransport.ErrAuthenticationRequired),
 		fmt.Errorf("clone: %w", gogittransport.ErrRepositoryNotFound),
 		// Regression coverage for #510: the real error shape produced by
-		// gitops.ValidateRemoteHost (wired into CloneOrPull for #489) must
+		// gitops.ValidateRemoteHost (wired into CloneAtRef for #489) must
 		// also be classified as permanent, otherwise a single SSRF-blocked
 		// source burns the full ~30s retry budget on every poll tick.
 		gitops.ValidateRemoteHost("ssh://git@127.0.0.1/org/repo.git"),

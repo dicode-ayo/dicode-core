@@ -190,7 +190,7 @@ var installGuardOnce sync.Once
 // client installed here.
 //
 // That gap is now only partial, not total: ValidateRemoteHost's
-// literal-host check (hostguard.go) is invoked from CloneOrPull itself —
+// literal-host check (hostguard.go) is invoked from CloneAtRef itself —
 // the actual clone/pull path, not just pkg/source/git's ListBranches — so
 // every scheme it understands (http(s), ssh, and the git@host:path SCP
 // shorthand) gets rejected before any dial when the host is a loopback/
@@ -204,7 +204,7 @@ var installGuardOnce sync.Once
 // a dedicated guarded dialer for go-git's ssh transport or resolving and
 // re-checking the host before handing off to it, both bigger than #489's
 // scope. The "git" scheme itself is separately rejected outright by
-// pkg/taskset.ValidateRefURL (#486), so it never reaches CloneOrPull with a
+// pkg/taskset.ValidateRefURL (#486), so it never reaches CloneAtRef with a
 // caller-supplied host in practice.
 //
 // When an outbound proxy is configured (HTTPS_PROXY/HTTP_PROXY), the

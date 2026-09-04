@@ -9,11 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/go-git/go-git/v5/plumbing"
 	"go.uber.org/zap"
 )
 
@@ -29,17 +30,17 @@ const (
 
 // repoKey is the deduplication key for a git repository clone.
 //
-// AllowAuth partitions the cache by trust tier, not just (URL, Branch): an
+// AllowAuth partitions the cache by trust tier, not just (URL, Target): an
 // allowAuth=false resolution (a ref discovered inside an already-resolved
 // sub-tree, #740) must never be served the directory an allowAuth=true
 // resolution populated with credentials. Without this, a nested, untrusted
-// entry could name the SAME (url, branch) as an operator-configured root ref
+// entry could name the SAME (url, target) as an operator-configured root ref
 // and read the daemon's already-authenticated clone straight out of the
 // cache — no token_env of its own required, defeating the auth gate in
 // resolveRef/gatedTokenEnv entirely. See TestEnsureClone_UntrustedCannotReuseAuthenticatedCache.
 type repoKey struct {
 	URL       string
-	Branch    string
+	Target    gitTarget
 	AllowAuth bool
 }
 
@@ -58,7 +59,7 @@ type ResolveFailure struct {
 }
 
 // Resolver resolves a TaskSet tree into a flat list of ResolvedTasks.
-// It deduplicates git clones so that N entries referencing the same (url, branch)
+// It deduplicates git clones so that N entries referencing the same (url, target)
 // pair share a single local clone directory.
 type Resolver struct {
 	dataDir string
@@ -66,7 +67,7 @@ type Resolver struct {
 	log     *zap.Logger
 
 	mu               sync.Mutex
-	clones           map[repoKey]string // (url, branch) → absolute local dir
+	clones           map[repoKey]string // (url, target) → absolute local dir
 	allowedTokenEnvs []string           // operator allowlist for ref.auth.token_env (#753); nil/empty = unrestricted
 }
 
@@ -518,12 +519,12 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 			}
 		}
 	} else {
-		branch := ref.effectiveBranch()
 		// ensureClone re-derives the effective token itself from (allowAuth,
 		// ref.Auth.TokenEnv) — it does not trust this call to have already
 		// gated it — so passing the raw TokenEnv here is safe regardless of
 		// what any other caller does. See ensureClone's doc comment.
-		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv, allowAuth)
+		key := repoKey{URL: ref.URL, Target: ref.target(), AllowAuth: allowAuth}
+		localDir, err := r.ensureClone(ctx, key, ref.Auth.TokenEnv)
 		if err != nil {
 			return "", false, err
 		}
@@ -582,7 +583,7 @@ func tokenEnvAllowed(envVar string, allowlist []string) bool {
 
 // applyTokenEnvAllowlist returns tokenEnv unchanged when it is empty or
 // allowed by r.allowedTokenEnvs; otherwise it logs the drop and returns "".
-// Shared by every call site that hands a token_env to cloneOrPull — Pull
+// Shared by every call site that hands a token_env to CloneAtRef — Pull
 // (a source's root ref, always allowAuth=true) and ensureClone (a nested
 // ref, post-gatedTokenEnv) — so the allowlist covers every git-authenticated
 // clone path consistently. A caller that already knows tokenEnv is "" may
@@ -600,6 +601,11 @@ func (r *Resolver) applyTokenEnvAllowlist(url, tokenEnv string) string {
 		return ""
 	}
 	return tokenEnv
+}
+
+// refName is the fully-qualified git reference a target names.
+func (t gitTarget) refName() plumbing.ReferenceName {
+	return plumbing.ReferenceName(refKinds[t.Kind].prefix + t.Name)
 }
 
 // containedPath reports whether target stays within root, rejecting both
@@ -655,24 +661,20 @@ func resolveYAMLPath(path string) string {
 	return path
 }
 
-// repoCloneDir returns the deterministic on-disk directory for (url, branch)
-// under the given trust tier. allowAuth=true reuses the same hash dicode has
-// always used (no on-disk migration for operator-configured sources).
+// repoCloneDir returns the deterministic on-disk directory for key. A trusted branch target keeps the hash dicode
+// has always used (no on-disk migration for operator-configured sources).
 //
-// allowAuth=false hashes url and branch INDEPENDENTLY first, then combines
-// the two digests under a fixed domain-separation prefix, rather than
-// concatenating url+branch with an "@untrusted" suffix the way an earlier
-// version of this function did. Plain suffixing was not injective: an
+// Every other combination hashes url and ref name INDEPENDENTLY, then
+// combines the two digests under a domain prefix naming the tier and the
+// kind of ref. Seeding one string space instead — "url@branch@untrusted" for
+// the low-trust tier, or "tag:"+name for a tag — is not injective: an
 // attacker fully controls both fields of their own untrusted ref, so they
-// could choose an (url, branch) pair whose "url@branch@untrusted" string
-// reproduced an operator's real trusted "url@branch" seed byte-for-byte
-// whenever the operator's own branch name happened to end in "@untrusted"
-// (or, via a chosen url, in fewer contrived cases still) — landing both
-// tiers' clones in the SAME directory despite the different repoKey. Hashing
-// url and branch separately before combining removes that structural
-// overlap entirely: reproducing a trusted seed from the untrusted branch
-// would require a SHA-256 preimage, not a string-concatenation trick (#740
-// review).
+// could pick values reproducing an operator's trusted "url@branch" seed
+// byte-for-byte (a branch name ending in "@untrusted", or one literally
+// named "tag:v1"), landing two clones in the SAME directory despite their
+// different repoKey. Hashing the parts separately makes reconstructing one
+// bucket's directory from another a SHA-256 preimage problem rather than a
+// string-concatenation trick (#740 review).
 //
 // Note: the directory name below keeps only the first 8 bytes of the final
 // digest (h[:8], unchanged from the pre-#740 scheme), so the residual
@@ -680,33 +682,41 @@ func resolveYAMLPath(path string) string {
 // than a full SHA-256 preimage — infeasible for an attacker targeting one
 // specific operator directory, but worth stating precisely rather than
 // overclaiming full preimage resistance.
-func repoCloneDir(dataDir, url, branch string, allowAuth bool) string {
-	var h [32]byte
-	if allowAuth {
-		h = sha256.Sum256([]byte(url + "@" + branch))
-	} else {
-		hu := sha256.Sum256([]byte(url))
-		hb := sha256.Sum256([]byte(branch))
-		h = sha256.Sum256([]byte(fmt.Sprintf("dicode-untrusted-clone-v1:%x:%x", hu, hb)))
+func repoCloneDir(dataDir string, key repoKey) string {
+	kind := refKinds[key.Target.Kind]
+	domain := kind.untrustedDomain
+	if key.AllowAuth {
+		domain = kind.trustedDomain
 	}
+	if domain == "" {
+		// The one bucket whose seed must stay byte-for-byte what operator
+		// sources already hash to, or every one of them re-clones.
+		h := sha256.Sum256([]byte(key.URL + "@" + key.Target.Name))
+		return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+	}
+	hu := sha256.Sum256([]byte(key.URL))
+	hn := sha256.Sum256([]byte(key.Target.Name))
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%x:%x", domain, hu, hn)))
 	return filepath.Join(dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
 }
 
 // Pull clones or fetches the latest commits for the given git ref and returns
 // the local directory. It also updates the clone cache so subsequent Resolve
-// calls can find the directory without re-cloning.
+// calls can find the directory without re-cloning. A pinned (tag) ref is
+// fetched on the same cadence as a branch one — a re-cut release reaches the
+// clone.
 // For local refs it is a no-op and returns filepath.Dir(ref.Path).
 //
 // Pull is only ever called by callers holding an operator-configured ref
 // (the source's own root ref — see pkg/taskset/source.go), so it always
 // populates the allowAuth=true (trusted) cache partition, matching what a
-// root-level resolveRef call for the same (url, branch) would use.
+// root-level resolveRef call for the same (url, target) would use.
 func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	if !ref.IsGit() {
 		return filepath.Dir(ref.Path), nil
 	}
-	branch := ref.effectiveBranch()
-	dir := repoCloneDir(r.dataDir, ref.URL, branch, true)
+	key := repoKey{URL: ref.URL, Target: ref.target(), AllowAuth: true}
+	dir := repoCloneDir(r.dataDir, key)
 	// Pull always fetches an operator-owned root ref (allowAuth=true by
 	// construction — see this method's doc comment), so token_env only ever
 	// needs the allowlist check, never gatedTokenEnv's allowAuth gate. This
@@ -714,36 +724,33 @@ func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
 	// itself as covering (security review of #753's first draft: this path
 	// was missed entirely, so a root ref's token_env went unchecked).
 	effectiveTokenEnv := r.applyTokenEnvAllowlist(ref.URL, ref.Auth.TokenEnv)
-	if err := cloneOrPull(ctx, dir, ref.URL, branch, effectiveTokenEnv); err != nil {
-		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, branch, err)
+	if err := gitops.CloneAtRef(ctx, dir, ref.URL, key.Target.refName(), gitops.HTTPAuth(effectiveTokenEnv)); err != nil {
+		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, key.Target, err)
 	}
-	key := repoKey{URL: ref.URL, Branch: branch, AllowAuth: true}
 	r.mu.Lock()
 	r.clones[key] = dir
 	r.mu.Unlock()
 	return dir, nil
 }
 
-// ensureClone returns the local dir for (url, branch), cloning if necessary.
+// ensureClone returns the local dir for key, cloning if necessary.
 // Within a single resolution pass it deduplicates: once a repo is cloned the
 // cached path is returned without a second network round-trip.
 // Use Pull to force a fetch from the remote.
 //
-// allowAuth also selects which trust-tier cache partition (and physical
+// key.AllowAuth also selects which trust-tier cache partition (and physical
 // directory, via repoCloneDir) this call reads and writes — see repoKey's
 // doc comment. ensureClone re-derives the effective token itself via
 // gatedTokenEnv rather than trusting the caller to have already gated
-// tokenEnv against the same allowAuth: passing the ref's raw, ungated
-// auth.token_env alongside allowAuth=false is always safe, by construction,
+// tokenEnv against the same tier: passing the ref's raw, ungated
+// auth.token_env alongside AllowAuth=false is always safe, by construction,
 // regardless of what any other call site does or how it evolves (#740).
 //
 // A token that survives gatedTokenEnv is then checked against
 // r.allowedTokenEnvs (#753): even a ref trusted enough to carry auth can
 // only name a variable the operator has explicitly allowlisted via
 // source_security.allowed_token_envs. An unset allowlist is unrestricted.
-func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string, allowAuth bool) (string, error) {
-	key := repoKey{URL: url, Branch: branch, AllowAuth: allowAuth}
-
+func (r *Resolver) ensureClone(ctx context.Context, key repoKey, tokenEnv string) (string, error) {
 	r.mu.Lock()
 	if dir, ok := r.clones[key]; ok {
 		r.mu.Unlock()
@@ -751,17 +758,17 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	}
 	r.mu.Unlock()
 
-	effectiveTokenEnv, blocked := gatedTokenEnv(allowAuth, tokenEnv)
+	effectiveTokenEnv, blocked := gatedTokenEnv(key.AllowAuth, tokenEnv)
 	if blocked {
 		r.log.Warn("taskset: ignoring ref.auth.token_env on a ref discovered outside operator-owned config — credentials are only honoured on dicode.yaml sources and a source's root taskset (#740)",
-			zap.String("url", url))
+			zap.String("url", key.URL))
 	}
-	effectiveTokenEnv = r.applyTokenEnvAllowlist(url, effectiveTokenEnv)
+	effectiveTokenEnv = r.applyTokenEnvAllowlist(key.URL, effectiveTokenEnv)
 
-	dir := repoCloneDir(r.dataDir, url, branch, allowAuth)
+	dir := repoCloneDir(r.dataDir, key)
 
-	if err := cloneOrPull(ctx, dir, url, branch, effectiveTokenEnv); err != nil {
-		return "", fmt.Errorf("clone %s@%s: %w", url, branch, err)
+	if err := gitops.CloneAtRef(ctx, dir, key.URL, key.Target.refName(), gitops.HTTPAuth(effectiveTokenEnv)); err != nil {
+		return "", fmt.Errorf("clone %s@%s: %w", key.URL, key.Target, err)
 	}
 
 	r.mu.Lock()
@@ -771,12 +778,12 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	return dir, nil
 }
 
-// ClonedRepos returns a snapshot of all (url, branch) → localDir mappings.
-// Used by tests and diagnostics. A (url, branch) pair resolved under both
+// ClonedRepos returns a snapshot of all (url, target) → localDir mappings.
+// Used by tests and diagnostics. A (url, target) pair resolved under both
 // trust tiers appears twice, prefixed "untrusted:" for the allowAuth=false
 // entry, since the two never share a directory. The marker is prefixed, not
-// suffixed, so it can never be produced by a url/branch value itself — a
-// suffix (e.g. "@untrusted") is a url/branch-shaped string an operator's own
+// suffixed, so it can never be produced by a url/target value itself — a
+// suffix (e.g. "@untrusted") is a url/ref-shaped string an operator's own
 // branch name could coincidentally end in, which would silently collide two
 // distinct entries into one map key here (a diagnostics-only misreporting,
 // since ClonedRepos has no production caller — not the trust-boundary break
@@ -786,7 +793,7 @@ func (r *Resolver) ClonedRepos() map[string]string {
 	defer r.mu.Unlock()
 	out := make(map[string]string, len(r.clones))
 	for k, v := range r.clones {
-		name := k.URL + "@" + k.Branch
+		name := k.URL + "@" + k.Target.String()
 		if !k.AllowAuth {
 			name = "untrusted:" + name
 		}

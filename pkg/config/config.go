@@ -617,10 +617,11 @@ func applyDefaults(cfg *Config, configDir string) {
 			continue
 		}
 		entry.Ref.Path = expand(entry.Ref.Path)
-		// Apply defaults for git refs.
+		// Apply defaults for git refs. A pinned ref must not also carry a
+		// branch — validate() rejects that pair.
 		if entry.Ref.IsGit() {
-			if entry.Ref.Branch == "" {
-				entry.Ref.Branch = "main"
+			if entry.Ref.Branch == "" && !entry.Ref.IsPinned() {
+				entry.Ref.Branch = taskset.DefaultBranch
 			}
 			if entry.Ref.PollInterval == 0 {
 				entry.Ref.PollInterval = 30 * time.Second
@@ -739,6 +740,9 @@ func (cfg *Config) validate() error {
 				// URL is present (checked by IsGit); validate its scheme.
 				if err := taskset.ValidateRefURL("dicode.yaml", name, entry.Ref.URL); err != nil {
 					return err
+				}
+				if err := taskset.ValidateRefTarget(entry.Ref); err != nil {
+					return fmt.Errorf("dicode.yaml: entry %q: %w", name, err)
 				}
 			} else if entry.Ref.Path == "" {
 				return fmt.Errorf("spec.entries[%q]: ref.path is required for local entries", name)

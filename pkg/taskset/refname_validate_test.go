@@ -93,3 +93,23 @@ func TestValidateBranchName_RejectsBadPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateTagName covers the ref-format rules a pin is held to, and that
+// an ordinary release tag passes them.
+func TestValidateTagName(t *testing.T) {
+	for _, tag := range []string{"v1.0.0", "release/2026-09-01", "v1.0.0-rc.1"} {
+		if err := ValidateTagName(tag); err != nil {
+			t.Errorf("ValidateTagName(%q) = %v, want nil", tag, err)
+		}
+	}
+	for _, tag := range []string{"", "v1..0", "-v1", "v1 0", "v1^", "tags/.hidden", "v1.lock", "@"} {
+		err := ValidateTagName(tag)
+		if err == nil {
+			t.Errorf("ValidateTagName(%q) = nil, want rejection", tag)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidTagName) {
+			t.Errorf("ValidateTagName(%q) = %v, want ErrInvalidTagName", tag, err)
+		}
+	}
+}

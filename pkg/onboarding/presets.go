@@ -4,11 +4,14 @@ package onboarding
 // wizard offers. Each preset maps to a single entry under `spec.entries` in
 // the generated dicode.yaml.
 type TaskSetPreset struct {
-	Name      string // unique namespace segment; used as the source's `name`
-	Label     string // shown in the UI
-	Desc      string // one-line description for the UI
-	URL       string // git URL
+	Name  string // unique namespace segment; used as the source's `name`
+	Label string // shown in the UI
+	Desc  string // one-line description for the UI
+	URL   string // git URL
+	// Branch tracks a moving head; Tag pins the preset to one release. Set
+	// exactly one — a ref carrying both is a config-load error.
 	Branch    string
+	Tag       string
 	EntryPath string // path within repo to taskset.yaml
 	DefaultOn bool   // pre-checked in the wizard
 }

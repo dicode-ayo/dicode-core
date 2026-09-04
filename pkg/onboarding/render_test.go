@@ -11,6 +11,7 @@ type renderedEntry struct {
 	Ref struct {
 		URL    string `yaml:"url"`
 		Branch string `yaml:"branch"`
+		Tag    string `yaml:"tag"`
 		Path   string `yaml:"path"`
 	} `yaml:"ref"`
 }
@@ -202,5 +203,34 @@ func TestRenderConfig_YAMLInjectionSafe(t *testing.T) {
 	}
 	if _, ok := doc["evil"]; ok {
 		t.Error("YAML injection via DataDir succeeded")
+	}
+}
+
+// TestRenderConfig_PinnedPresetRendersTagNotBranch keeps a pinned preset's
+// generated entry loadable: rendering both keys would make the wizard's own
+// output a config-load error.
+func TestRenderConfig_PinnedPresetRendersTagNotBranch(t *testing.T) {
+	original := TaskSetPresets
+	t.Cleanup(func() { TaskSetPresets = original })
+	TaskSetPresets = []TaskSetPreset{{
+		Name:      "buildin",
+		URL:       "https://example.com/repo",
+		Tag:       "v0.1.0",
+		EntryPath: "taskset.yaml",
+	}}
+
+	rc := parseRendered(t, RenderConfig(Result{
+		TaskSetsEnabled: map[string]bool{"buildin": true},
+		DataDir:         "/tmp/d",
+		Port:            8080,
+		Passphrase:      "p",
+	}))
+
+	ref := rc.Spec.Entries["buildin"].Ref
+	if ref.Tag != "v0.1.0" {
+		t.Errorf("rendered tag = %q, want %q", ref.Tag, "v0.1.0")
+	}
+	if ref.Branch != "" {
+		t.Errorf("rendered branch = %q on a pinned preset, want it omitted", ref.Branch)
 	}
 }
