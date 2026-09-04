@@ -501,6 +501,72 @@ func TestApproveIfHashMatch(t *testing.T) {
 	}
 }
 
+// TestPendingEnabledReflectsResolvedFlag is a regression for #822: a
+// disabled task (task.yaml or a taskset override — reflected here via
+// task.Kinded's resolved Enabled, set by the resolver before Admit ever
+// sees it) is still held pending like any other unapproved task, but the
+// gate must be able to report that it's disabled so a pending listing (or
+// notify hook) can tell the two cases apart.
+func TestPendingEnabledReflectsResolvedFlag(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	if _, ok := g.PendingEnabled("repo/deploy"); ok {
+		t.Fatal("PendingEnabled before Admit must report not-pending")
+	}
+
+	root := t.TempDir()
+	disabled := writeTaskDir(t, root, "repo/deploy", "x")
+	disabled.Enabled = false
+	if armed, _ := g.Admit(disabled); armed {
+		t.Fatal("disabled task must still be held pending, not skipped")
+	}
+	if enabled, ok := g.PendingEnabled("repo/deploy"); !ok || enabled {
+		t.Fatalf("PendingEnabled = (%v, %v), want (false, true) for a disabled task", enabled, ok)
+	}
+	if !g.IsPending("repo/deploy") {
+		t.Fatal("disabled task must appear in the pending set")
+	}
+
+	enabledSpec := writeTaskDir(t, root, "repo/other", "y")
+	enabledSpec.Enabled = true
+	if armed, _ := g.Admit(enabledSpec); armed {
+		t.Fatal("expected pending")
+	}
+	if enabled, ok := g.PendingEnabled("repo/other"); !ok || !enabled {
+		t.Fatalf("PendingEnabled = (%v, %v), want (true, true) for an enabled task", enabled, ok)
+	}
+}
+
+// TestAdmittedEnabledTracksMostRecentAdmit is a regression for #822: `dicode
+// task approve` needs to know whether the task it just approved is disabled
+// so it can avoid claiming "triggers armed" for one that arms none.
+func TestAdmittedEnabledTracksMostRecentAdmit(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	if _, ok := g.AdmittedEnabled("repo/deploy"); ok {
+		t.Fatal("AdmittedEnabled before any Admit must report unknown")
+	}
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	spec.Enabled = false
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if enabled, ok := g.AdmittedEnabled("repo/deploy"); !ok || enabled {
+		t.Fatalf("AdmittedEnabled = (%v, %v), want (false, true)", enabled, ok)
+	}
+
+	// Re-admitted enabled (e.g. the operator flips the override back on) —
+	// AdmittedEnabled must track the latest resolution, not the first one.
+	spec.Enabled = true
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if enabled, ok := g.AdmittedEnabled("repo/deploy"); !ok || !enabled {
+		t.Fatalf("AdmittedEnabled = (%v, %v), want (true, true) after re-enabling", enabled, ok)
+	}
+}
+
 func TestApproveIfHashMismatchRejected(t *testing.T) {
 	g, arm, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")

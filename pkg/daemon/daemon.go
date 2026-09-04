@@ -667,6 +667,20 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 			return
 		}
 		disarm(k.TaskID())
+		if !k.IsEnabled() {
+			// The task is disabled (task.yaml or a taskset/dicode.yaml
+			// override): the trigger engine registers it with zero triggers
+			// regardless of approval state (matches "task registered
+			// (disabled — no triggers scheduled)" in pkg/trigger/engine.go),
+			// so there is nothing here for an operator to act on urgently.
+			// Still held pending — re-enabling it later still requires
+			// review — but that's routine bookkeeping, not a WARN-worthy
+			// hold; SetPendingHook's approvalNotifier skips notify_task for
+			// the same reason (#822).
+			log.Info("task registered (disabled), held pending approval — nothing would arm even once approved",
+				zap.String("task", k.TaskID()))
+			return
+		}
 		log.Warn("task held pending approval — triggers not armed",
 			zap.String("task", k.TaskID()),
 			zap.String("hint", "set approval.sources.<source>.trust: always or approval.tasks.<id>.trust: always in dicode.yaml, or approve the task"))
@@ -826,6 +840,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	}
 	approvalGate.SetPendingHook(func(k task.Kinded, hash string) {
 		id := k.TaskID()
+		enabled := k.IsEnabled()
 		// The reconciler goroutine drives the hook; never let notification work
 		// block it, and never let a notify failure crash the daemon.
 		go func() {
@@ -835,7 +850,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 						zap.String("task", id), zap.Any("panic", r))
 				}
 			}()
-			notifier.notify(id, hash)
+			notifier.notify(id, hash, enabled)
 		}()
 	})
 	// Notify on suspend (and on a suspended conversation's end) so the operator
@@ -901,6 +916,9 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 
 	// `dicode task approve` — the control socket is a trusted local channel.
 	ctrlSrv.SetTaskApprover(approvalGate.Approve)
+	// Lets cli.task.approve report accurately whether the approval actually
+	// armed any triggers — a disabled task arms none regardless (#822).
+	ctrlSrv.SetTaskEnabled(approvalGate.AdmittedEnabled)
 
 	// `dicode task pending` + `dicode list` annotation — surface the tasks the
 	// gate is holding so a headless operator can discover an id to approve.
@@ -909,7 +927,8 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 		out := make([]ipc.PendingTask, 0, len(ids))
 		for _, id := range ids {
 			hash, _ := approvalGate.PendingHash(id)
-			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash})
+			enabled, _ := approvalGate.PendingEnabled(id)
+			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash, Enabled: enabled})
 		}
 		return out
 	})

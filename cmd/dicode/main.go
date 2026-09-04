@@ -629,9 +629,16 @@ func cmdTaskPending(c *ipc.ControlClient) error {
 		fmt.Println("no tasks pending approval")
 		return nil
 	}
-	fmt.Printf("%-40s %s\n", "TASK ID", "HASH")
+	fmt.Printf("%-40s %-16s %s\n", "TASK ID", "HASH", "STATUS")
 	for _, t := range tasks {
-		fmt.Printf("%-40s %s\n", t.TaskID, t.Hash)
+		status := ""
+		if !t.Enabled {
+			// Nothing would arm even once approved (#822) — surface that so
+			// a headless operator doesn't read this row as blocking
+			// something that would otherwise run.
+			status = "disabled — no triggers would arm"
+		}
+		fmt.Printf("%-40s %-16s %s\n", t.TaskID, t.Hash, status)
 	}
 	fmt.Println("\napprove with: dicode task approve <task-id>")
 	return nil
@@ -656,8 +663,19 @@ func cmdTaskApprove(c *ipc.ControlClient, args []string) error {
 	if err := remarshal(resp.Result, &r); err != nil {
 		return err
 	}
-	fmt.Printf("Task %q approved — triggers armed, hash recorded in dicode.lock.\n", r.TaskID)
+	fmt.Print(approveMessage(r.TaskID, r.Enabled))
 	return nil
+}
+
+// approveMessage renders cmdTaskApprove's confirmation. A disabled task
+// (task.yaml or a taskset override) is registered by the trigger engine with
+// zero triggers regardless of approval state (#822), so "triggers armed"
+// would be false for it — say what actually happened instead.
+func approveMessage(taskID string, enabled bool) string {
+	if !enabled {
+		return fmt.Sprintf("Task %q approved (task is disabled — nothing armed), hash recorded in dicode.lock.\n", taskID)
+	}
+	return fmt.Sprintf("Task %q approved — triggers armed, hash recorded in dicode.lock.\n", taskID)
 }
 
 func cmdTaskTest(c *ipc.ControlClient, args []string) error {

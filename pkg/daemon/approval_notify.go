@@ -22,9 +22,24 @@ type approvalNotifier struct {
 // notify runs the broadcast + (optional) notify-task fire for one pending
 // transition. It never returns an error: notification is best-effort and must
 // not affect gate or reconciler behavior. Safe to call from a goroutine.
-func (n approvalNotifier) notify(taskID, hash string) {
+//
+// enabled is the task's resolved enabled flag (task.yaml or a taskset
+// override). The dashboard broadcast always fires — a disabled-but-pending
+// task's row still needs to update live — but notify_task is skipped when
+// enabled is false: the trigger engine registers a disabled task with zero
+// triggers regardless of approval state, so there is nothing being gated for
+// notify_task's "something you wanted to run isn't running" to be about
+// (#822).
+func (n approvalNotifier) notify(taskID, hash string, enabled bool) {
 	if n.broadcast != nil {
 		n.broadcast(taskID, hash)
+	}
+	if !enabled {
+		// Held pending is still accurate bookkeeping (re-enabling it later
+		// still requires review) but nothing is being kept from running, so
+		// notify_task would be a false alarm. Gate/daemon already log this
+		// case at INFO rather than the WARN a real hold gets.
+		return
 	}
 	if n.notifyTask == "" {
 		// Gate already logged the remediation hint (WARN) on hold.

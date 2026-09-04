@@ -50,6 +50,12 @@ type ControlServer struct {
 	// Nil when the gate is not configured (tests).
 	taskApprover func(taskID string) error
 
+	// taskEnabled looks up a just-approved task's resolved enabled flag,
+	// wired via SetTaskEnabled to the approval gate's AdmittedEnabled. Nil
+	// (tests, or a lookup miss) makes cli.task.approve report Enabled: true,
+	// matching the historical unconditional "triggers armed" wording.
+	taskEnabled func(taskID string) (enabled, ok bool)
+
 	// pendingApprovals reports the tasks the approval gate is holding (id +
 	// full content hash), wired via SetPendingApprovals. Nil when the gate is
 	// not configured (tests) — cli.task.pending then reports an empty list.

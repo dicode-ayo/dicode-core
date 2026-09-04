@@ -24,7 +24,7 @@ func TestApprovalNotifyFiresWithParams(t *testing.T) {
 		},
 	}
 
-	n.notify("repo/deploy", "abc123")
+	n.notify("repo/deploy", "abc123", true)
 
 	if len(broadcasts) != 1 || broadcasts[0] != [2]string{"repo/deploy", "abc123"} {
 		t.Fatalf("broadcasts = %v", broadcasts)
@@ -68,7 +68,7 @@ func TestApprovalNotifyBodyOmitsEmptyApproveURL(t *testing.T) {
 		},
 	}
 
-	n.notify("repo/deploy", "abc123")
+	n.notify("repo/deploy", "abc123", true)
 
 	if len(fires) != 1 {
 		t.Fatalf("fires = %v, want 1", fires)
@@ -92,7 +92,7 @@ func TestApprovalNotifyEmptyNotifyTaskBroadcastsOnly(t *testing.T) {
 		fire:       func(string, map[string]string) error { fired = true; return nil },
 	}
 
-	n.notify("repo/deploy", "abc123")
+	n.notify("repo/deploy", "abc123", true)
 
 	if broadcasts != 1 {
 		t.Fatalf("broadcasts = %d, want 1", broadcasts)
@@ -114,7 +114,7 @@ func TestApprovalNotifyMintFailureStillFiresEmptyURL(t *testing.T) {
 		},
 	}
 
-	n.notify("repo/deploy", "abc123")
+	n.notify("repo/deploy", "abc123", true)
 
 	if len(fires) != 1 {
 		t.Fatalf("fires = %v, want 1 even when mint fails", fires)
@@ -132,12 +132,55 @@ func TestApprovalNotifyFireFailureDoesNotPanic(t *testing.T) {
 		fire:       func(string, map[string]string) error { return errors.New("task pending approval") },
 	}
 	// Must not panic; failure is swallowed (logged).
-	n.notify("repo/deploy", "abc123")
+	n.notify("repo/deploy", "abc123", true)
 }
 
 func TestApprovalNotifyNilDepsNoPanic(t *testing.T) {
 	// Degrade gracefully if any dependency is nil (defensive against wiring
 	// order / partial construction).
-	(approvalNotifier{notifyTask: "buildin/notify"}).notify("repo/deploy", "h")
-	(approvalNotifier{}).notify("repo/deploy", "h")
+	(approvalNotifier{notifyTask: "buildin/notify"}).notify("repo/deploy", "h", true)
+	(approvalNotifier{}).notify("repo/deploy", "h", true)
+}
+
+// TestApprovalNotifyDisabledTaskSkipsNotifyTask is the regression for #822:
+// a disabled task arms no triggers regardless of approval, so notify_task —
+// "something you wanted to run isn't running" — must not fire for it. The
+// dashboard broadcast still fires so a disabled-but-pending row updates live.
+func TestApprovalNotifyDisabledTaskSkipsNotifyTask(t *testing.T) {
+	var broadcasts int
+	var fired bool
+	n := approvalNotifier{
+		notifyTask: "buildin/notify",
+		broadcast:  func(string, string) { broadcasts++ },
+		mintLink:   func(string) (string, error) { return "https://host/approve/tok123", nil },
+		fire:       func(string, map[string]string) error { fired = true; return nil },
+	}
+
+	n.notify("repo/deploy", "abc123", false)
+
+	if broadcasts != 1 {
+		t.Fatalf("broadcasts = %d, want 1 (dashboard row must still update)", broadcasts)
+	}
+	if fired {
+		t.Fatal("notify_task must not fire for a disabled task")
+	}
+}
+
+// TestApprovalNotifyEnabledTaskStillFiresNotifyTask guards against a change
+// that accidentally suppresses notify_task for every task rather than only
+// disabled ones.
+func TestApprovalNotifyEnabledTaskStillFiresNotifyTask(t *testing.T) {
+	var fired bool
+	n := approvalNotifier{
+		notifyTask: "buildin/notify",
+		broadcast:  func(string, string) {},
+		mintLink:   func(string) (string, error) { return "", nil },
+		fire:       func(string, map[string]string) error { fired = true; return nil },
+	}
+
+	n.notify("repo/deploy", "abc123", true)
+
+	if !fired {
+		t.Fatal("notify_task must still fire for an enabled pending task")
+	}
 }

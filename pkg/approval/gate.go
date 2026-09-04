@@ -372,6 +372,37 @@ func (g *Gate) PendingHash(id string) (string, bool) {
 	return ent.hash, true
 }
 
+// PendingEnabled reports the resolved enabled flag observed when id was held
+// pending, and whether id is pending at all. False means the task is
+// disabled (task.yaml or a taskset/dicode.yaml override) — the trigger
+// engine registers it with zero triggers regardless of approval state
+// (#822), so a pending listing can surface that instead of implying the
+// hold is blocking something that would otherwise run.
+func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ent, ok := g.pending[id]
+	if !ok {
+		return false, false
+	}
+	return ent.kinded.IsEnabled(), true
+}
+
+// AdmittedEnabled reports the resolved enabled flag of the most recently
+// admitted task with the given id, and whether the gate has admitted one at
+// all. Used by `dicode task approve` to report accurately whether an
+// approval actually armed any triggers: a disabled task arms none
+// regardless of approval (#822).
+func (g *Gate) AdmittedEnabled(id string) (enabled, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	k, ok := g.admitted[id]
+	if !ok {
+		return false, false
+	}
+	return k.IsEnabled(), true
+}
+
 // FireGuard vetoes any fire of a task whose current on-disk content is not
 // approved. Wired into the trigger engine so manual / chain / replay paths —
 // which resolve tasks from the registry rather than from armed triggers —

@@ -42,6 +42,31 @@ func TestTaskPending_SeveralPending(t *testing.T) {
 	}
 }
 
+// TestTaskPending_SurfacesDisabledFlag is the regression for #822: a
+// disabled-but-pending task must be listed with Enabled=false so a headless
+// operator doesn't mistake it for a hold blocking something that would
+// otherwise run.
+func TestTaskPending_SurfacesDisabledFlag(t *testing.T) {
+	cs := newPendingTestServer(func() []PendingTask {
+		return []PendingTask{
+			{TaskID: "repo/deploy", Hash: "abc", Enabled: true},
+			{TaskID: "repo/off", Hash: "def", Enabled: false},
+		}
+	})
+
+	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.task.pending"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	out, ok := res.([]PendingTask)
+	if !ok {
+		t.Fatalf("result type %T", res)
+	}
+	if len(out) != 2 || !out[0].Enabled || out[1].Enabled {
+		t.Fatalf("out = %+v, want [Enabled=true, Enabled=false]", out)
+	}
+}
+
 func TestTaskPending_NonePending(t *testing.T) {
 	cs := newPendingTestServer(func() []PendingTask { return nil })
 

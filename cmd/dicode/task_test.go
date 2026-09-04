@@ -551,6 +551,31 @@ func TestCmdTaskCancel_PrintsConfirmation(t *testing.T) {
 	}
 }
 
+// TestApproveMessage_ReflectsEnabled is the regression for #822: `dicode
+// task approve` on a disabled task must not claim "triggers armed" — the
+// trigger engine registers a disabled task with zero triggers regardless of
+// approval state.
+func TestApproveMessage_ReflectsEnabled(t *testing.T) {
+	enabled := approveMessage("repo/deploy", true)
+	if !strings.Contains(enabled, "triggers armed") {
+		t.Errorf("enabled message = %q, want it to say triggers armed", enabled)
+	}
+	if strings.Contains(enabled, "disabled") {
+		t.Errorf("enabled message = %q, must not mention disabled", enabled)
+	}
+
+	disabled := approveMessage("repo/deploy", false)
+	if strings.Contains(disabled, "— triggers armed") {
+		t.Errorf("disabled message = %q, must not claim triggers armed", disabled)
+	}
+	if !strings.Contains(disabled, "disabled") || !strings.Contains(disabled, "nothing armed") {
+		t.Errorf("disabled message = %q, want it to say the task is disabled and nothing armed", disabled)
+	}
+	if !strings.Contains(disabled, `"repo/deploy"`) {
+		t.Errorf("disabled message = %q, want the task id quoted", disabled)
+	}
+}
+
 func TestCmdTaskCancel_MissingArg(t *testing.T) {
 	c, done := dialTestClient(t, &fakeAuthoring{})
 	defer done()

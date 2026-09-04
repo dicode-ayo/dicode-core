@@ -6,6 +6,13 @@ package ipc
 type PendingTask struct {
 	TaskID string `json:"taskID"`
 	Hash   string `json:"hash"`
+	// Enabled is the resolved enabled flag observed when the task was held
+	// pending. False means the task is disabled (task.yaml or a taskset
+	// override) — the trigger engine registers it with zero triggers
+	// regardless of approval state (#822), so an operator reading this
+	// listing can tell "held, and nothing would arm anyway" apart from a
+	// real hold blocking something that would otherwise run.
+	Enabled bool `json:"enabled"`
 }
 
 // SetPendingApprovals wires the approval gate's pending set for cli.task.pending
@@ -26,7 +33,7 @@ func (cs *ControlServer) handleTaskPending() ([]PendingTask, error) {
 	pending := cs.pendingApprovals()
 	out := make([]PendingTask, 0, len(pending))
 	for _, p := range pending {
-		out = append(out, PendingTask{TaskID: p.TaskID, Hash: shortContentHash(p.Hash)})
+		out = append(out, PendingTask{TaskID: p.TaskID, Hash: shortContentHash(p.Hash), Enabled: p.Enabled})
 	}
 	return out, nil
 }
