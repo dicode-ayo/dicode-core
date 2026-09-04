@@ -926,8 +926,17 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 		ids := approvalGate.Pending()
 		out := make([]ipc.PendingTask, 0, len(ids))
 		for _, id := range ids {
-			hash, _ := approvalGate.PendingHash(id)
-			enabled, _ := approvalGate.PendingEnabled(id)
+			// One atomic locked read: two separate PendingHash/PendingEnabled
+			// calls could straddle a concurrent Approve/Forget between them and
+			// report an enabled task as disabled (PendingEnabled's ok=false
+			// zero-values to false). Default enabled=true on a lookup miss too
+			// — id came from the Pending() snapshot above and may have just been
+			// approved/unregistered — mirroring handleTaskApprove's
+			// lookup-miss default in pkg/ipc/control_task_approve.go.
+			hash, enabled, ok := approvalGate.PendingInfo(id)
+			if !ok {
+				enabled = true
+			}
 			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash, Enabled: enabled})
 		}
 		return out

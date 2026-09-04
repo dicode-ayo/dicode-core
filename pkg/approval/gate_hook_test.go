@@ -92,6 +92,60 @@ func TestPendingHookNotFiredForTrustedTask(t *testing.T) {
 	}
 }
 
+// TestPendingHookFiresOnEnabledTransition is a regression for #822: a task
+// that first goes pending while disabled (task.yaml or a taskset override)
+// fires the hook once, but if the operator later flips only the enabled
+// override — without touching the task's content — the hash never changes
+// (enabled is deliberately excluded from ContentHash; see
+// resolvedSecurityFields). Before the fix, Admit's changed condition only
+// looked at the hash, so this re-admit never re-fired the hook and
+// notify_task stayed silent forever for a task that now genuinely blocks
+// real triggers. The hook must fire again here, observably at enabled=true.
+func TestPendingHookFiresOnEnabledTransition(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })
+	var mu sync.Mutex
+	var calls []struct {
+		hash    string
+		enabled bool
+	}
+	g.SetPendingHook(func(k task.Kinded, hash string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, struct {
+			hash    string
+			enabled bool
+		}{hash, k.IsEnabled()})
+	})
+
+	spec := &task.Spec{ID: "repo/deploy", Enabled: false}
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("disabled task must still be held pending")
+	}
+
+	// Operator flips the taskset override to enabled: true. Content — and
+	// therefore hash — is unchanged.
+	spec.Enabled = true
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected still pending")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("hook fired %d times, want 2 (once on the initial hold, once on the enabled transition); calls=%+v", len(calls), calls)
+	}
+	if calls[0].enabled {
+		t.Fatalf("first call enabled = true, want false (initial hold while disabled)")
+	}
+	if !calls[1].enabled {
+		t.Fatalf("second call enabled = false, want true (re-fired on enabled transition)")
+	}
+	if calls[1].hash != "h1" {
+		t.Fatalf("second call hash = %q, want h1 (hash unchanged across the transition)", calls[1].hash)
+	}
+}
+
 func TestPendingHookNilSafe(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })

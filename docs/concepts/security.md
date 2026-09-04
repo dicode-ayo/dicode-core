@@ -930,7 +930,7 @@ gate therefore logs it at `INFO` instead of the `WARN` a real hold gets, and
 isn't running" — is skipped for it, though the dashboard's live
 `approval:pending` broadcast still fires so the row updates without a poll.
 `dicode task pending` marks the row and `dicode task approve` reports
-`"approved (task is disabled — no triggers armed)"` rather than the normal
+`"approved (task is disabled — nothing armed)"` rather than the normal
 `"triggers armed"` wording, since approving a disabled task arms nothing
 (#822).
 

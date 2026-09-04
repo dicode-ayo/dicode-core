@@ -478,6 +478,47 @@ func TestPendingHash(t *testing.T) {
 	}
 }
 
+// TestPendingInfoIsAtomic is a regression for the daemon.go
+// cli.task.pending handler, which used to call PendingHash and
+// PendingEnabled as two separate locked reads: a concurrent Approve/Forget
+// landing between them could make the enabled read report ok=false and
+// silently zero-value enabled to false, mislabeling an enabled task as
+// disabled. PendingInfo must return both fields from a single locked call.
+func TestPendingInfoIsAtomic(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	if _, _, ok := g.PendingInfo("repo/deploy"); ok {
+		t.Fatal("PendingInfo before Admit must report not-pending")
+	}
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+	spec.Enabled = true
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+
+	hash, enabled, ok := g.PendingInfo("repo/deploy")
+	if !ok || !enabled || hash == "" {
+		t.Fatalf("PendingInfo = (%q, %v, %v), want (non-empty, true, true)", hash, enabled, ok)
+	}
+	want, err := ContentHash(spec)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if hash != want {
+		t.Fatalf("PendingInfo hash = %q, want %q", hash, want)
+	}
+
+	// PendingHash/PendingEnabled must agree with PendingInfo (they now
+	// delegate to it).
+	if h, _ := g.PendingHash("repo/deploy"); h != hash {
+		t.Fatalf("PendingHash = %q, want %q", h, hash)
+	}
+	if e, _ := g.PendingEnabled("repo/deploy"); e != enabled {
+		t.Fatalf("PendingEnabled = %v, want %v", e, enabled)
+	}
+}
+
 func TestApproveIfHashMatch(t *testing.T) {
 	g, arm, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")

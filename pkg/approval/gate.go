@@ -81,6 +81,14 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
+	// enabled is the resolved enabled flag observed alongside hash. Tracked
+	// separately from hash because Enabled is deliberately excluded from
+	// ContentHash (see resolvedSecurityFields) — a taskset override can flip
+	// a pending task from disabled to enabled without changing its hash, and
+	// that transition must still re-fire the pending hook: the task goes
+	// from a hold nothing depends on to one that genuinely blocks real
+	// triggers (#822).
+	enabled bool
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -189,11 +197,19 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// than strand pre-existing tasks behind a gate with no approve UI.
 		by = ApprovedByBootstrap
 	default:
+		enabled := k.IsEnabled()
+
 		g.mu.Lock()
 		prev, was := g.pending[id]
 		g.mu.Unlock()
 
-		changed := !was || prev.hash != hash
+		// Re-fire on a genuine hash change, and also whenever the resolved
+		// enabled flag flips while the task stays pending: enabled is
+		// deliberately excluded from ContentHash, so a taskset override that
+		// only flips enabled (e.g. false→true) would otherwise leave a task
+		// that now genuinely blocks real triggers with no notification ever
+		// fired for it (#822).
+		changed := !was || prev.hash != hash || prev.enabled != enabled
 
 		// Resolved on every pend, not only when the hash changes: the recorded
 		// commit is the baseline the next comparison runs from, and one that
@@ -206,7 +222,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash and commit are written together in one critical section: a
 		// concurrent Approve/ApproveIfHash can never observe a pending[id]
 		// whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, enabled: enabled}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -363,13 +379,8 @@ func (g *Gate) IsPending(id string) bool {
 // PendingHash returns the content hash observed when id was held pending,
 // and whether id is pending at all. Approval tokens are bound to this hash.
 func (g *Gate) PendingHash(id string) (string, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	ent, ok := g.pending[id]
-	if !ok {
-		return "", false
-	}
-	return ent.hash, true
+	hash, _, ok := g.PendingInfo(id)
+	return hash, ok
 }
 
 // PendingEnabled reports the resolved enabled flag observed when id was held
@@ -379,13 +390,26 @@ func (g *Gate) PendingHash(id string) (string, bool) {
 // (#822), so a pending listing can surface that instead of implying the
 // hold is blocking something that would otherwise run.
 func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
+	_, enabled, ok = g.PendingInfo(id)
+	return enabled, ok
+}
+
+// PendingInfo returns the content hash and resolved enabled flag observed
+// when id was held pending, and whether id is pending at all, all read under
+// one locked call. Callers that need both fields (e.g. `dicode task pending`)
+// must use this rather than PendingHash + PendingEnabled: two separate locked
+// calls can straddle a concurrent Approve/Forget and observe the id pending
+// for one call but not the other, which — since PendingEnabled then reports
+// ok=false and its zero value false — silently mislabels an enabled task as
+// disabled. See PendingHash/PendingEnabled for field semantics.
+func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	ent, ok := g.pending[id]
 	if !ok {
-		return false, false
+		return "", false, false
 	}
-	return ent.kinded.IsEnabled(), true
+	return ent.hash, ent.kinded.IsEnabled(), true
 }
 
 // AdmittedEnabled reports the resolved enabled flag of the most recently
