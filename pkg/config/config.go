@@ -617,12 +617,11 @@ func applyDefaults(cfg *Config, configDir string) {
 			continue
 		}
 		entry.Ref.Path = expand(entry.Ref.Path)
-		// Apply defaults for git refs. A pinned ref names its own commit, so
-		// defaulting a branch onto it would both contradict the pin and trip
-		// the branch/tag mutual-exclusion check in validate().
+		// Apply defaults for git refs. A pinned ref must not also carry a
+		// branch — validate() rejects that pair.
 		if entry.Ref.IsGit() {
 			if entry.Ref.Branch == "" && !entry.Ref.IsPinned() {
-				entry.Ref.Branch = "main"
+				entry.Ref.Branch = taskset.DefaultBranch
 			}
 			if entry.Ref.PollInterval == 0 {
 				entry.Ref.PollInterval = 30 * time.Second

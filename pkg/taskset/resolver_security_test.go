@@ -131,8 +131,8 @@ func TestRepoCloneDir_TrustTiersNeverShareADirectory(t *testing.T) {
 	url := "https://example.com/private-repo.git"
 	branch := "main"
 
-	trusted := repoCloneDir(dataDir, url, gitTarget{Kind: refBranch, Name: branch}, true)
-	untrusted := repoCloneDir(dataDir, url, gitTarget{Kind: refBranch, Name: branch}, false)
+	trusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: branch}, AllowAuth: true})
+	untrusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: branch}})
 	if trusted == untrusted {
 		t.Fatalf("trusted and untrusted dirs for the same (url, branch) must differ, both got %q", trusted)
 	}
@@ -165,8 +165,8 @@ func TestRepoCloneDir_NoCrossTierCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	url := "https://example.com/private-repo.git"
 
-	trusted := repoCloneDir(dataDir, url, gitTarget{Kind: refBranch, Name: "@untrusted"}, true)
-	untrusted := repoCloneDir(dataDir, url, gitTarget{}, false)
+	trusted := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: refBranch, Name: "@untrusted"}, AllowAuth: true})
+	untrusted := repoCloneDir(dataDir, repoKey{URL: url})
 	if trusted == untrusted {
 		t.Fatalf("trusted dir for branch %q collided with untrusted dir for empty branch: %q", "@untrusted", trusted)
 	}
@@ -189,12 +189,12 @@ func TestEnsureClone_UntrustedCannotReuseAuthenticatedCache(t *testing.T) {
 
 	r := newResolver(t)
 
-	trustedDir, err := r.ensureClone(context.Background(), bare.url, gitTarget{Kind: refBranch, Name: "main"}, 0, "GH_TOKEN", true)
+	trustedDir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "GH_TOKEN")
 	if err != nil {
 		t.Fatalf("trusted ensureClone: %v", err)
 	}
 
-	untrustedDir, err := r.ensureClone(context.Background(), bare.url, gitTarget{Kind: refBranch, Name: "main"}, 0, "", false)
+	untrustedDir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}}, "")
 	if err != nil {
 		t.Fatalf("untrusted ensureClone: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestEnsureClone_TokenEnvAllowlist_BlocksUnlistedVar(t *testing.T) {
 	r := NewResolver(t.TempDir(), false, logger)
 	r.SetAllowedTokenEnvs([]string{"GH_TOKEN"})
 
-	dir, err := r.ensureClone(context.Background(), bare.url, gitTarget{Kind: refBranch, Name: "main"}, 0, "OPENAI_API_KEY", true)
+	dir, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "OPENAI_API_KEY")
 	if err != nil {
 		t.Fatalf("ensureClone: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestEnsureClone_TokenEnvAllowlist_PermitsListedVar(t *testing.T) {
 			r := NewResolver(t.TempDir(), false, logger)
 			r.SetAllowedTokenEnvs(tc.allowlist)
 
-			if _, err := r.ensureClone(context.Background(), bare.url, gitTarget{Kind: refBranch, Name: "main"}, 0, "GH_TOKEN", true); err != nil {
+			if _, err := r.ensureClone(context.Background(), repoKey{URL: bare.url, Target: gitTarget{Kind: refBranch, Name: "main"}, AllowAuth: true}, "GH_TOKEN"); err != nil {
 				t.Fatalf("ensureClone: %v", err)
 			}
 			if n := logs.FilterMessageSnippet("allowed_token_envs allowlist").Len(); n != 0 {
@@ -650,7 +650,7 @@ func TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory(t *testing.T) {
 	for _, kind := range []refKind{refBranch, refTag} {
 		for _, allowAuth := range []bool{true, false} {
 			bucket := fmt.Sprintf("%s/allowAuth=%v", kind, allowAuth)
-			dir := repoCloneDir(dataDir, url, gitTarget{Kind: kind, Name: name}, allowAuth)
+			dir := repoCloneDir(dataDir, repoKey{URL: url, Target: gitTarget{Kind: kind, Name: name}, AllowAuth: allowAuth})
 			if prev, dup := seen[dir]; dup {
 				t.Errorf("%s and %s share clone directory %q for ref name %q", bucket, prev, dir, name)
 			}

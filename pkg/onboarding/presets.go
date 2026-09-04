@@ -9,8 +9,7 @@ type TaskSetPreset struct {
 	Desc  string // one-line description for the UI
 	URL   string // git URL
 	// Branch tracks a moving head; Tag pins the preset to one release. Set
-	// exactly one — the generated dicode.yaml renders whichever is present,
-	// and a ref carrying both is a config-load error.
+	// exactly one — a ref carrying both is a config-load error.
 	Branch    string
 	Tag       string
 	EntryPath string // path within repo to taskset.yaml

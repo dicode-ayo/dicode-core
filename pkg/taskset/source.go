@@ -488,7 +488,7 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	// SSRF guard (#489/#510): enableClone drives a real go-git clone against
 	// a caller-influenced URL (reachable via SetDevMode from pkg/webui/sources.go
 	// and pkg/webui/task_delete.go), so it must go through the same shared
-	// literal-host check as CloneOrPull and ListBranches before any network
+	// literal-host check as CloneAtRef and ListBranches before any network
 	// operation happens — otherwise it's a third, unmitigated SSRF entry point.
 	if err := gitops.ValidateRemoteHost(s.rootRef.URL); err != nil {
 		return "", fmt.Errorf("validate remote host: %w", err)

@@ -346,7 +346,7 @@ spec:
 // item 2: enableClone (reached via SetDevMode from pkg/webui/sources.go and
 // pkg/webui/task_delete.go) drove a real go-git PlainCloneContext against
 // s.rootRef.URL with zero host validation — a third, unmitigated SSRF entry
-// point alongside CloneOrPull and ListBranches (#489). This proves a
+// point alongside CloneAtRef and ListBranches (#489). This proves a
 // malicious ssh/scp-shorthand rootRef.URL is rejected before any clone is
 // attempted: no clone directory should ever be created on disk.
 func TestSetDevMode_Branch_RejectsSSRFHost(t *testing.T) {

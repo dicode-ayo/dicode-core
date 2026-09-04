@@ -2882,7 +2882,7 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		branch, tag := strings.TrimSpace(body.Branch), strings.TrimSpace(body.Tag)
 		// Mirrors applyDefaults: a pinned ref must not also carry a branch.
 		if branch == "" && tag == "" {
-			branch = "main"
+			branch = taskset.DefaultBranch
 		}
 		ref = taskset.Ref{
 			URL:          url,

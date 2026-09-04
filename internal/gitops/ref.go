@@ -102,6 +102,8 @@ func syncToRef(ctx context.Context, dir string, ref plumbing.ReferenceName, auth
 		// a mistyped ref.
 		return fmt.Errorf("resolve fetched %s: %w", ref, err)
 	}
+	// An unreadable HEAD falls through to the reset rather than failing: the
+	// skip is an optimization, and redoing a checkout is always safe.
 	head, err := repo.Head()
 	if err == nil && head.Hash() == *hash {
 		return nil
@@ -129,7 +131,7 @@ func fetchRef(ctx context.Context, repo *gogit.Repository, ref plumbing.Referenc
 	if auth != nil {
 		opts.Auth = auth
 	}
-	if err := repo.FetchContext(ctx, opts); err != nil && err != gogit.NoErrAlreadyUpToDate {
+	if err := repo.FetchContext(ctx, opts); err != nil && !errors.Is(err, gogit.NoErrAlreadyUpToDate) {
 		if isMissingRef(err) {
 			return fmt.Errorf("%w: %s", ErrRefNotFound, ref)
 		}

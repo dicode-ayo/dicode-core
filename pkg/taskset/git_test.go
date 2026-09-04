@@ -108,12 +108,12 @@ func countCommits(t *testing.T, dir string) int {
 	return n
 }
 
-// TestCloneOrPull_FetchesFullHistory guards against the #175 regression:
+// TestCloneAtRef_FetchesFullHistory guards against the #175 regression:
 // a shallow (Depth:1) clone silently stalls on `object not found` when
 // the remote advances past the shallow tip. A full clone has the
 // ancestry it needs to fast-forward cleanly. If this test sees only 1
 // commit the clone has reverted to shallow.
-func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
+func TestCloneAtRef_FetchesFullHistory(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commit(t, "a", "one", "commit 1")
 	bare.commit(t, "b", "two", "commit 2")
@@ -129,7 +129,7 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 	}
 }
 
-// TestCloneOrPull_RecoversCorruptedClone reproduces the shape users
+// TestCloneAtRef_RecoversCorruptedClone reproduces the shape users
 // hit when upgrading from a dicode build that did shallow clones
 // (Depth: 1) to a current build: the on-disk clone is stuck in a
 // state go-git's PullContext can't reconcile, and every subsequent
@@ -146,7 +146,7 @@ func TestCloneOrPull_FetchesFullHistory(t *testing.T) {
 // corrupt the clone's object DB — deleting the packfiles forces
 // go-git's pull to fail with a missing-object error of the same
 // signature.
-func TestCloneOrPull_RecoversCorruptedClone(t *testing.T) {
+func TestCloneAtRef_RecoversCorruptedClone(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commit(t, "a", "one", "commit 1")
 
@@ -228,11 +228,11 @@ func TestIsReclonableError(t *testing.T) {
 
 func errorsNew(s string) error { return fmt.Errorf("%s", s) }
 
-// TestCloneOrPull_PullAfterRemoteAdvance ensures the second call — the
-// pull path — succeeds against a remote that has received new commits
+// TestCloneAtRef_RefreshAfterRemoteAdvance ensures the second call — the
+// refresh path — succeeds against a remote that has received new commits
 // since the initial clone. Under the old Depth:1 scheme this was the
 // exact path that produced "pull: object not found" in production.
-func TestCloneOrPull_PullAfterRemoteAdvance(t *testing.T) {
+func TestCloneAtRef_RefreshAfterRemoteAdvance(t *testing.T) {
 	bare := newSeededBareRepo(t)
 	bare.commit(t, "a", "one", "commit 1")
 

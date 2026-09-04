@@ -76,6 +76,10 @@ func SourceID(name string, ref *Ref) string {
 	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
+// DefaultBranch is the branch a git ref tracks when it names neither a branch
+// nor a tag.
+const DefaultBranch = "main"
+
 // refKind is the ref namespace a git target lives in. Both kinds refresh the
 // same way, but the namespace selects the refspec and keeps a branch and a tag
 // of one name from resolving to each other.
@@ -88,12 +92,24 @@ const (
 	refTag
 )
 
-func (k refKind) String() string {
-	if k == refTag {
-		return "tag"
-	}
-	return "branch"
+// refKinds holds everything that varies per namespace: the label used in
+// messages and cache keys, the reference prefix, and the clone-directory
+// domain for each trust tier. An empty trustedDomain marks the bucket whose
+// seed predates the others and must not change — see repoCloneDir.
+//
+// A new refKind needs a complete entry here. TestRefKinds_AllComplete and
+// TestRepoCloneDir_EveryKindAndTierGetsItsOwnDirectory both fail without one.
+var refKinds = map[refKind]struct {
+	label           string
+	prefix          string
+	trustedDomain   string
+	untrustedDomain string
+}{
+	refBranch: {"branch", "refs/heads/", "", "dicode-untrusted-clone-v1"},
+	refTag:    {"tag", "refs/tags/", "dicode-tag-clone-v1", "dicode-untrusted-tag-clone-v1"},
 }
+
+func (k refKind) String() string { return refKinds[k].label }
 
 // gitTarget names the remote ref a clone tracks: Kind the namespace, Name the
 // ref within it.
@@ -124,12 +140,12 @@ func (r *Ref) target() gitTarget {
 	if r.Branch != "" {
 		return gitTarget{Kind: refBranch, Name: r.Branch}
 	}
-	return gitTarget{Kind: refBranch, Name: "main"}
+	return gitTarget{Kind: refBranch, Name: DefaultBranch}
 }
 
 // TrackedName returns the branch or tag this ref follows, defaulting to
-// "main". Callers that need something to fork a dev branch from want this
-// rather than Branch, which is empty on a pinned ref.
+// DefaultBranch. Branch is empty on a pinned ref, so callers that need something to
+// fork a dev branch from must use this.
 func (r *Ref) TrackedName() string { return r.target().Name }
 
 // effectivePoll returns the poll interval, defaulting to 30s.

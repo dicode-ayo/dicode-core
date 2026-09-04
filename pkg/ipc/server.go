@@ -383,8 +383,7 @@ type SourceSummary struct {
 	Name string `json:"name"`
 	Type string `json:"type,omitempty"`
 	URL  string `json:"url,omitempty"`
-	// Exactly one of Branch or Tag is set on a git source: a pinned source
-	// tracks a tag, so reporting only Branch would show it as tracking nothing.
+	// Exactly one of Branch or Tag is set on a git source.
 	Branch  string `json:"branch,omitempty"`
 	Tag     string `json:"tag,omitempty"`
 	DevMode bool   `json:"dev_mode"`

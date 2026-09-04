@@ -61,7 +61,7 @@ spec:
 
 A pinned source is polled on the same cadence as any other — only the ref it reads differs, so the branch advancing no longer reaches it. Bumping the pin is an edit to `dicode.yaml`.
 
-**A tag the remote re-points is followed.** Pinning selects which ref a source reads; it does not freeze content. What freezes content is the approval gate: a re-cut release changes the task's content hash, so the task re-pends and will not run until it is approved again, and `dicode.lock` records the version that was. The exception is the `buildin` namespace, which the gate auto-approves — pin that one to a repo you control.
+**A tag the remote re-points is followed.** Pinning selects which ref a source reads; it does not freeze content. What freezes content is the approval gate: a re-cut release changes the task's content hash, so the task re-pends and will not run until it is approved again, and `dicode.lock` records the version that was. The exception is the `buildin` namespace, which the gate auto-approves before any hash check, so a re-cut release there runs without an approval step — pin that one to a repo you control ([#832](https://github.com/dicode-ayo/dicode-core/issues/832)).
 
 Freezing a source against a re-cut tag by not re-reading the ref would have been enforced only by the local clone surviving: a wiped data dir, a fresh machine, or the re-clone recovery path all pick up the tag's current commit. Two daemons on one `dicode.yaml` could then run different commits with nothing to show it. A commit SHA is the honest way to name an exact tree, and `dicode.lock` is the durable record of what was approved.
 
