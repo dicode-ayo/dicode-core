@@ -2024,3 +2024,110 @@ func TestServer_CfgConcurrentReadWrite(t *testing.T) {
 
 	wg.Wait()
 }
+
+// registerParamTask registers a manual task declaring an endpoint (required,
+// no default) and a numeric limit — the shape a fire-time param form has to
+// satisfy.
+func registerParamTask(t *testing.T, reg *registry.Registry, id string) *task.Spec {
+	t.Helper()
+	spec := registerTask(t, reg, id, `return 1`)
+	spec.Params = task.Params{
+		{Name: "endpoint", Required: true},
+		{Name: "limit", Type: "number", Default: "10"},
+	}
+	return spec
+}
+
+// TestAPI_RunTask_WithParams: a fire-time params object reaches the engine
+// coerced to strings, so the browser can do what `dicode run <task> k=v` does.
+func TestAPI_RunTask_WithParams(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerParamTask(t, reg, "param-task")
+
+	body := strings.NewReader(`{"params":{"endpoint":"http://loki:3100","limit":5}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/param-task/run", body)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["runId"] == "" {
+		t.Error("expected runId in response")
+	}
+}
+
+// TestAPI_RunTask_RejectsBadParams: the point of validating at fire time is
+// that the operator gets a correctable error instead of a run that dies in
+// preflight with no logs. Every rejection must name its field.
+func TestAPI_RunTask_RejectsBadParams(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body  string
+		field string
+	}{
+		"missing required": {`{"params":{"limit":5}}`, "endpoint"},
+		"unknown key":      {`{"params":{"endpoit":"typo"}}`, "endpoit"},
+		"wrong type":       {`{"params":{"endpoint":"e","limit":"lots"}}`, "limit"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, reg := newTestServer(t)
+			registerParamTask(t, reg, "param-task")
+
+			req := httptest.NewRequest(http.MethodPost, "/api/tasks/param-task/run",
+				strings.NewReader(tc.body))
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", w.Code, w.Body)
+			}
+			var resp struct {
+				Fields task.ParamErrors `json:"fields"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			found := false
+			for _, fe := range resp.Fields {
+				if fe.Field == tc.field {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no error names %q: %+v", tc.field, resp.Fields)
+			}
+		})
+	}
+}
+
+// TestAPI_RunTask_PipelineParamsMustBeStrings: a pipeline declares no params,
+// so nothing can coerce a number for it — refuse rather than hand a stage
+// Go's rendering of whatever the JSON decoded to.
+func TestAPI_RunTask_PipelineParamsMustBeStrings(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "stage-a", `return 1`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "my-pipeline",
+		Name:       "My Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "stage-a"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/my-pipeline/run",
+		strings.NewReader(`{"params":{"limit":5}}`))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body)
+	}
+}
