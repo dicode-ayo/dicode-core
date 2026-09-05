@@ -245,7 +245,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return err
 	}
-	arm, disarm := newArmDisarm(cfg, eng, gateway, log)
+	arm, disarm := newArmDisarm(cfg, eng, gateway, reg, log)
 
 	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
 	// trust-on-change gate before its triggers arm. Approval records live in
@@ -393,7 +393,7 @@ func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, den
 }
 
 // newArmDisarm builds the arm/disarm pair the approval gate drives (step 7).
-func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
+func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, reg *registry.Registry, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
@@ -428,6 +428,13 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		// mutating it here raced with that read. The override is also
 		// operator config, not shipped content, so the content hash (computed
 		// against k before arm ever ran) should never observe it anyway.
+		//
+		// Both branches below re-register the overridden copy into reg too:
+		// the reconciler already registered the pre-override k there before
+		// ever calling arm, and reg is what GET /api/tasks serves — without
+		// this, the API would keep showing the shipped default / Enabled:
+		// true for these two tasks even once the engine is actually running
+		// the overridden version.
 		if isSpec && spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
 			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
 			for i := range spec.Params {
@@ -437,6 +444,10 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 					override.Params[i].Default = retStr
 					spec = &override
 					k = spec
+					if err := reg.Register(k); err != nil {
+						log.Warn("approval: registry refresh failed after retention override",
+							zap.String("task", spec.ID), zap.Error(err))
+					}
 					break
 				}
 			}
@@ -446,6 +457,10 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 			override.Enabled = false
 			spec = &override
 			k = spec
+			if err := reg.Register(k); err != nil {
+				log.Warn("approval: registry refresh failed after relay-server-body gate",
+					zap.String("task", spec.ID), zap.Error(err))
+			}
 			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
 				zap.String("task", spec.ID))
 		}

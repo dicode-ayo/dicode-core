@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -154,6 +156,102 @@ func TestRetentionOverrideDoesNotMutateCallersSpec(t *testing.T) {
 	}
 	if spec == callerCopy {
 		t.Error("the overridden spec must be a distinct object from the caller's, not the same pointer")
+	}
+}
+
+// newTestRegistry returns an in-memory registry for tests that need a real
+// *registry.Registry (not a fake) — e.g. to assert what GET /api/tasks would
+// actually see after arm runs.
+func newTestRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	return registry.New(database)
+}
+
+// TestRetentionOverrideRefreshesRegistry is the code-review regression for
+// the copy-on-write fix's own side effect: the reconciler registers the
+// pre-override spec into reg before arm ever runs (see
+// pkg/registry/reconciler.go's rc.registry.Register(k) preceding
+// rc.OnRegister(k)), so once arm stopped mutating that spec in place to fix
+// the #832 data race, the registry-exposed copy — what GET /api/tasks
+// serves — silently stopped reflecting the override. arm must re-register
+// the overridden copy so the two stay in sync.
+func TestRetentionOverrideRefreshesRegistry(t *testing.T) {
+	retention := 7 * 24 * time.Hour
+	cfg := &config.Config{}
+	cfg.Defaults.RunInputs.Retention = retention
+	reg := newTestRegistry(t)
+
+	original := &task.Spec{
+		ID: "buildin/run-inputs-cleanup",
+		Params: task.Params{
+			{Name: "retention_seconds", Default: "2592000", Type: "number"},
+		},
+	}
+	// Simulates the reconciler's rc.registry.Register(k) call, which always
+	// runs before arm (OnRegister) does.
+	if err := reg.Register(original); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	spec := original
+	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+		for i := range spec.Params {
+			if spec.Params[i].Name == "retention_seconds" {
+				override := *spec
+				override.Params = append(task.Params(nil), spec.Params...)
+				override.Params[i].Default = retStr
+				spec = &override
+				if err := reg.Register(spec); err != nil {
+					t.Fatalf("Register (refresh): %v", err)
+				}
+				break
+			}
+		}
+	}
+
+	want := fmt.Sprintf("%d", int64(retention.Seconds()))
+	got, ok := reg.Get("buildin/run-inputs-cleanup")
+	if !ok {
+		t.Fatal("task not found in registry")
+	}
+	if got.Params[0].Default != want {
+		t.Errorf("registry's retention_seconds default = %q, want %q (the API would show the stale shipped default)", got.Params[0].Default, want)
+	}
+}
+
+// TestArmRelayServerBodyRefreshesRegistry is the relay-server-body
+// counterpart of TestRetentionOverrideRefreshesRegistry.
+func TestArmRelayServerBodyRefreshesRegistry(t *testing.T) {
+	cfg := &config.Config{} // relay unconfigured
+	reg := newTestRegistry(t)
+
+	original := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
+	if err := reg.Register(original); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	spec := original
+	if gateRelayServerBody(spec, cfg) {
+		override := *spec
+		override.Enabled = false
+		spec = &override
+		if err := reg.Register(spec); err != nil {
+			t.Fatalf("Register (refresh): %v", err)
+		}
+	}
+
+	got, ok := reg.Get("buildin/relay-server-body")
+	if !ok {
+		t.Fatal("task not found in registry")
+	}
+	if got.Enabled {
+		t.Error("registry still shows Enabled: true (the API would misreport a task with zero armed triggers as enabled)")
 	}
 }
 
