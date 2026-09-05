@@ -890,6 +890,196 @@ notify:
 	}
 }
 
+// TestLoadDirWithVars_TaskYmlFallback verifies that a directory containing
+// only task.yml (no task.yaml) still loads. Before this fix, LoadDirWithVars
+// hardcoded the task.yaml basename, so a ref that legitimately resolved to a
+// task.yml-only directory (#765) — e.g. via pkg/taskset/resolver.go's
+// resolveYAMLPath, which accepts task.yml — would pass resolution and
+// kind-detection but then fail here with "open task.yaml ...: no such file
+// or directory", silently never registering.
+func TestLoadDirWithVars_TaskYmlFallback(t *testing.T) {
+	dir := t.TempDir()
+	src := "name: yml-only-task\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars with only task.yml present: %v", err)
+	}
+	if spec.Name != "yml-only-task" {
+		t.Fatalf("spec.Name = %q, want yml-only-task", spec.Name)
+	}
+}
+
+// TestLoadDirWithVars_TaskYamlPreferredOverTaskYml verifies that when both
+// task.yaml and task.yml are present, the conventional task.yaml wins.
+func TestLoadDirWithVars_TaskYamlPreferredOverTaskYml(t *testing.T) {
+	dir := t.TempDir()
+	yaml := "name: from-yaml\nruntime: deno\ntrigger: { manual: true }\n"
+	yml := "name: from-yml\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars: %v", err)
+	}
+	if spec.Name != "from-yaml" {
+		t.Fatalf("spec.Name = %q, want from-yaml (task.yaml must win over task.yml)", spec.Name)
+	}
+}
+
+// TestLoadDirWithVars_SetsManifestFile verifies LoadDirWithVars records which
+// manifest name it actually loaded on Spec.ManifestFile, so a caller that
+// later needs to read-modify-write the on-disk manifest (e.g. pkg/webui's
+// trigger-editing endpoint) can target the exact file this spec came from
+// instead of re-probing and potentially hitting a different sibling
+// manifest with different content (#765 code-review follow-up).
+func TestLoadDirWithVars_SetsManifestFile(t *testing.T) {
+	cases := []struct {
+		name         string
+		manifestName string
+	}{
+		{"task.yaml", "task.yaml"},
+		{"task.yml", "task.yml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := "name: t\nruntime: deno\ntrigger: { manual: true }\n"
+			if err := os.WriteFile(filepath.Join(dir, tc.manifestName), []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			spec, err := LoadDirWithVars(dir, nil)
+			if err != nil {
+				t.Fatalf("LoadDirWithVars: %v", err)
+			}
+			if spec.ManifestFile != tc.manifestName {
+				t.Errorf("spec.ManifestFile = %q, want %q", spec.ManifestFile, tc.manifestName)
+			}
+		})
+	}
+}
+
+// TestReadManifestFile_TargetsExactFile_NotASibling guards the webui
+// read-modify-write path: given spec.ManifestFile from a task actually
+// loaded from task.yml, ReadManifestFile must read that task.yml — never a
+// sibling task.yaml with different content, which ReadManifest's probing
+// would have silently preferred instead.
+func TestReadManifestFile_TargetsExactFile_NotASibling(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: sibling-yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte("name: actual-yml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, data, err := ReadManifestFile(dir, "task.yml")
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	if filepath.Base(path) != "task.yml" {
+		t.Errorf("path = %q, want basename task.yml", path)
+	}
+	if !strings.Contains(string(data), "actual-yml") {
+		t.Errorf("data = %q, want content from task.yml, not the sibling task.yaml", data)
+	}
+}
+
+// TestLoadDirWithVars_NeitherFilePresent verifies the error still names
+// task.yaml (the conventional name) when neither file exists, rather than
+// regressing to a confusing or blank message.
+func TestLoadDirWithVars_NeitherFilePresent(t *testing.T) {
+	dir := t.TempDir()
+	_, err := LoadDirWithVars(dir, nil)
+	if err == nil {
+		t.Fatal("LoadDirWithVars on empty dir: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "task.yaml") {
+		t.Errorf("error = %v; want it to mention task.yaml", err)
+	}
+}
+
+// TestLoadDirWithVars_TaskYamlUnopenable_FallsBackToTaskYml verifies that
+// when task.yaml exists but fails to open for a reason other than
+// not-existing (a symlink escaping the task directory, which os.Root
+// rejects with a non-IsNotExist error — chosen over a permission-bits test
+// since permission checks don't apply to a root-run test process), a valid
+// sibling task.yml still loads rather than surfacing task.yaml's error.
+func TestLoadDirWithVars_TaskYamlUnopenable_FallsBackToTaskYml(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "secret.yaml"), filepath.Join(dir, "task.yaml")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	src := "name: from-yml\nruntime: deno\ntrigger: { manual: true }\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVars: %v", err)
+	}
+	if spec.Name != "from-yml" {
+		t.Fatalf("spec.Name = %q, want from-yml (task.yml must still load past an unopenable task.yaml)", spec.Name)
+	}
+}
+
+// TestLoadDirWithVarsFile_LoadsExactFile verifies LoadDirWithVarsFile opens
+// exactly dir/filename, not a probed task.yaml — the resolver-facing entry
+// point that lets pkg/taskset/resolver.go load the same file it already
+// kind-detected instead of re-deriving a hardcoded task.yaml (#765
+// code-review follow-up).
+func TestLoadDirWithVarsFile_LoadsExactFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: wrong\nruntime: deno\ntrigger: { manual: true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "custom.yml"), []byte("name: right\nruntime: deno\ntrigger: { manual: true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVarsFile(dir, "custom.yml", nil)
+	if err != nil {
+		t.Fatalf("LoadDirWithVarsFile: %v", err)
+	}
+	if spec.Name != "right" {
+		t.Fatalf("spec.Name = %q, want %q (must load the named file, not task.yaml)", spec.Name, "right")
+	}
+}
+
+// TestLoadDirWithVarsFile_RejectsEscapingFilename guards the explicit
+// containment check in openTaskSpecFile: LoadDirWithVarsFile/
+// LoadPipelineDirFile are exported entry points, so a filename that isn't
+// pre-sanitized to a bare basename must be rejected rather than silently
+// escaping dir.
+func TestLoadDirWithVarsFile_RejectsEscapingFilename(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(dir, filepath.Join(outside, "secret.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadDirWithVarsFile(dir, rel, nil); err == nil {
+		t.Fatalf("LoadDirWithVarsFile(%q, %q, nil): expected an error for an escaping filename, got nil", dir, rel)
+	}
+}
+
 // TestLoadDir_ZeroTimeoutPreserved verifies that omitting timeout: in task.yaml
 // leaves spec.Timeout == 0 (no deadline) for both Deno and Python runtimes.
 // The old code coerced zero to 60s for non-container/non-daemon tasks, which
