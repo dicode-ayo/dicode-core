@@ -79,6 +79,17 @@ type Gate struct {
 	// unchanged inventory, and a re-cut tag that does change content pends
 	// exactly like it would for any other pinned source.
 	builtinPinned bool
+
+	// previewFn optionally transforms a task.Kinded before State renders it,
+	// mirroring whatever daemon-config-driven override arm would apply if
+	// this task were approved right now (e.g. a param-default override
+	// scoped to one buildin task ID). Nil-safe: State treats a nil previewFn
+	// as identity. Without this, a pinned buildin task's pending-review
+	// surface can render the as-shipped value Admit first observed rather
+	// than the end state Approve would actually produce (#832 — before a
+	// pinned buildin task could pend, this daemon-layer override only ever
+	// ran on an already-armed task, so State never had reason to need it).
+	previewFn func(task.Kinded) task.Kinded
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
@@ -135,6 +146,12 @@ func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
 // Call once at startup, before Admit runs concurrently — it is not
 // mutex-guarded, mirroring SetHashFunc/SetCommitFunc.
 func (g *Gate) SetBuiltinPinned(pinned bool) { g.builtinPinned = pinned }
+
+// SetPreviewFn installs the transform State applies to a pending task before
+// rendering it (see previewFn's doc comment). Call once at startup, before
+// Admit/State run concurrently — not mutex-guarded, mirroring
+// SetHashFunc/SetCommitFunc/SetBuiltinPinned.
+func (g *Gate) SetPreviewFn(fn func(task.Kinded) task.Kinded) { g.previewFn = fn }
 
 // SetPendingHook installs the operator-notification hook. It is invoked only
 // on the transition into pending — a task newly held, or a held task observed

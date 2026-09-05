@@ -249,6 +249,59 @@ func TestStateNeedsNoBaseline(t *testing.T) {
 	}
 }
 
+// TestStateAppliesPreviewFn is the code-review regression for #832's
+// pending-review surface: a daemon-config-driven override that only used to
+// apply at arm time (once a task was already approved) must also be visible
+// on the pending-review surface for a task that can now pend before ever
+// being armed — otherwise the surface an operator approves from doesn't
+// match the end state Approve actually produces.
+func TestStateAppliesPreviewFn(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetPreviewFn(func(k task.Kinded) task.Kinded {
+		s, ok := k.(*task.Spec)
+		if !ok || s.ID != "repo/preview-me" {
+			return k
+		}
+		override := *s
+		override.Enabled = false
+		return &override
+	})
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/preview-me", "export default () => {}")
+	spec.Enabled = true
+	armed, err := g.Admit(spec)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if armed {
+		t.Fatal("task must be pending for a review state to exist")
+	}
+
+	st, err := g.State("repo/preview-me")
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st.Enabled {
+		t.Error("State must render previewFn's transformed value (Enabled: false), not ent.kinded's raw Enabled: true")
+	}
+	if spec.Enabled != true {
+		t.Error("previewFn must not mutate the pending entry's underlying spec")
+	}
+}
+
+// TestStateNilPreviewFnIsIdentity guards the common case (no daemon wired a
+// preview transform, e.g. every existing test in this package): State must
+// behave exactly as before when previewFn is nil.
+func TestStateNilPreviewFnIsIdentity(t *testing.T) {
+	spec := writeTaskDir(t, t.TempDir(), "repo/no-preview", "export default () => {}")
+	spec.Enabled = true
+	_, st := pendSpec(t, spec)
+
+	if !st.Enabled {
+		t.Error("with no previewFn installed, State must render the pending entry's own Enabled value")
+	}
+}
+
 func TestStateErrorsOnNonPendingTask(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
