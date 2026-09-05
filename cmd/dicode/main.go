@@ -24,6 +24,7 @@
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
+//	auth reset-passphrase           generate a new dashboard passphrase, printed once
 //	webhook sign [flags]            HMAC-sign a webhook body/timestamp, printing
 //	                                the headers a caller needs to hit a protected
 //	                                dicode webhook (no daemon required)
@@ -264,7 +265,7 @@ func printResetBanner(value string) {
 	fmt.Println("║                                                              ║")
 	fmt.Printf("║  %s  ║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
 	fmt.Println("║                                                              ║")
-	fmt.Println("║  Restart dicode (Ctrl-C and `make run` again) for this to    ║")
+	fmt.Println("║  Restart dicode (Ctrl-C, then `dicode daemon`) for this to   ║")
 	fmt.Println("║  take effect — the running WebUI still caches the previous   ║")
 	fmt.Println("║  hash. After restart, log in at /security with this value.   ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
@@ -1777,6 +1778,8 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
+  auth reset-passphrase           generate a new dashboard passphrase and print
+                                  it once; restart the daemon to apply it
   webhook sign [flags]            HMAC-sign a webhook body, printing the
                                   headers to send a protected webhook request
                                   flags: --secret (required), --data,

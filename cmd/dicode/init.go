@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 	"golang.org/x/term"
+	_ "modernc.org/sqlite"
 
 	"github.com/dicode/dicode/pkg/onboarding"
 )
@@ -19,6 +21,16 @@ import (
 // scaffolded repo so the whole taskset directory is self-contained, which is
 // exactly why it must be .gitignored — see writeGitignore.
 const dataDirName = ".dicode"
+
+// dataDBName is the SQLite file onboarding.RenderConfig points database.path
+// at, relative to the data dir. TestRenderConfigDBPathMatchesInit pins the two
+// together.
+const dataDBName = "data.db"
+
+// storedPassphraseKey is pkg/webui's passphraseKVKey, unexported there. A
+// drift between the two only costs this command the sharper of its two
+// closing messages, never correctness.
+const storedPassphraseKey = "auth.passphrase"
 
 const initUsage = `Usage: dicode init [path]
 
@@ -136,7 +148,8 @@ func runInit(args []string, in io.Reader, out, errOut io.Writer, isTTY bool, env
 		}
 	}
 
-	printInitSummary(out, path, configPath, result, ignore != "")
+	printInitSummary(out, path, configPath, result, ignore != "",
+		storedPassphraseDB(resolveConfigPath(result.DataDir, path)))
 	return nil
 }
 
@@ -363,21 +376,61 @@ func writeGitignore(path, line string) error {
 	return nil
 }
 
+// storedPassphraseDB returns the path of the database in dataDir that already
+// holds a dashboard passphrase, or "" when there is none to find — no data
+// dir, no database, no kv table, no row. The daemon reuses such a passphrase
+// silently, so the closing banner must not promise one will be generated and
+// printed on the next start.
+//
+// The database is opened read-only: this command scaffolds a directory and
+// must never create or migrate a database the daemon owns. Every failure
+// (unreadable file, foreign schema, a daemon mid-write) resolves to "", which
+// only costs the sharper message.
+func storedPassphraseDB(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	dbPath := filepath.Join(dataDir, dataDBName)
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	handle, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = handle.Close() }()
+
+	var value string
+	if err := handle.QueryRow(
+		`SELECT value FROM kv WHERE key = ?`, storedPassphraseKey,
+	).Scan(&value); err != nil || value == "" {
+		return ""
+	}
+	return dbPath
+}
+
 // printInitSummary writes the closing banner: where the config went, how the
 // dashboard credential will be obtained, any way the chosen answers undercut
 // the two properties this command exists to provide (a directory that is safe
 // to push, and that still resolves after a clone elsewhere), and the git
 // commands to publish it.
-func printInitSummary(out io.Writer, path, configPath string, res onboarding.Result, dataDirIgnored bool) {
+func printInitSummary(out io.Writer, path, configPath string, res onboarding.Result, dataDirIgnored bool, storedPassphraseDB string) {
 	fmt.Fprintln(out, "━━━ dicode init complete ━━━")
 	fmt.Fprintln(out, "Config written to", configPath)
 	fmt.Fprintln(out)
 	if res.Passphrase == "" {
 		fmt.Fprintln(out, "No dashboard passphrase was generated here — this directory is meant to be")
 		fmt.Fprintln(out, "committed to git, and dicode.yaml has no server.secret to keep it that way.")
-		fmt.Fprintln(out, "The first time you run `dicode daemon` (or `make run`) in this directory,")
-		fmt.Fprintln(out, "a passphrase is generated automatically, its hash stored locally (never in")
-		fmt.Fprintln(out, "dicode.yaml), and the plaintext printed once to that terminal — copy it then.")
+		if storedPassphraseDB != "" {
+			fmt.Fprintln(out, "The data directory carries one over from an earlier install:")
+			fmt.Fprintln(out, "  "+storedPassphraseDB)
+			fmt.Fprintln(out, "`dicode daemon` reuses that passphrase and prints nothing. If you no longer")
+			fmt.Fprintln(out, "have it, start the daemon and run `dicode auth reset-passphrase`.")
+		} else {
+			fmt.Fprintln(out, "The first time you run `dicode daemon` in this directory, a passphrase is")
+			fmt.Fprintln(out, "generated automatically, its hash stored locally (never in dicode.yaml),")
+			fmt.Fprintln(out, "and the plaintext printed once to that terminal — copy it then.")
+		}
 	} else {
 		fmt.Fprintf(out, "Dashboard: http://localhost:%d\n", res.Port)
 		fmt.Fprintln(out, "Login passphrase: the one you entered, stored in dicode.yaml as server.secret.")

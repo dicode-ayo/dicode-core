@@ -337,6 +337,10 @@ func (s *Server) passphraseSource(ctx context.Context) resolvePassphraseSource {
 // stores its bcrypt hash, and prints the *plaintext* to stdout so the
 // operator can record it. The plaintext only ever lives in this stack
 // frame and the operator's terminal scrollback.
+//
+// A passphrase that is already stored is reused as-is: there is no plaintext
+// left to print, so the operator gets a log line pointing at
+// `dicode auth reset-passphrase` instead.
 func (s *Server) ensurePassphrase(ctx context.Context) error {
 	if !s.cfg.Server.Auth {
 		return nil // auth disabled — nothing to do
@@ -357,6 +361,13 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 		s.cachedPassphraseMu.Lock()
 		s.cachedPassphrase = existing
 		s.cachedPassphraseMu.Unlock()
+		// A passphrase carried over from an earlier install — most often a
+		// fresh dicode.yaml pointed at a data dir that already had one — is
+		// otherwise indistinguishable at startup from one just generated and
+		// printed. Naming the recovery path is the only thing standing
+		// between the operator and an auth wall they hold no key to.
+		s.log.Info("auth passphrase already stored — reusing it, nothing generated",
+			zap.String("hint", "run `dicode auth reset-passphrase` if you do not have it"))
 		return nil
 	}
 
