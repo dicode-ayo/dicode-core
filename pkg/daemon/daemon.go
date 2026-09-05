@@ -173,19 +173,20 @@ func isPathUnderDir(path, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// gateRelayServerBody disables the buildin/relay-server-body daemon when the
-// relay is not configured. With trigger.daemon + restart:always the engine would
-// otherwise auto-start it on every daemon, and its `import "npm:dicode-relay/start"`
-// reads process.env beyond the task's declared --allow-env names — throwing
-// NotCapable at import time and crash-looping even where the relay is unused.
-// Disabling before eng.Register keeps the engine from spawning the daemon unless
-// the operator has actually configured the relay. No-op for every other task.
+// gateRelayServerBody reports whether the buildin/relay-server-body daemon
+// must be disabled because the relay is not configured. With trigger.daemon +
+// restart:always the engine would otherwise auto-start it on every daemon,
+// and its `import "npm:dicode-relay/start"` reads process.env beyond the
+// task's declared --allow-env names — throwing NotCapable at import time and
+// crash-looping even where the relay is unused. False for every other task.
+//
+// A pure predicate, not a mutation: the caller (arm) applies the disable to
+// a copy of spec rather than in place, since spec may be the exact object
+// the approval gate keeps live in its pending bookkeeping for a pinned
+// buildin task (#832) — see the retention_seconds override a few lines
+// above arm's call site for the same reasoning.
 func gateRelayServerBody(spec *task.Spec, cfg *config.Config) bool {
-	if spec.ID == "buildin/relay-server-body" && !relayConfigured(cfg) {
-		spec.Enabled = false
-		return true
-	}
-	return false
+	return spec.ID == "buildin/relay-server-body" && !relayConfigured(cfg)
 }
 
 func hasDisplay() bool {
@@ -441,6 +442,10 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 			}
 		}
 		if isSpec && gateRelayServerBody(spec, cfg) {
+			override := *spec
+			override.Enabled = false
+			spec = &override
+			k = spec
 			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
 				zap.String("task", spec.ID))
 		}

@@ -186,21 +186,21 @@ func TestRetentionOverrideSkippedWhenZero(t *testing.T) {
 	}
 }
 
-// TestRelayServerBodyGate exercises the gate the arm closure applies before
-// eng.Register. The configured-relay branch is the load-bearing half — it must
-// NOT disable the task when the operator has set up the relay, or the relay
+// TestRelayServerBodyGate exercises the predicate the arm closure consults
+// before eng.Register. The configured-relay branch is the load-bearing half —
+// it must report false when the operator has set up the relay, or the relay
 // never starts.
 func TestRelayServerBodyGate(t *testing.T) {
 	cases := []struct {
-		name        string
-		enabled     bool
-		serverURL   string
-		wantEnabled bool
+		name         string
+		enabled      bool
+		serverURL    string
+		wantDisabled bool
 	}{
-		{name: "relay unconfigured (default)", wantEnabled: false},
-		{name: "enabled flag but no server url", enabled: true, wantEnabled: false},
-		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantEnabled: false},
-		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantEnabled: true},
+		{name: "relay unconfigured (default)", wantDisabled: true},
+		{name: "enabled flag but no server url", enabled: true, wantDisabled: true},
+		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantDisabled: true},
+		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantDisabled: false},
 	}
 
 	for _, tc := range cases {
@@ -209,26 +209,65 @@ func TestRelayServerBodyGate(t *testing.T) {
 			cfg.Relay.Enabled = tc.enabled
 			cfg.Relay.ServerURL = tc.serverURL
 
-			// SetEnabled defaults to true at resolve time; the gate only flips
-			// it off, never on.
 			spec := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
-			gateRelayServerBody(spec, cfg)
+			got := gateRelayServerBody(spec, cfg)
 
-			if spec.Enabled != tc.wantEnabled {
-				t.Errorf("relay-server-body Enabled = %v, want %v", spec.Enabled, tc.wantEnabled)
+			if got != tc.wantDisabled {
+				t.Errorf("gateRelayServerBody = %v, want %v", got, tc.wantDisabled)
+			}
+			// A pure predicate: never mutates the spec it was handed — see
+			// TestArmRelayServerBodyDoesNotMutateCallersSpec for why (#832).
+			if !spec.Enabled {
+				t.Error("gateRelayServerBody must not mutate the spec it was handed")
 			}
 		})
 	}
 }
 
 // TestRelayServerBodyGateLeavesOtherTasksAlone guards against the gate
-// accidentally disabling unrelated daemon tasks when the relay is off.
+// accidentally reporting true for unrelated daemon tasks when the relay is
+// off.
 func TestRelayServerBodyGateLeavesOtherTasksAlone(t *testing.T) {
 	cfg := &config.Config{} // relay unconfigured
 	spec := &task.Spec{ID: "buildin/relay-client", Enabled: true}
-	gateRelayServerBody(spec, cfg)
-	if !spec.Enabled {
-		t.Error("gate disabled an unrelated task (buildin/relay-client)")
+	if gateRelayServerBody(spec, cfg) {
+		t.Error("gate matched an unrelated task (buildin/relay-client)")
+	}
+}
+
+// TestArmRelayServerBodyDoesNotMutateCallersSpec is the #832 code-review
+// regression for the second in-place mutation the same review pass found:
+// the arm closure must apply gateRelayServerBody's disable to a copy, not to
+// the caller's spec, for the identical reason as
+// TestRetentionOverrideDoesNotMutateCallersSpec — that spec is the exact
+// object the approval gate keeps live in its pending bookkeeping once a
+// pinned buildin task can pend, and Gate.State reads its Enabled field
+// outside the gate's lock.
+//
+// This exercises the same copy-then-disable logic that lives inside arm's
+// call to gateRelayServerBody in newArmDisarm, keeping the logic in one
+// place and the test cheap (matching this file's existing convention).
+func TestArmRelayServerBodyDoesNotMutateCallersSpec(t *testing.T) {
+	cfg := &config.Config{} // relay unconfigured
+
+	original := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
+	callerCopy := original // the reference the gate would keep in g.admitted/g.pending
+	spec := original
+
+	if gateRelayServerBody(spec, cfg) {
+		override := *spec
+		override.Enabled = false
+		spec = &override
+	}
+
+	if !callerCopy.Enabled {
+		t.Error("caller's spec was mutated in place: Enabled = false, want unchanged true")
+	}
+	if spec.Enabled {
+		t.Error("the returned spec must have Enabled = false")
+	}
+	if spec == callerCopy {
+		t.Error("the overridden spec must be a distinct object from the caller's, not the same pointer")
 	}
 }
 
