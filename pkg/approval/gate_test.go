@@ -578,6 +578,51 @@ func TestPendingEnabledReflectsResolvedFlag(t *testing.T) {
 	}
 }
 
+// TestPendingEnabledAppliesPreviewFn is the code-review follow-up to
+// TestStateAppliesPreviewFn: PendingInfo/PendingEnabled/ApproveReporting must
+// report the same previewFn-adjusted enabled flag State() renders, not the
+// as-shipped k.IsEnabled() — otherwise `dicode task pending` and `dicode
+// task approve` (whose own doc comment says this field exists to answer
+// "did approval actually arm any triggers") can tell an operator a task will
+// arm when a daemon-config override (e.g. buildin/relay-server-body's
+// Enabled flip) means it won't.
+func TestPendingEnabledAppliesPreviewFn(t *testing.T) {
+	g, arm, _ := newTestGate(t, enabledPolicy())
+	g.SetPreviewFn(func(k task.Kinded) task.Kinded {
+		s, ok := k.(*task.Spec)
+		if !ok || s.ID != "repo/preview-me" {
+			return k
+		}
+		override := *s
+		override.Enabled = false
+		return &override
+	})
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/preview-me", "export default () => {}")
+	spec.Enabled = true
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+
+	if enabled, ok := g.PendingEnabled("repo/preview-me"); !ok || enabled {
+		t.Fatalf("PendingEnabled = (%v, %v), want (false, true)", enabled, ok)
+	}
+	if _, enabled, ok := g.PendingInfo("repo/preview-me"); !ok || enabled {
+		t.Fatalf("PendingInfo enabled = %v ok=%v, want (false, true)", enabled, ok)
+	}
+
+	enabled, err := g.ApproveReporting("repo/preview-me")
+	if err != nil {
+		t.Fatalf("ApproveReporting: %v", err)
+	}
+	if enabled {
+		t.Error("ApproveReporting must report the previewFn-adjusted enabled flag (false), not the shipped true")
+	}
+	if got := arm.armedIDs(); len(got) != 1 {
+		t.Fatalf("armedIDs = %v, want 1", got)
+	}
+}
+
 // TestApproveReporting_ImmuneToConcurrentReadmit is the regression for
 // CodeRabbit's TOCTOU finding on PR #830: reporting a just-approved task's
 // enabled state via a SEPARATE later lookup (the pre-fix `AdmittedEnabled`,

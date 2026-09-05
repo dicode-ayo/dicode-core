@@ -463,7 +463,8 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		// override is re-applied on every registration either way.
 		before := k
 		k = applyBuiltinOverrides(k, cfg)
-		if k != before {
+		overridden := k != before
+		if overridden {
 			if err := reg.Register(k); err != nil {
 				log.Warn("approval: registry refresh failed after buildin override",
 					zap.String("task", k.TaskID()), zap.Error(err))
@@ -475,7 +476,11 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
 		// only kind: Task wired the daemon-level gateway route).
 		spec, isSpec := k.(*task.Spec)
-		if isSpec && gateRelayServerBody(spec, cfg) {
+		// overridden && spec.ID == "buildin/relay-server-body" identifies which
+		// of applyBuiltinOverrides' two cases fired (they're for disjoint task
+		// IDs) without re-evaluating gateRelayServerBody's predicate a second
+		// time against the now-overridden spec.
+		if isSpec && overridden && spec.ID == "buildin/relay-server-body" {
 			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
 				zap.String("task", spec.ID))
 		}

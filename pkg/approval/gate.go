@@ -107,7 +107,10 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
-	// enabled is the resolved enabled flag observed alongside hash. Tracked
+	// enabled is the resolved enabled flag observed alongside hash, after
+	// previewFn (if any) — the same value State() renders and
+	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
+	// task approve` as "will this actually arm a trigger". Tracked
 	// separately from hash because Enabled is deliberately excluded from
 	// ContentHash (see resolvedSecurityFields) — a taskset override can flip
 	// a pending task from disabled to enabled without changing its hash, and
@@ -234,7 +237,16 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// than strand pre-existing tasks behind a gate with no approve UI.
 		by = ApprovedByBootstrap
 	default:
+		// The resolved-enabled snapshot goes through previewFn too, same as
+		// State's render: PendingInfo/ApproveReporting report this value to
+		// `dicode task pending`/`dicode task approve` as "will this actually
+		// arm a trigger", and a daemon-config override (e.g. buildin/
+		// relay-server-body's Enabled flip) can change the answer from what
+		// k.IsEnabled() alone says (#832 code-review follow-up).
 		enabled := k.IsEnabled()
+		if g.previewFn != nil {
+			enabled = g.previewFn(k).IsEnabled()
+		}
 
 		g.mu.Lock()
 		prev, was := g.pending[id]
