@@ -237,35 +237,39 @@ func TestCronReRegister_DisableTearsDownEntry(t *testing.T) {
 // TestWebhookNeverFourOhFoursDuringReRegister (the merged #549 fix's race
 // test) but for cron: it hammers Engine.Register for a task whose schedule
 // never changes while the cron scheduler is live and actually ticking, and
-// asserts at least one of the expected ticks actually fired.
+// asserts that every tick the scheduler dispatched actually reached the task.
 //
 // The schedule uses "@every 1s" — robfig/cron's ConstantDelaySchedule floors
 // any @every delay to a minimum of one second (see constantdelay.go), so
 // sub-second cron intervals aren't expressible through the real parser this
 // engine uses. Each tick lands deterministically on a whole-second wall-clock
-// boundary, so a several-second sleep reliably crosses multiple tick
-// boundaries while the hammering goroutine runs concurrently.
+// boundary, so a ~2s sleep reliably crosses two or three tick boundaries while
+// the hammering goroutine runs concurrently.
 //
 // Before the #550 fix, every Register call — even one where the schedule
 // string is byte-identical to what's already armed — unconditionally called
 // e.cron.Remove(entryID) and then re-added a fresh entry via e.cron.AddFunc.
 // A tight re-registration loop churns through that remove/re-add cycle far
-// faster than the tick interval, so the entry attached to the cron scheduler
-// is in a constant state of "just replaced" — a robfig/cron entry's next fire
-// time is computed relative to the moment it was (re-)added, so replacing it
-// before it ever gets a chance to fire pushes its next fire further and
-// further into the future and ticks land in the remove/re-add gap and are
-// silently dropped. The result is that almost no ticks fire while the
-// hammering loop is running — reliably 0 in the pre-fix code. After the fix, a
-// same-schedule re-registration leaves the armed entry completely untouched,
-// so the scheduler ticks on schedule regardless of how often Register is
-// called concurrently.
+// faster than the tick interval, so at any given instant the task's entry is
+// either absent from the scheduler or freshly re-added with its next fire
+// pushed to the *following* boundary; a tick whose boundary lands in that gap
+// is silently dropped. Empirically the pre-fix engine loses most ticks (0 or 1
+// fires out of 2–3 boundaries per run) but not reliably all of them, so an
+// absolute "at least N fires" floor is either flaky (N too high) or blind to
+// the regression (N too low). After the fix, a same-schedule re-registration
+// leaves the armed entry completely untouched, so the scheduler ticks on
+// schedule regardless of how often Register is called concurrently.
 //
-// The window is kept short (~2.2s, expecting ~2 ticks) and the assertion only
-// requires >=1 fire — pkg/trigger is already close to the Makefile's 60s
-// per-package test timeout (worse under -race), and 0-fires-pre-fix vs
-// any-fires-post-fix is exactly as strong a signal as a larger margin: the
-// pre-fix code doesn't fire "fewer" ticks, it starves the entry entirely.
+// The oracle is therefore a control entry: a second "@every 1s" func armed
+// directly on the same cron.Cron that is never re-registered. Both entries
+// share one scheduler loop and one timer, so at every boundary they are due
+// together and are dispatched in the same run-loop iteration. With the fix the
+// hot task's entry is never removed, so its fire count keeps pace with the
+// control's exactly; without the fix any tick lost in a remove/re-add gap
+// shows up as hot < control. Comparing against the control instead of the
+// wall clock also keeps the window short (~2.2s) without a timing margin —
+// pkg/trigger is already close to the Makefile's 60s per-package test timeout,
+// worse under -race.
 func TestCronNeverMissesTickDuringReRegister(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping multi-second wall-clock cron test in -short mode")
@@ -285,6 +289,13 @@ func TestCronNeverMissesTickDuringReRegister(t *testing.T) {
 			fires.Add(1)
 		}
 	})
+
+	// Control entry: same schedule, same scheduler, never touched by Register.
+	// Its count is the number of boundaries the scheduler actually dispatched.
+	var controlTicks atomic.Int64
+	if _, err := eng.cron.AddFunc("@every 1s", func() { controlTicks.Add(1) }); err != nil {
+		t.Fatalf("arm control cron entry: %v", err)
+	}
 
 	eng.cron.Start()
 	defer eng.cron.Stop()
@@ -309,12 +320,17 @@ func TestCronNeverMissesTickDuringReRegister(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// Let any in-flight fires finalize before reading the counter.
-	time.Sleep(100 * time.Millisecond)
+	// The control increments synchronously at dispatch; the hot task's fire is
+	// counted only once its (immediate) run finishes. Let a tick dispatched
+	// right at the end of the window finalize before comparing the two.
+	time.Sleep(250 * time.Millisecond)
 
-	got := fires.Load()
-	if got < 1 {
-		t.Errorf("cron fired %d times in %s (expected at least 1 tick at a 1s interval) — "+
-			"ticks are being dropped during concurrent re-registration", got, testDuration)
+	got, want := fires.Load(), controlTicks.Load()
+	if want < 1 {
+		t.Fatalf("control cron entry never ticked in %s — scheduler did not run, test window too short", testDuration)
+	}
+	if got < want {
+		t.Errorf("cron fired %d times in %s but the scheduler dispatched %d ticks — "+
+			"ticks are being dropped during concurrent re-registration", got, testDuration, want)
 	}
 }
