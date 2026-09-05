@@ -90,6 +90,7 @@ func MergeTaskOverride(path, taskID string, patch json.RawMessage, expectedMtime
 		return fmt.Errorf("decode patch: %w", err)
 	}
 	mergeMap(subOverrides, patchObj)
+	pruneEmptyMaps(subOverrides)
 
 	if len(subOverrides) == 0 {
 		delete(overrideEntries, sub)
@@ -155,6 +156,25 @@ func getMap(parent map[string]any, key string) map[string]any {
 		return out
 	}
 	return nil
+}
+
+// pruneEmptyMaps drops keys whose value merged down to an empty map, so
+// clearing the last param override leaves the file as clean as it was before
+// the first one — `params: {}` parses to the same nothing it renders as, and
+// the cascade below can only prune an entry that holds no keys at all.
+func pruneEmptyMaps(m map[string]any) {
+	for k, v := range m {
+		switch typed := v.(type) {
+		case map[string]any:
+			if len(typed) == 0 {
+				delete(m, k)
+			}
+		case map[any]any:
+			if len(typed) == 0 {
+				delete(m, k)
+			}
+		}
+	}
 }
 
 // mergeMap applies JSON Merge Patch (RFC 7396) semantics: keys in patch
