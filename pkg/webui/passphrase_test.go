@@ -17,6 +17,8 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -325,7 +327,8 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	logs, observed := observer.New(zapcore.InfoLevel)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.New(logs), d, ipc.NewGateway())
 
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234", bcrypt.MinCost)
 	before, _ := srv.passphraseStore.get(context.Background())
@@ -337,6 +340,15 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	after, _ := srv.passphraseStore.get(context.Background())
 	if after != before {
 		t.Errorf("existing passphrase hash should not be overwritten\n before: %q\n after:  %q", before, after)
+	}
+	// Reuse is the one startup where no plaintext is ever shown. Without a
+	// line naming the reset command, an operator who inherited the data dir
+	// has no way back in.
+	if len(observed.FilterMessageSnippet("already stored").All()) == 0 {
+		t.Errorf("reusing a stored passphrase logged nothing: %v", observed.All())
+	}
+	if len(observed.FilterField(zap.String("hint", "run `dicode auth reset-passphrase` if you do not have it")).All()) == 0 {
+		t.Errorf("reuse log does not point at the recovery command: %v", observed.All())
 	}
 }
 

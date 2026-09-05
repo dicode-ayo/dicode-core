@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
@@ -599,4 +600,87 @@ func presetURL(t *testing.T, name string) string {
 	}
 	t.Fatalf("no taskset preset named %q", name)
 	return ""
+}
+
+// writeDataDB creates a SQLite database at dir/dataDBName with a kv table,
+// optionally holding a stored dashboard passphrase — the shape an earlier
+// install leaves behind in a data dir a fresh `dicode init` then points at.
+func writeDataDB(t *testing.T, dir string, passphrase string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	handle, err := sql.Open("sqlite", filepath.Join(dir, dataDBName))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+	if _, err := handle.Exec(`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create kv: %v", err)
+	}
+	if passphrase == "" {
+		return
+	}
+	if _, err := handle.Exec(`INSERT INTO kv (key, value) VALUES (?, ?)`,
+		storedPassphraseKey, passphrase); err != nil {
+		t.Fatalf("insert passphrase: %v", err)
+	}
+}
+
+// TestRunInit_ExistingPassphraseIsCalledOut: a data dir carried over from an
+// earlier install already holds a passphrase, so the daemon reuses it and
+// prints nothing. Promising a generated-and-printed one there leaves the
+// operator behind an auth wall holding no key.
+func TestRunInit_ExistingPassphraseIsCalledOut(t *testing.T) {
+	dir := t.TempDir()
+	writeDataDB(t, filepath.Join(dir, dataDirName), "$2a$10$hash")
+
+	var out strings.Builder
+	if err := runInit([]string{dir}, strings.NewReader(""), &out, &out, false,
+		func(string) string { return "" }); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "dicode auth reset-passphrase") {
+		t.Errorf("no recovery path offered for the carried-over passphrase:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "printed once to that terminal") {
+		t.Errorf("promised a passphrase the daemon will not print:\n%s", out.String())
+	}
+}
+
+// TestStoredPassphraseDB_NegativeCases: every shape that is not "a passphrase
+// is already stored here" has to resolve to "", or a fresh directory gets the
+// recovery message instead of the promise it is owed.
+func TestStoredPassphraseDB_NegativeCases(t *testing.T) {
+	withoutRow := filepath.Join(t.TempDir(), dataDirName)
+	writeDataDB(t, withoutRow, "")
+
+	empty := filepath.Join(t.TempDir(), dataDirName)
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	for name, dataDir := range map[string]string{
+		"unresolvable data dir": "",
+		"no data dir":           filepath.Join(t.TempDir(), "absent"),
+		"data dir, no database": empty,
+		"database, no row":      withoutRow,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := storedPassphraseDB(dataDir); got != "" {
+				t.Errorf("storedPassphraseDB(%q) = %q; want empty", dataDir, got)
+			}
+		})
+	}
+}
+
+// TestRenderConfigDBPathMatchesInit pins dataDBName to the database.path the
+// generated config actually carries. They live in different packages, and the
+// probe silently finds nothing if they drift.
+func TestRenderConfigDBPathMatchesInit(t *testing.T) {
+	rendered := onboarding.RenderConfig(initDefaults())
+	if want := "${DATADIR}/" + dataDBName; !strings.Contains(rendered, want) {
+		t.Errorf("generated config does not point database.path at %q:\n%s", want, rendered)
+	}
 }
