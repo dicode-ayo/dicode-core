@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.1](https://github.com/dicode-ayo/dicode-core/compare/v0.6.0...v0.6.1) (2026-09-05)
+
+
+### Features
+
+* **taskset:** pin a git source to a tag instead of a moving branch ([#829](https://github.com/dicode-ayo/dicode-core/issues/829)) ([733561f](https://github.com/dicode-ayo/dicode-core/commit/733561fc7b1c0ddd50f384f454b41c2e254f0293))
+
+
+### Bug Fixes
+
+* **approval:** stop notifying and warning about a disabled task's pending hold ([#830](https://github.com/dicode-ayo/dicode-core/issues/830)) ([7ae2d92](https://github.com/dicode-ayo/dicode-core/commit/7ae2d926856543e4744bc81dd21ce8efc9e8258d))
+
 ## [0.6.0](https://github.com/dicode-ayo/dicode-core/compare/v0.5.3...v0.6.0) (2026-09-03)
 
 
