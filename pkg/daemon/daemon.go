@@ -173,19 +173,64 @@ func isPathUnderDir(path, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// gateRelayServerBody disables the buildin/relay-server-body daemon when the
-// relay is not configured. With trigger.daemon + restart:always the engine would
-// otherwise auto-start it on every daemon, and its `import "npm:dicode-relay/start"`
-// reads process.env beyond the task's declared --allow-env names — throwing
-// NotCapable at import time and crash-looping even where the relay is unused.
-// Disabling before eng.Register keeps the engine from spawning the daemon unless
-// the operator has actually configured the relay. No-op for every other task.
+// gateRelayServerBody reports whether the buildin/relay-server-body daemon
+// must be disabled because the relay is not configured. With trigger.daemon +
+// restart:always the engine would otherwise auto-start it on every daemon,
+// and its `import "npm:dicode-relay/start"` reads process.env beyond the
+// task's declared --allow-env names — throwing NotCapable at import time and
+// crash-looping even where the relay is unused. False for every other task.
+//
+// A pure predicate, not a mutation: the caller (arm) applies the disable to
+// a copy of spec rather than in place, since spec may be the exact object
+// the approval gate keeps live in its pending bookkeeping for a pinned
+// buildin task (#832) — see the retention_seconds override a few lines
+// above arm's call site for the same reasoning.
 func gateRelayServerBody(spec *task.Spec, cfg *config.Config) bool {
-	if spec.ID == "buildin/relay-server-body" && !relayConfigured(cfg) {
-		spec.Enabled = false
-		return true
+	return spec.ID == "buildin/relay-server-body" && !relayConfigured(cfg)
+}
+
+// applyBuiltinOverrides returns k with any daemon-config-driven override
+// applied to a COPY — never in place. k may be the exact object the
+// approval gate keeps live in its pending/admitted bookkeeping for a
+// pinned buildin task (#832), and Gate.State reads that object's fields
+// outside the gate's lock; a prior in-place version of these two overrides
+// raced that read. Returns k itself, the same pointer, when no override
+// applies, so callers can test whether anything changed with `!=`.
+//
+// Covers:
+//   - buildin/run-inputs-cleanup: retention_seconds default, from
+//     dicode.yaml's defaults.run_inputs.retention.
+//   - buildin/relay-server-body: Enabled, via gateRelayServerBody.
+//
+// Both are operator config, not shipped content, so the content hash
+// (computed against k before this ever runs) should never observe them.
+//
+// Used by both arm (to register/run the overridden version) and wired as
+// the approval gate's preview transform (Gate.SetPreviewFn), so its
+// pending-review surface renders the same end state Approve would actually
+// produce, not the as-shipped values Admit first observed.
+func applyBuiltinOverrides(k task.Kinded, cfg *config.Config) task.Kinded {
+	spec, isSpec := k.(*task.Spec)
+	if !isSpec {
+		return k
 	}
-	return false
+	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+		for i := range spec.Params {
+			if spec.Params[i].Name == "retention_seconds" {
+				override := *spec
+				override.Params = append(task.Params(nil), spec.Params...)
+				override.Params[i].Default = retStr
+				return &override
+			}
+		}
+	}
+	if gateRelayServerBody(spec, cfg) {
+		override := *spec
+		override.Enabled = false
+		return &override
+	}
+	return k
 }
 
 func hasDisplay() bool {
@@ -244,7 +289,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return err
 	}
-	arm, disarm := newArmDisarm(cfg, eng, gateway, log)
+	arm, disarm := newArmDisarm(cfg, eng, gateway, reg, log)
 
 	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
 	// trust-on-change gate before its triggers arm. Approval records live in
@@ -392,7 +437,7 @@ func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, den
 }
 
 // newArmDisarm builds the arm/disarm pair the approval gate drives (step 7).
-func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
+func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, reg *registry.Registry, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
@@ -407,27 +452,35 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 	// approval gate for every task that passes it (immediately for trusted /
 	// builtin / already-approved tasks, later from Approve for pending ones).
 	arm = func(k task.Kinded) error {
+		// Apply the daemon-config-driven overrides (retention_seconds default,
+		// relay-server-body Enabled) before eng.Register, so the engine sees
+		// the correct values when building the param map / trigger set. This
+		// must happen on a copy, never in place — see applyBuiltinOverrides's
+		// doc comment — so re-register the copy into reg too when it actually
+		// changed anything: the reconciler already registered the pre-override
+		// k there before ever calling arm, and reg is what GET /api/tasks
+		// serves. The reconciler replaces the spec on each reload, so the
+		// override is re-applied on every registration either way.
+		before := k
+		k = applyBuiltinOverrides(k, cfg)
+		overridden := k != before
+		if overridden {
+			if err := reg.Register(k); err != nil {
+				log.Warn("approval: registry refresh failed after buildin override",
+					zap.String("task", k.TaskID()), zap.Error(err))
+			}
+		}
+
 		// The footgun checks below only apply to kind: Task; the gateway-webhook
 		// route, however, applies to BOTH kind: Task and kind: PipelineTask —
 		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
 		// only kind: Task wired the daemon-level gateway route).
 		spec, isSpec := k.(*task.Spec)
-		// Override buildin/run-inputs-cleanup's retention_seconds default to
-		// match dicode.yaml's defaults.run_inputs.retention. This must happen
-		// before eng.Register so the engine sees the correct default when
-		// building the param map for the next cron fire. We mutate the spec
-		// slice element in place; the reconciler replaces the spec on each
-		// reload, so the override is re-applied on every registration.
-		if isSpec && spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
-			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
-			for i := range spec.Params {
-				if spec.Params[i].Name == "retention_seconds" {
-					spec.Params[i].Default = retStr
-					break
-				}
-			}
-		}
-		if isSpec && gateRelayServerBody(spec, cfg) {
+		// overridden && spec.ID == "buildin/relay-server-body" identifies which
+		// of applyBuiltinOverrides' two cases fired (they're for disjoint task
+		// IDs) without re-evaluating gateRelayServerBody's predicate a second
+		// time against the now-overridden spec.
+		if isSpec && overridden && spec.ID == "buildin/relay-server-body" {
 			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
 				zap.String("task", spec.ID))
 		}
@@ -576,6 +629,18 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 		}
 	}
 	approvalGate := approval.NewGate(gatePolicy, lock, arm, log)
+	// A buildin source pinned to a tag (spec.entries.buildin.ref.tag) promises
+	// content stays put between approvals; without this the gate's buildin
+	// bypass can't tell a re-cut tag from the ordinary moving-branch case it
+	// exists to tolerate (#832).
+	if entry := cfg.Spec.Entries[approval.BuiltinSource]; entry != nil && entry.Ref != nil {
+		approvalGate.SetBuiltinPinned(entry.Ref.IsPinned())
+	}
+	// So a pinned buildin task's pending-review surface (Gate.State) renders
+	// the same end state Approve would actually produce — arm's own
+	// daemon-config overrides, not the as-shipped value Admit first
+	// observed (#832).
+	approvalGate.SetPreviewFn(func(k task.Kinded) task.Kinded { return applyBuiltinOverrides(k, cfg) })
 	// Pending tasks stay in the registry (API visibility, like Enabled:false)
 	// and remain resolvable by manual / chain / replay fire paths — the fire
 	// guard vetoes those at the engine chokepoint. The same guard also vetoes

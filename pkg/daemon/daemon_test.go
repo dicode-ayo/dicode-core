@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -64,89 +66,280 @@ func TestResolveDataDir(t *testing.T) {
 	}
 }
 
-// TestRetentionOverrideInOnRegister verifies Finding 2: the OnRegister hook
-// must override buildin/run-inputs-cleanup's retention_seconds param default
-// to reflect dicode.yaml's defaults.run_inputs.retention. Without this fix
-// the cleanup task always ran with its hard-coded 30-day default regardless
-// of the operator's configured retention.
-//
-// This test exercises the same mutation logic that lives inside the OnRegister
-// closure in run(), keeping the logic in one place and the test cheap.
-func TestRetentionOverrideInOnRegister(t *testing.T) {
-	retention := 7 * 24 * time.Hour // 7 days = 604800s
+// newTestRegistry returns an in-memory registry for tests that need a real
+// *registry.Registry (not a fake) — e.g. to assert what GET /api/tasks would
+// actually see after arm runs.
+func newTestRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	return registry.New(database)
+}
+
+// The tests below exercise applyBuiltinOverrides directly — the real
+// function newArmDisarm's arm closure calls, and that Gate.SetPreviewFn also
+// wires as the approval gate's pending-review preview transform — rather
+// than a hand-copy of its logic, so a future change to the real function
+// can't silently diverge from what these tests check (a prior round of this
+// PR's own /code-review found exactly that risk in specs that duplicated
+// the logic inline).
+
+// TestApplyBuiltinOverrides_RetentionSeconds verifies Finding 2: the
+// override must reflect dicode.yaml's defaults.run_inputs.retention on
+// buildin/run-inputs-cleanup, and must be a no-op (same pointer back) when
+// the operator left it unset — the task's own 30-day default applies, and
+// callers key a registry refresh off the pointer changing.
+func TestApplyBuiltinOverrides_RetentionSeconds(t *testing.T) {
+	newSpec := func() *task.Spec {
+		return &task.Spec{
+			ID: "buildin/run-inputs-cleanup",
+			Params: task.Params{
+				{Name: "retention_seconds", Default: "2592000", Type: "number"},
+			},
+		}
+	}
+
+	t.Run("overridden when configured", func(t *testing.T) {
+		retention := 7 * 24 * time.Hour // 7 days = 604800s
+		cfg := &config.Config{}
+		cfg.Defaults.RunInputs.Retention = retention
+		spec := newSpec()
+
+		got := applyBuiltinOverrides(spec, cfg)
+
+		want := fmt.Sprintf("%d", int64(retention.Seconds())) // "604800"
+		gotSpec, ok := got.(*task.Spec)
+		if !ok {
+			t.Fatalf("applyBuiltinOverrides returned %T, want *task.Spec", got)
+		}
+		if gotSpec.Params[0].Default != want {
+			t.Errorf("retention_seconds default = %q, want %q", gotSpec.Params[0].Default, want)
+		}
+		if got == task.Kinded(spec) {
+			t.Error("an applied override must return a distinct object, not the input pointer")
+		}
+	})
+
+	t.Run("skipped when zero", func(t *testing.T) {
+		cfg := &config.Config{} // Retention == 0
+		spec := newSpec()
+
+		got := applyBuiltinOverrides(spec, cfg)
+
+		if got != task.Kinded(spec) {
+			t.Error("no override configured: must return the same pointer, unchanged")
+		}
+		if spec.Params[0].Default != "2592000" {
+			t.Errorf("caller's spec was mutated: Default = %q, want unchanged 2592000", spec.Params[0].Default)
+		}
+	})
+}
+
+// TestApplyBuiltinOverrides_RetentionDoesNotMutateCallersSpec is the #832
+// code-review regression: the override must never write through the spec
+// the caller (the approval gate) handed to arm, since that exact object can
+// now be concurrently read by Gate.State while a pinned buildin task sits
+// pending.
+func TestApplyBuiltinOverrides_RetentionDoesNotMutateCallersSpec(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Defaults.RunInputs.Retention = retention
+	cfg.Defaults.RunInputs.Retention = 7 * 24 * time.Hour
 
-	// Build a spec that matches what the reconciler loads from the task dir.
-	spec := &task.Spec{
+	original := &task.Spec{
 		ID: "buildin/run-inputs-cleanup",
 		Params: task.Params{
 			{Name: "retention_seconds", Default: "2592000", Type: "number"},
 		},
 	}
+	callerCopy := original // the reference the gate would keep in g.admitted/g.pending
 
-	// Simulate exactly what the OnRegister closure does.
-	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
-		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
-		for i := range spec.Params {
-			if spec.Params[i].Name == "retention_seconds" {
-				spec.Params[i].Default = retStr
-				break
-			}
-		}
-	}
+	applyBuiltinOverrides(original, cfg)
 
-	want := fmt.Sprintf("%d", int64(retention.Seconds())) // "604800"
-	got := spec.Params[0].Default
-	if got != want {
-		t.Errorf("retention_seconds default = %q, want %q", got, want)
+	if got := callerCopy.Params[0].Default; got != "2592000" {
+		t.Errorf("caller's spec was mutated in place: Default = %q, want unchanged 2592000", got)
 	}
 }
 
-// TestRetentionOverrideSkippedWhenZero verifies that the OnRegister hook does
-// NOT mutate retention_seconds when cfg.Defaults.RunInputs.Retention is zero
-// (i.e., the operator left it unset — the task's own 30-day default applies).
-func TestRetentionOverrideSkippedWhenZero(t *testing.T) {
-	cfg := &config.Config{} // Retention == 0
+// TestApplyBuiltinOverrides_RelayServerBody covers the second override:
+// buildin/relay-server-body's Enabled flag, gated on relay configuration.
+func TestApplyBuiltinOverrides_RelayServerBody(t *testing.T) {
+	cases := []struct {
+		name         string
+		enabled      bool
+		serverURL    string
+		wantDisabled bool
+	}{
+		{name: "relay unconfigured (default)", wantDisabled: true},
+		{name: "enabled flag but no server url", enabled: true, wantDisabled: true},
+		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantDisabled: true},
+		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantDisabled: false},
+	}
 
-	spec := &task.Spec{
-		ID: "buildin/run-inputs-cleanup",
-		Params: task.Params{
-			{Name: "retention_seconds", Default: "2592000", Type: "number"},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Relay.Enabled = tc.enabled
+			cfg.Relay.ServerURL = tc.serverURL
+			spec := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
+
+			got := applyBuiltinOverrides(spec, cfg)
+
+			gotSpec, ok := got.(*task.Spec)
+			if !ok {
+				t.Fatalf("applyBuiltinOverrides returned %T, want *task.Spec", got)
+			}
+			if gotSpec.Enabled == tc.wantDisabled {
+				t.Errorf("Enabled = %v, want disabled=%v", gotSpec.Enabled, tc.wantDisabled)
+			}
+			wantSamePointer := !tc.wantDisabled
+			if (got == task.Kinded(spec)) != wantSamePointer {
+				t.Errorf("pointer identity: got same=%v, want same=%v", got == task.Kinded(spec), wantSamePointer)
+			}
+		})
+	}
+}
+
+// TestApplyBuiltinOverrides_RelayServerBodyLeavesOtherTasksAlone guards
+// against the override accidentally applying to unrelated daemon tasks when
+// the relay is off.
+func TestApplyBuiltinOverrides_RelayServerBodyLeavesOtherTasksAlone(t *testing.T) {
+	cfg := &config.Config{} // relay unconfigured
+	spec := &task.Spec{ID: "buildin/relay-client", Enabled: true}
+
+	got := applyBuiltinOverrides(spec, cfg)
+
+	if got != task.Kinded(spec) {
+		t.Error("an unrelated task must come back as the same pointer, unchanged")
+	}
+	if !spec.Enabled {
+		t.Error("override matched an unrelated task (buildin/relay-client)")
+	}
+}
+
+// TestApplyBuiltinOverrides_RelayServerBodyDoesNotMutateCallersSpec is the
+// #832 code-review regression for the second in-place mutation the same
+// review pass found, mirroring
+// TestApplyBuiltinOverrides_RetentionDoesNotMutateCallersSpec.
+func TestApplyBuiltinOverrides_RelayServerBodyDoesNotMutateCallersSpec(t *testing.T) {
+	cfg := &config.Config{} // relay unconfigured
+	original := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
+	callerCopy := original // the reference the gate would keep in g.admitted/g.pending
+
+	applyBuiltinOverrides(original, cfg)
+
+	if !callerCopy.Enabled {
+		t.Error("caller's spec was mutated in place: Enabled = false, want unchanged true")
+	}
+}
+
+// TestApplyBuiltinOverrides_NonSpecPassesThrough guards the type-assertion
+// guard: a *task.PipelineTask (or anything else that isn't *task.Spec) must
+// come back unchanged, never panic.
+func TestApplyBuiltinOverrides_NonSpecPassesThrough(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Defaults.RunInputs.Retention = 7 * 24 * time.Hour
+	pipe := &task.PipelineTask{ID: "buildin/run-inputs-cleanup"}
+
+	got := applyBuiltinOverrides(pipe, cfg)
+
+	if got != task.Kinded(pipe) {
+		t.Error("a non-*task.Spec Kinded must pass through unchanged")
+	}
+}
+
+// TestApplyBuiltinOverrides_RefreshesRegistry is the code-review regression
+// for the copy-on-write fix's own side effect: the reconciler registers the
+// pre-override spec into reg before arm ever runs (see
+// pkg/registry/reconciler.go's rc.registry.Register(k) preceding
+// rc.OnRegister(k)), so once arm stopped mutating that spec in place to fix
+// the #832 data race, the registry-exposed copy — what GET /api/tasks
+// serves — silently stopped reflecting the override. arm re-registers the
+// overridden copy (keyed on the pointer having changed) so the two stay in
+// sync; this pins that behavior for both override sites.
+func TestApplyBuiltinOverrides_RefreshesRegistry(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     func() *config.Config
+		spec    *task.Spec
+		checkID string
+		check   func(t *testing.T, got *task.Spec)
+	}{
+		{
+			name: "retention_seconds",
+			cfg: func() *config.Config {
+				cfg := &config.Config{}
+				cfg.Defaults.RunInputs.Retention = 7 * 24 * time.Hour
+				return cfg
+			},
+			spec: &task.Spec{
+				ID:     "buildin/run-inputs-cleanup",
+				Params: task.Params{{Name: "retention_seconds", Default: "2592000", Type: "number"}},
+			},
+			checkID: "buildin/run-inputs-cleanup",
+			check: func(t *testing.T, got *task.Spec) {
+				if want := "604800"; got.Params[0].Default != want {
+					t.Errorf("registry's retention_seconds default = %q, want %q (the API would show the stale shipped default)", got.Params[0].Default, want)
+				}
+			},
+		},
+		{
+			name:    "relay-server-body",
+			cfg:     func() *config.Config { return &config.Config{} }, // relay unconfigured
+			spec:    &task.Spec{ID: "buildin/relay-server-body", Enabled: true},
+			checkID: "buildin/relay-server-body",
+			check: func(t *testing.T, got *task.Spec) {
+				if got.Enabled {
+					t.Error("registry still shows Enabled: true (the API would misreport a task with zero armed triggers as enabled)")
+				}
+			},
 		},
 	}
 
-	// Same logic as OnRegister.
-	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
-		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
-		for i := range spec.Params {
-			if spec.Params[i].Name == "retention_seconds" {
-				spec.Params[i].Default = retStr
-				break
-			}
-		}
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newTestRegistry(t)
+			cfg := tc.cfg()
 
-	if got := spec.Params[0].Default; got != "2592000" {
-		t.Errorf("expected default unchanged (2592000) when retention is zero, got %q", got)
+			// Simulates the reconciler's rc.registry.Register(k) call, which
+			// always runs before arm (OnRegister) does.
+			if err := reg.Register(tc.spec); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			before := task.Kinded(tc.spec)
+			overridden := applyBuiltinOverrides(tc.spec, cfg)
+			if overridden != before {
+				if err := reg.Register(overridden); err != nil {
+					t.Fatalf("Register (refresh): %v", err)
+				}
+			}
+
+			got, ok := reg.Get(tc.checkID)
+			if !ok {
+				t.Fatal("task not found in registry")
+			}
+			tc.check(t, got)
+		})
 	}
 }
 
-// TestRelayServerBodyGate exercises the gate the arm closure applies before
-// eng.Register. The configured-relay branch is the load-bearing half — it must
-// NOT disable the task when the operator has set up the relay, or the relay
+// TestRelayServerBodyGate exercises the predicate the arm closure consults
+// before eng.Register. The configured-relay branch is the load-bearing half —
+// it must report false when the operator has set up the relay, or the relay
 // never starts.
 func TestRelayServerBodyGate(t *testing.T) {
 	cases := []struct {
-		name        string
-		enabled     bool
-		serverURL   string
-		wantEnabled bool
+		name         string
+		enabled      bool
+		serverURL    string
+		wantDisabled bool
 	}{
-		{name: "relay unconfigured (default)", wantEnabled: false},
-		{name: "enabled flag but no server url", enabled: true, wantEnabled: false},
-		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantEnabled: false},
-		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantEnabled: true},
+		{name: "relay unconfigured (default)", wantDisabled: true},
+		{name: "enabled flag but no server url", enabled: true, wantDisabled: true},
+		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantDisabled: true},
+		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantDisabled: false},
 	}
 
 	for _, tc := range cases {
@@ -155,26 +348,29 @@ func TestRelayServerBodyGate(t *testing.T) {
 			cfg.Relay.Enabled = tc.enabled
 			cfg.Relay.ServerURL = tc.serverURL
 
-			// SetEnabled defaults to true at resolve time; the gate only flips
-			// it off, never on.
 			spec := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
-			gateRelayServerBody(spec, cfg)
+			got := gateRelayServerBody(spec, cfg)
 
-			if spec.Enabled != tc.wantEnabled {
-				t.Errorf("relay-server-body Enabled = %v, want %v", spec.Enabled, tc.wantEnabled)
+			if got != tc.wantDisabled {
+				t.Errorf("gateRelayServerBody = %v, want %v", got, tc.wantDisabled)
+			}
+			// A pure predicate: never mutates the spec it was handed — see
+			// TestArmRelayServerBodyDoesNotMutateCallersSpec for why (#832).
+			if !spec.Enabled {
+				t.Error("gateRelayServerBody must not mutate the spec it was handed")
 			}
 		})
 	}
 }
 
 // TestRelayServerBodyGateLeavesOtherTasksAlone guards against the gate
-// accidentally disabling unrelated daemon tasks when the relay is off.
+// accidentally reporting true for unrelated daemon tasks when the relay is
+// off.
 func TestRelayServerBodyGateLeavesOtherTasksAlone(t *testing.T) {
 	cfg := &config.Config{} // relay unconfigured
 	spec := &task.Spec{ID: "buildin/relay-client", Enabled: true}
-	gateRelayServerBody(spec, cfg)
-	if !spec.Enabled {
-		t.Error("gate disabled an unrelated task (buildin/relay-client)")
+	if gateRelayServerBody(spec, cfg) {
+		t.Error("gate matched an unrelated task (buildin/relay-client)")
 	}
 }
 

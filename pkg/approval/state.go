@@ -192,27 +192,40 @@ func (g *Gate) State(id string) (State, error) {
 		return State{}, fmt.Errorf("task %q is not pending approval", id)
 	}
 
+	// ent.kinded is read outside the lock. This relies on the arm callback
+	// (pkg/daemon's newArmDisarm) never mutating a spec it was handed in
+	// place — its overrides (buildin/run-inputs-cleanup's retention_seconds,
+	// buildin/relay-server-body's Enabled) register a copy rather than
+	// writing through k, specifically so this read can never race that
+	// write. That matters now that a pinned buildin task can pend (#832):
+	// before, no spec reachable from the pending set was ever also live in
+	// arm's hands, since Admit auto-approved BuiltinSource before the
+	// pending branch ever ran; a pinned buildin can now reach both.
+	kinded := ent.kinded
+	if g.previewFn != nil {
+		// Renders the end state Approve would actually produce, not the
+		// as-shipped value Admit first observed: the same daemon-config
+		// override arm applies at approval time (previewFn mirrors it)
+		// would otherwise be invisible on this review surface until after
+		// the operator has already approved it.
+		kinded = g.previewFn(kinded)
+	}
+
 	st := State{
 		TaskID:      id,
 		PendingHash: ent.hash,
-		Kind:        ent.kinded.KindOf(),
-		Enabled:     ent.kinded.IsEnabled(),
+		Kind:        kinded.KindOf(),
+		Enabled:     kinded.IsEnabled(),
 	}
 
-	// ent.kinded is read outside the lock. The one in-place mutation of an
-	// admitted spec (the arm callback rewriting a param default) is scoped to a
-	// builtin task ID, and builtins never pend — Admit auto-approves
-	// BuiltinSource before the pending branch — so no spec reachable here is
-	// concurrently written. A future in-place mutation of a gated task's spec
-	// would break that.
-	switch s := ent.kinded.(type) {
+	switch s := kinded.(type) {
 	case *task.Spec:
 		stateFromSpec(&st, s)
 	case *task.PipelineTask:
 		stateFromPipeline(&st, s)
 	}
 
-	files, err := inventoryOf(ent.kinded)
+	files, err := inventoryOf(kinded)
 	if err != nil {
 		// The spec-derived body is still a complete and accurate answer to
 		// "what will run", so degrade rather than deny the operator a review

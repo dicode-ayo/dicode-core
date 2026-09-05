@@ -64,6 +64,32 @@ type Gate struct {
 	admitted    map[string]task.Kinded
 	pendingHook func(k task.Kinded, hash string)
 	bootstrap   bool
+
+	// builtinPinned mirrors whether the buildin source is pinned to a tag
+	// (spec.entries.buildin.ref.tag, see pkg/taskset.Ref.IsPinned) rather
+	// than tracking a moving branch (the default). Set once at startup via
+	// SetBuiltinPinned; read by Admit and trusted. False (the zero value)
+	// preserves today's unconditional buildin bypass — a moving branch is
+	// expected to move. True routes buildin through the same content-hash
+	// gate every other source already gets, rather than a second
+	// buildin-specific mechanism (#832): an existing lock record's Hash
+	// already tracks buildin's current content exactly (Record runs on
+	// every admit whose hash changed, builtin bypass or not), so pinning
+	// buildin and upgrading onto this check never spuriously pends an
+	// unchanged inventory, and a re-cut tag that does change content pends
+	// exactly like it would for any other pinned source.
+	builtinPinned bool
+
+	// previewFn optionally transforms a task.Kinded before State renders it,
+	// mirroring whatever daemon-config-driven override arm would apply if
+	// this task were approved right now (e.g. a param-default override
+	// scoped to one buildin task ID). Nil-safe: State treats a nil previewFn
+	// as identity. Without this, a pinned buildin task's pending-review
+	// surface can render the as-shipped value Admit first observed rather
+	// than the end state Approve would actually produce (#832 — before a
+	// pinned buildin task could pend, this daemon-layer override only ever
+	// ran on an already-armed task, so State never had reason to need it).
+	previewFn func(task.Kinded) task.Kinded
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
@@ -81,7 +107,10 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
-	// enabled is the resolved enabled flag observed alongside hash. Tracked
+	// enabled is the resolved enabled flag observed alongside hash, after
+	// previewFn (if any) — the same value State() renders and
+	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
+	// task approve` as "will this actually arm a trigger". Tracked
 	// separately from hash because Enabled is deliberately excluded from
 	// ContentHash (see resolvedSecurityFields) — a taskset override can flip
 	// a pending task from disabled to enabled without changing its hash, and
@@ -115,6 +144,17 @@ func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn
 
 // SetCommitFunc overrides the commit resolver (tests).
 func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
+
+// SetBuiltinPinned records whether the buildin source is pinned to a tag.
+// Call once at startup, before Admit runs concurrently — it is not
+// mutex-guarded, mirroring SetHashFunc/SetCommitFunc.
+func (g *Gate) SetBuiltinPinned(pinned bool) { g.builtinPinned = pinned }
+
+// SetPreviewFn installs the transform State applies to a pending task before
+// rendering it (see previewFn's doc comment). Call once at startup, before
+// Admit/State run concurrently — not mutex-guarded, mirroring
+// SetHashFunc/SetCommitFunc/SetBuiltinPinned.
+func (g *Gate) SetPreviewFn(fn func(task.Kinded) task.Kinded) { g.previewFn = fn }
 
 // SetPendingHook installs the operator-notification hook. It is invoked only
 // on the transition into pending — a task newly held, or a held task observed
@@ -180,7 +220,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 
 	var by string
 	switch {
-	case SourceOf(id) == BuiltinSource:
+	case SourceOf(id) == BuiltinSource && !g.builtinPinned:
 		by = ApprovedByBuiltin
 	case g.policy.TrustedTasks[id]:
 		by = ApprovedByTrustedTask
@@ -197,7 +237,16 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// than strand pre-existing tasks behind a gate with no approve UI.
 		by = ApprovedByBootstrap
 	default:
+		// The resolved-enabled snapshot goes through previewFn too, same as
+		// State's render: PendingInfo/ApproveReporting report this value to
+		// `dicode task pending`/`dicode task approve` as "will this actually
+		// arm a trigger", and a daemon-config override (e.g. buildin/
+		// relay-server-body's Enabled flip) can change the answer from what
+		// k.IsEnabled() alone says (#832 code-review follow-up).
 		enabled := k.IsEnabled()
+		if g.previewFn != nil {
+			enabled = g.previewFn(k).IsEnabled()
+		}
 
 		g.mu.Lock()
 		prev, was := g.pending[id]
@@ -453,7 +502,10 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // task files fresh on every run, so an edit that lands between reconcile
 // cycles would otherwise execute new code under a stale approval before the
 // gate re-pends it. Trusted / builtin tasks (and a disabled gate) skip the
-// re-hash: their trust does not bind to a specific content hash.
+// re-hash: their trust does not bind to a specific content hash. A pinned
+// buildin task (#832) is not in that trusted set — see trusted — so it gets
+// the same live re-hash as any other gated source, closing the identical
+// reconcile-window race for it with no extra machinery.
 func (g *Gate) FireGuard(taskID string) error {
 	if g.IsPending(taskID) {
 		return fmt.Errorf("%w: %s", ErrPending, taskID)
@@ -481,12 +533,14 @@ func (g *Gate) FireGuard(taskID string) error {
 }
 
 // trusted reports whether id is approved independent of its content hash:
-// builtin tasks, operator-trusted tasks/sources, or a disabled gate. Mirrors
-// the hash-independent auto-approve arms of Admit so FireGuard never vetoes a
-// task Admit would have armed unconditionally.
+// builtin tasks (unless buildin is pinned — see builtinPinned's doc
+// comment), operator-trusted tasks/sources, or a disabled gate. Mirrors the
+// hash-independent auto-approve arms of Admit so FireGuard never vetoes a
+// task Admit would have armed unconditionally, and — as importantly — never
+// waves through a task Admit would have gated.
 func (g *Gate) trusted(id string) bool {
 	switch {
-	case SourceOf(id) == BuiltinSource:
+	case SourceOf(id) == BuiltinSource && !g.builtinPinned:
 		return true
 	case g.policy.TrustedTasks[id]:
 		return true
