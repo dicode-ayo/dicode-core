@@ -168,6 +168,53 @@ func TestBuiltinPinnedTrustedSourceOverridesHashGate(t *testing.T) {
 	}
 }
 
+// TestTrustedMirrorsAdmitForPinnedBuiltin is the code-review regression for
+// #832: trusted()'s buildin case must be gated by the same "&& !g.builtinPinned"
+// condition as Admit's switch guard, not a bare SourceOf(id)==BuiltinSource
+// that returns before ever reaching the TrustedTasks/TrustedSources/!Enabled
+// cases below it. A bare switch case that matches on source alone stops the
+// switch right there — regardless of what it returns — so if trusted() ever
+// regresses to checking buildin-ness on its own line again, a pinned buildin
+// task with an explicit trust:always override (or gate disabled) would wrongly
+// get vetoed by FireGuard's live re-hash despite Admit auto-arming it
+// unconditionally.
+func TestTrustedMirrorsAdmitForPinnedBuiltin(t *testing.T) {
+	t.Run("trusted source", func(t *testing.T) {
+		policy := enabledPolicy()
+		policy.TrustedSources[BuiltinSource] = true
+		g, _, _ := newTestGate(t, policy)
+		g.SetBuiltinPinned(true)
+		spec := writeTaskDir(t, t.TempDir(), "buildin/mcp", "export default () => 1")
+
+		if armed, err := g.Admit(spec); err != nil || !armed {
+			t.Fatalf("Admit: armed=%v err=%v", armed, err)
+		}
+		if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("export default () => 2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.FireGuard("buildin/mcp"); err != nil {
+			t.Fatalf("FireGuard must honor trust:always for buildin even when pinned and edited: %v", err)
+		}
+	})
+
+	t.Run("gate disabled", func(t *testing.T) {
+		policy := Policy{Enabled: false, TrustedSources: map[string]bool{}, TrustedTasks: map[string]bool{}}
+		g, _, _ := newTestGate(t, policy)
+		g.SetBuiltinPinned(true)
+		spec := writeTaskDir(t, t.TempDir(), "buildin/mcp", "export default () => 1")
+
+		if armed, err := g.Admit(spec); err != nil || !armed {
+			t.Fatalf("Admit: armed=%v err=%v", armed, err)
+		}
+		if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("export default () => 2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.FireGuard("buildin/mcp"); err != nil {
+			t.Fatalf("FireGuard must have no opinion when the gate is disabled, pinned buildin included: %v", err)
+		}
+	})
+}
+
 // TestFireGuardPinnedBuiltinVetoesEditedContent is the FireGuard counterpart
 // of TestFireGuardVetoesEditedApprovedTask: once buildin is pinned, trusted()
 // no longer exempts it, so FireGuard's live re-hash closes the same

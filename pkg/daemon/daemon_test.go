@@ -64,14 +64,22 @@ func TestResolveDataDir(t *testing.T) {
 	}
 }
 
-// TestRetentionOverrideInOnRegister verifies Finding 2: the OnRegister hook
-// must override buildin/run-inputs-cleanup's retention_seconds param default
-// to reflect dicode.yaml's defaults.run_inputs.retention. Without this fix
-// the cleanup task always ran with its hard-coded 30-day default regardless
-// of the operator's configured retention.
+// TestRetentionOverrideInOnRegister verifies Finding 2: the arm closure
+// (newArmDisarm, wired as OnRegister) must override buildin/run-inputs-cleanup's
+// retention_seconds param default to reflect dicode.yaml's
+// defaults.run_inputs.retention. Without this fix the cleanup task always ran
+// with its hard-coded 30-day default regardless of the operator's configured
+// retention.
 //
-// This test exercises the same mutation logic that lives inside the OnRegister
-// closure in run(), keeping the logic in one place and the test cheap.
+// It also pins the #832 code-review fix: the override must land on a copy,
+// never on the caller's spec in place. That spec is the exact object the
+// approval gate's Admit stores in its pending/admitted bookkeeping before
+// calling arm, and a pinned buildin task can now sit pending while
+// Gate.State concurrently reads that same object's Params — an in-place
+// write there is a data race the race detector catches.
+//
+// This test exercises the same mutation logic that lives inside the arm
+// closure in newArmDisarm, keeping the logic in one place and the test cheap.
 func TestRetentionOverrideInOnRegister(t *testing.T) {
 	retention := 7 * 24 * time.Hour // 7 days = 604800s
 	cfg := &config.Config{}
@@ -84,22 +92,68 @@ func TestRetentionOverrideInOnRegister(t *testing.T) {
 			{Name: "retention_seconds", Default: "2592000", Type: "number"},
 		},
 	}
+	var k task.Kinded = spec
 
-	// Simulate exactly what the OnRegister closure does.
+	// Simulate exactly what the arm closure does.
 	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
 		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
 		for i := range spec.Params {
 			if spec.Params[i].Name == "retention_seconds" {
-				spec.Params[i].Default = retStr
+				override := *spec
+				override.Params = append(task.Params(nil), spec.Params...)
+				override.Params[i].Default = retStr
+				spec = &override
+				k = spec
 				break
 			}
 		}
 	}
 
 	want := fmt.Sprintf("%d", int64(retention.Seconds())) // "604800"
-	got := spec.Params[0].Default
-	if got != want {
+	if got := spec.Params[0].Default; got != want {
 		t.Errorf("retention_seconds default = %q, want %q", got, want)
+	}
+	if got := k.(*task.Spec).Params[0].Default; got != want {
+		t.Errorf("k's retention_seconds default = %q, want %q", got, want)
+	}
+}
+
+// TestRetentionOverrideDoesNotMutateCallersSpec is the #832 code-review
+// regression: the override must never write through the spec the caller
+// (the approval gate) handed to arm, since that exact object can now be
+// concurrently read by Gate.State while a pinned buildin task sits pending.
+func TestRetentionOverrideDoesNotMutateCallersSpec(t *testing.T) {
+	retention := 7 * 24 * time.Hour
+	cfg := &config.Config{}
+	cfg.Defaults.RunInputs.Retention = retention
+
+	original := &task.Spec{
+		ID: "buildin/run-inputs-cleanup",
+		Params: task.Params{
+			{Name: "retention_seconds", Default: "2592000", Type: "number"},
+		},
+	}
+	callerCopy := original // the reference the gate would keep in g.admitted/g.pending
+	spec := original
+
+	if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+		for i := range spec.Params {
+			if spec.Params[i].Name == "retention_seconds" {
+				override := *spec
+				override.Params = append(task.Params(nil), spec.Params...)
+				override.Params[i].Default = retStr
+				spec = &override
+				break
+			}
+		}
+	}
+
+	if got := callerCopy.Params[0].Default; got != "2592000" {
+		t.Errorf("caller's spec was mutated in place: Default = %q, want unchanged 2592000", got)
+	}
+	if spec == callerCopy {
+		t.Error("the overridden spec must be a distinct object from the caller's, not the same pointer")
 	}
 }
 

@@ -415,14 +415,27 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		// Override buildin/run-inputs-cleanup's retention_seconds default to
 		// match dicode.yaml's defaults.run_inputs.retention. This must happen
 		// before eng.Register so the engine sees the correct default when
-		// building the param map for the next cron fire. We mutate the spec
-		// slice element in place; the reconciler replaces the spec on each
-		// reload, so the override is re-applied on every registration.
+		// building the param map for the next cron fire. The reconciler
+		// replaces the spec on each reload, so the override is re-applied on
+		// every registration.
+		//
+		// Registers a copy with the override applied, rather than mutating
+		// the caller's spec in place: k is the exact object the approval
+		// gate's Admit stored in its pending/admitted bookkeeping before
+		// calling arm, and a pinned buildin task can now sit pending (#832)
+		// while Gate.State concurrently reads that same object's Params —
+		// mutating it here raced with that read. The override is also
+		// operator config, not shipped content, so the content hash (computed
+		// against k before arm ever ran) should never observe it anyway.
 		if isSpec && spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
 			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
 			for i := range spec.Params {
 				if spec.Params[i].Name == "retention_seconds" {
-					spec.Params[i].Default = retStr
+					override := *spec
+					override.Params = append(task.Params(nil), spec.Params...)
+					override.Params[i].Default = retStr
+					spec = &override
+					k = spec
 					break
 				}
 			}

@@ -199,12 +199,15 @@ func (g *Gate) State(id string) (State, error) {
 		Enabled:     ent.kinded.IsEnabled(),
 	}
 
-	// ent.kinded is read outside the lock. The one in-place mutation of an
-	// admitted spec (the arm callback rewriting a param default) is scoped to a
-	// builtin task ID, and builtins never pend — Admit auto-approves
-	// BuiltinSource before the pending branch — so no spec reachable here is
-	// concurrently written. A future in-place mutation of a gated task's spec
-	// would break that.
+	// ent.kinded is read outside the lock. This relies on the arm callback
+	// (pkg/daemon's newArmDisarm) never mutating a spec it was handed in
+	// place — it registers a copy for its one param-default override
+	// (buildin/run-inputs-cleanup's retention_seconds) rather than writing
+	// through k, specifically so this read can never race that write. That
+	// matters now that a pinned buildin task can pend (#832): before, no
+	// spec reachable from the pending set was ever also live in arm's hands,
+	// since Admit auto-approved BuiltinSource before the pending branch ever
+	// ran; a pinned buildin can now reach both.
 	switch s := ent.kinded.(type) {
 	case *task.Spec:
 		stateFromSpec(&st, s)

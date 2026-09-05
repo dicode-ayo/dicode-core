@@ -511,8 +511,8 @@ func (g *Gate) FireGuard(taskID string) error {
 // waves through a task Admit would have gated.
 func (g *Gate) trusted(id string) bool {
 	switch {
-	case SourceOf(id) == BuiltinSource:
-		return !g.builtinPinned
+	case SourceOf(id) == BuiltinSource && !g.builtinPinned:
+		return true
 	case g.policy.TrustedTasks[id]:
 		return true
 	case g.policy.TrustedSources[SourceOf(id)]:
