@@ -234,6 +234,7 @@ func TestFireGuardPinnedBuiltinVetoesEditedContent(t *testing.T) {
 	if err := g.Approve("buildin/mcp"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
+	approved, _ := lock.Get("buildin/mcp")
 	if err := g.FireGuard("buildin/mcp"); err != nil {
 		t.Fatalf("FireGuard on freshly approved task: %v", err)
 	}
@@ -248,7 +249,6 @@ func TestFireGuardPinnedBuiltinVetoesEditedContent(t *testing.T) {
 	if err := g.FireGuard("buildin/mcp"); !errors.Is(err, ErrPending) {
 		t.Fatalf("FireGuard after edit = %v, want ErrPending (changed content must not run)", err)
 	}
-	approved, _ := lock.Get("buildin/mcp")
 	if rec, _ := lock.Get("buildin/mcp"); rec.Hash != approved.Hash {
 		t.Fatal("lock hash must not be mutated by a live FireGuard check")
 	}
