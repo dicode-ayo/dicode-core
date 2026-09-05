@@ -576,6 +576,13 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 		}
 	}
 	approvalGate := approval.NewGate(gatePolicy, lock, arm, log)
+	// A buildin source pinned to a tag (spec.entries.buildin.ref.tag) promises
+	// content stays put between approvals; without this the gate's buildin
+	// bypass can't tell a re-cut tag from the ordinary moving-branch case it
+	// exists to tolerate (#832).
+	if entry := cfg.Spec.Entries[approval.BuiltinSource]; entry != nil && entry.Ref != nil {
+		approvalGate.SetBuiltinPinned(entry.Ref.IsPinned())
+	}
 	// Pending tasks stay in the registry (API visibility, like Enabled:false)
 	// and remain resolvable by manual / chain / replay fire paths — the fire
 	// guard vetoes those at the engine chokepoint. The same guard also vetoes

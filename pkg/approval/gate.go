@@ -64,6 +64,14 @@ type Gate struct {
 	admitted    map[string]task.Kinded
 	pendingHook func(k task.Kinded, hash string)
 	bootstrap   bool
+
+	// builtinPinned mirrors whether the buildin source is pinned to a tag
+	// (spec.entries.buildin.ref.tag, see pkg/taskset.Ref.IsPinned) rather
+	// than tracking a moving branch (the default). Set once at startup via
+	// SetBuiltinPinned; read by builtinPinnedDrift. False (the zero value)
+	// preserves today's unconditional buildin bypass — a moving branch is
+	// expected to move.
+	builtinPinned bool
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
@@ -115,6 +123,11 @@ func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn
 
 // SetCommitFunc overrides the commit resolver (tests).
 func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
+
+// SetBuiltinPinned records whether the buildin source is pinned to a tag.
+// Call once at startup, before Admit runs concurrently — it is not
+// mutex-guarded, mirroring SetHashFunc/SetCommitFunc.
+func (g *Gate) SetBuiltinPinned(pinned bool) { g.builtinPinned = pinned }
 
 // SetPendingHook installs the operator-notification hook. It is invoked only
 // on the transition into pending — a task newly held, or a held task observed
@@ -180,7 +193,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 
 	var by string
 	switch {
-	case SourceOf(id) == BuiltinSource:
+	case SourceOf(id) == BuiltinSource && !g.builtinPinnedDrift(id, k):
 		by = ApprovedByBuiltin
 	case g.policy.TrustedTasks[id]:
 		by = ApprovedByTrustedTask
@@ -251,8 +264,52 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 			g.log.Warn("approval: lock write failed",
 				zap.String("task", id), zap.Error(err))
 		}
+		// Backfill a missing baseline commit for a pinned buildin record at
+		// an otherwise-unchanged hash: Record above no-ops in that case (by
+		// design, to keep the steady-state reconcile from resolving a
+		// commit or rewriting the lock for nothing), so without this a
+		// record that predates commit tracking — or predates the operator
+		// pinning buildin to a tag — would never gain the baseline
+		// builtinPinnedDrift needs, and would sit exempt from drift
+		// detection until its hash next happens to change (#832).
+		if hashUnchanged && by == ApprovedByBuiltin && g.builtinPinned {
+			if rec, ok := g.lock.Get(id); ok && rec.Commit == "" {
+				if err := g.lock.RecordCommit(id, g.commitFn(k)); err != nil {
+					g.log.Warn("approval: commit backfill failed",
+						zap.String("task", id), zap.Error(err))
+				}
+			}
+		}
 	}
 	return true, g.arm(k)
+}
+
+// builtinPinnedDrift reports whether k is a buildin-source task whose
+// resolved git commit has moved since the last commit on record for it,
+// while the buildin source is pinned to a tag (SetBuiltinPinned) — the case
+// #832 names: a pinned tag re-cut to different content, which the plain
+// buildin bypass would otherwise auto-approve without anyone ever seeing it.
+//
+// Returns false — the bypass stays open — when: buildin isn't pinned (the
+// default; a moving branch is expected to move), k's commit can't be
+// resolved (a dir-less task, or a local buildin override outside any
+// repository), or there is no commit on record yet for id (a fresh install,
+// or one upgrading onto this check for the first time — seeded as a
+// baseline by the backfill above rather than stranding the whole buildin
+// inventory pending).
+func (g *Gate) builtinPinnedDrift(id string, k task.Kinded) bool {
+	if !g.builtinPinned {
+		return false
+	}
+	commit := g.commitFn(k)
+	if commit == "" {
+		return false
+	}
+	rec, ok := g.lock.Get(id)
+	if !ok || rec.Commit == "" {
+		return false
+	}
+	return rec.Commit != commit
 }
 
 // taskDirOf returns k's on-disk task directory, mirroring the *task.Spec /

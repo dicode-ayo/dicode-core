@@ -288,6 +288,29 @@ func (l *Lock) Record(id, hash, by, commit string) error {
 	return l.save()
 }
 
+// RecordCommit backfills the commit field of id's existing record without
+// touching its hash, approver, or approved_at — for seeding a baseline
+// commit on a record that predates commit tracking, or predates the
+// operator pinning the record's source to a tag (#832). A plain Record call
+// cannot do this: it no-ops whenever the hash it's given already matches,
+// which is exactly the steady-state case this backfill runs in. A no-op
+// when id has no record, the record already carries a commit, or commit is
+// empty.
+func (l *Lock) RecordCommit(id, commit string) error {
+	if commit == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	rec, ok := l.tasks[id]
+	if !ok || rec.Commit != "" {
+		return nil
+	}
+	rec.Commit = commit
+	l.tasks[id] = rec
+	return l.save()
+}
+
 // Remove drops the record for id and persists the lock. A no-op when the
 // id is not present.
 func (l *Lock) Remove(id string) error {

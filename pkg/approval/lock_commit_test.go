@@ -178,3 +178,87 @@ func TestLockRecord_UnchangedHashKeepsRecord(t *testing.T) {
 func fakeCommit(c string) string {
 	return strings.Repeat(c, 40)[:40]
 }
+
+// TestLock_RecordCommit_BackfillsMissingCommit covers the happy path: an
+// existing record with no commit gets one written in place, with its hash,
+// approver, and approved_at left untouched, and the write persists to disk.
+func TestLock_RecordCommit_BackfillsMissingCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	l, err := LoadLock(path)
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	if err := l.Record("buildin/mcp", "abc123", ApprovedByBuiltin, ""); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	before, _ := l.Get("buildin/mcp")
+
+	sha := fakeCommit("a")
+	if err := l.RecordCommit("buildin/mcp", sha); err != nil {
+		t.Fatalf("RecordCommit: %v", err)
+	}
+	after, ok := l.Get("buildin/mcp")
+	if !ok {
+		t.Fatal("record disappeared")
+	}
+	if after.Commit != sha {
+		t.Fatalf("Commit = %q, want %q", after.Commit, sha)
+	}
+	if after.Hash != before.Hash || after.ApprovedBy != before.ApprovedBy || !after.ApprovedAt.Equal(before.ApprovedAt) {
+		t.Fatalf("RecordCommit must only touch Commit: before=%+v after=%+v", before, after)
+	}
+
+	reloaded, err := LoadLock(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if rec, ok := reloaded.Get("buildin/mcp"); !ok || rec.Commit != sha {
+		t.Fatalf("backfilled commit did not persist: %+v ok=%v", rec, ok)
+	}
+}
+
+// TestLock_RecordCommit_NoopWhenAlreadySet guards against clobbering an
+// existing commit: RecordCommit backfills a missing baseline, it does not
+// overwrite one already on record.
+func TestLock_RecordCommit_NoopWhenAlreadySet(t *testing.T) {
+	l, err := LoadLock(filepath.Join(t.TempDir(), LockFileName))
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	original := fakeCommit("a")
+	if err := l.Record("buildin/mcp", "abc123", ApprovedByBuiltin, original); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := l.RecordCommit("buildin/mcp", fakeCommit("b")); err != nil {
+		t.Fatalf("RecordCommit: %v", err)
+	}
+	rec, _ := l.Get("buildin/mcp")
+	if rec.Commit != original {
+		t.Fatalf("Commit = %q, want the original %q left untouched", rec.Commit, original)
+	}
+}
+
+// TestLock_RecordCommit_NoopWhenNoRecord guards the missing-id and
+// empty-commit edges: neither should create a record or error.
+func TestLock_RecordCommit_NoopWhenNoRecord(t *testing.T) {
+	l, err := LoadLock(filepath.Join(t.TempDir(), LockFileName))
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	if err := l.RecordCommit("buildin/mcp", fakeCommit("a")); err != nil {
+		t.Fatalf("RecordCommit on unknown id: %v", err)
+	}
+	if _, ok := l.Get("buildin/mcp"); ok {
+		t.Fatal("RecordCommit must not create a record for an unknown id")
+	}
+
+	if err := l.Record("buildin/mcp", "abc123", ApprovedByBuiltin, ""); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := l.RecordCommit("buildin/mcp", ""); err != nil {
+		t.Fatalf("RecordCommit with empty commit: %v", err)
+	}
+	if rec, _ := l.Get("buildin/mcp"); rec.Commit != "" {
+		t.Fatalf("Commit = %q, want still empty after an empty-commit call", rec.Commit)
+	}
+}
