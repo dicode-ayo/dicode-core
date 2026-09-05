@@ -510,17 +510,33 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // task files fresh on every run, so an edit that lands between reconcile
 // cycles would otherwise execute new code under a stale approval before the
 // gate re-pends it. Trusted / builtin tasks (and a disabled gate) skip the
-// re-hash: their trust does not bind to a specific content hash.
+// re-hash: their trust does not bind to a specific content hash. The one
+// exception is a pinned buildin task (#832): it gets an equivalent live
+// recheck keyed on commit instead of hash, for the same reconcile-window
+// reason — see the inline comment below.
 func (g *Gate) FireGuard(taskID string) error {
 	if g.IsPending(taskID) {
 		return fmt.Errorf("%w: %s", ErrPending, taskID)
 	}
-	if g.trusted(taskID) {
-		return nil
-	}
 	g.mu.Lock()
 	k, ok := g.admitted[taskID]
 	g.mu.Unlock()
+	// A pinned buildin task's drift veto must be checked live here, not only
+	// inferred from IsPending above: the reconciler updates a git source's
+	// working tree, then walks its tasks admitting each one in turn, so a
+	// task whose content already moved on disk can still read IsPending as
+	// false for the span between the checkout landing and this task's own
+	// turn at Admit. trusted() below would otherwise wave it through
+	// unconditionally for that whole window — the same live-recheck gap
+	// FireGuard already closes for a non-trusted source's content hash (see
+	// TestFireGuardVetoesEditedApprovedTask), just keyed on commit instead
+	// of hash for buildin.
+	if ok && SourceOf(taskID) == BuiltinSource && g.builtinPinnedDrift(taskID, k) {
+		return fmt.Errorf("%w: %s (buildin source's pinned tag was re-cut; content changed since approval)", ErrPending, taskID)
+	}
+	if g.trusted(taskID) {
+		return nil
+	}
 	if !ok {
 		// A gate-enabled, non-trusted task the gate has not yet admitted must
 		// not run: fail closed rather than leave a startup window open between
@@ -540,7 +556,10 @@ func (g *Gate) FireGuard(taskID string) error {
 // trusted reports whether id is approved independent of its content hash:
 // builtin tasks, operator-trusted tasks/sources, or a disabled gate. Mirrors
 // the hash-independent auto-approve arms of Admit so FireGuard never vetoes a
-// task Admit would have armed unconditionally.
+// task Admit would have armed unconditionally — except a pinned buildin task
+// observed drifted, which FireGuard vetoes itself before ever calling this,
+// since that check needs the task.Kinded handle this id-only method doesn't
+// carry (see FireGuard).
 func (g *Gate) trusted(id string) bool {
 	switch {
 	case SourceOf(id) == BuiltinSource:

@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/task"
@@ -200,6 +201,63 @@ func TestBuiltinPinnedBackfillsMissingCommitOnUnchangedHash(t *testing.T) {
 	}
 	if armed {
 		t.Fatal("backfilled baseline must gate a subsequent commit drift")
+	}
+}
+
+// TestFireGuardVetoesPinnedBuiltinCommitDrift is the FireGuard counterpart
+// of TestBuiltinPinnedCommitDriftHoldsPending, for the reconcile-window race
+// FireGuard's own doc comment describes: a git source updates its working
+// tree, then walks its tasks admitting each in turn — so a buildin task's
+// resolved commit can already have moved on disk before the reconciler's
+// loop reaches this particular task's own Admit call. Until that happens,
+// IsPending stays false, and trusted() would otherwise wave a builtin task
+// through unconditionally regardless of the drift. FireGuard must veto it
+// live off the commit function, exactly as it already re-hashes a
+// non-trusted source's live content in TestFireGuardVetoesEditedApprovedTask.
+func TestFireGuardVetoesPinnedBuiltinCommitDrift(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	g.SetBuiltinPinned(true)
+	spec := writeTaskDir(t, t.TempDir(), "buildin/mcp", "export default () => {}")
+
+	baseline := fakeCommit("a")
+	g.SetCommitFunc(func(task.Kinded) string { return baseline })
+	if armed, err := g.Admit(spec); err != nil || !armed {
+		t.Fatalf("seed admit: armed=%v err=%v", armed, err)
+	}
+	if err := g.FireGuard("buildin/mcp"); err != nil {
+		t.Fatalf("FireGuard on freshly seeded task: %v", err)
+	}
+
+	// The commit moves (the tag was re-cut) with no Admit in between —
+	// exactly the reconcile-window gap: IsPending is still false here.
+	g.SetCommitFunc(func(task.Kinded) string { return fakeCommit("b") })
+	if g.IsPending("buildin/mcp") {
+		t.Fatal("precondition: task must not yet be re-pended by the reconciler")
+	}
+
+	if err := g.FireGuard("buildin/mcp"); !errors.Is(err, ErrPending) {
+		t.Fatalf("FireGuard after commit drift = %v, want ErrPending (drifted content must not run)", err)
+	}
+	if rec, _ := lock.Get("buildin/mcp"); rec.Commit != baseline {
+		t.Fatalf("lock commit mutated by a live FireGuard check: %q -> %q", baseline, rec.Commit)
+	}
+}
+
+// TestFireGuardAllowsUnpinnedBuiltinCommitDrift is the regression guard
+// alongside the above: an unpinned buildin task (the default) must keep
+// firing through a commit change exactly as before, since FireGuard's new
+// live drift check is a no-op when builtinPinned is false.
+func TestFireGuardAllowsUnpinnedBuiltinCommitDrift(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "buildin/mcp", "export default () => {}")
+
+	g.SetCommitFunc(func(task.Kinded) string { return fakeCommit("a") })
+	if armed, err := g.Admit(spec); err != nil || !armed {
+		t.Fatalf("seed admit: armed=%v err=%v", armed, err)
+	}
+	g.SetCommitFunc(func(task.Kinded) string { return fakeCommit("b") })
+	if err := g.FireGuard("buildin/mcp"); err != nil {
+		t.Fatalf("unpinned buildin must still fire through a commit change: %v", err)
 	}
 }
 
