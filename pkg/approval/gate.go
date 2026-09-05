@@ -68,9 +68,16 @@ type Gate struct {
 	// builtinPinned mirrors whether the buildin source is pinned to a tag
 	// (spec.entries.buildin.ref.tag, see pkg/taskset.Ref.IsPinned) rather
 	// than tracking a moving branch (the default). Set once at startup via
-	// SetBuiltinPinned; read by builtinPinnedDrift. False (the zero value)
+	// SetBuiltinPinned; read by Admit and trusted. False (the zero value)
 	// preserves today's unconditional buildin bypass — a moving branch is
-	// expected to move.
+	// expected to move. True routes buildin through the same content-hash
+	// gate every other source already gets, rather than a second
+	// buildin-specific mechanism (#832): an existing lock record's Hash
+	// already tracks buildin's current content exactly (Record runs on
+	// every admit whose hash changed, builtin bypass or not), so pinning
+	// buildin and upgrading onto this check never spuriously pends an
+	// unchanged inventory, and a re-cut tag that does change content pends
+	// exactly like it would for any other pinned source.
 	builtinPinned bool
 }
 
@@ -193,7 +200,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 
 	var by string
 	switch {
-	case SourceOf(id) == BuiltinSource && !g.builtinPinnedDrift(id, k):
+	case SourceOf(id) == BuiltinSource && !g.builtinPinned:
 		by = ApprovedByBuiltin
 	case g.policy.TrustedTasks[id]:
 		by = ApprovedByTrustedTask
@@ -264,52 +271,8 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 			g.log.Warn("approval: lock write failed",
 				zap.String("task", id), zap.Error(err))
 		}
-		// Backfill a missing baseline commit for a pinned buildin record at
-		// an otherwise-unchanged hash: Record above no-ops in that case (by
-		// design, to keep the steady-state reconcile from resolving a
-		// commit or rewriting the lock for nothing), so without this a
-		// record that predates commit tracking — or predates the operator
-		// pinning buildin to a tag — would never gain the baseline
-		// builtinPinnedDrift needs, and would sit exempt from drift
-		// detection until its hash next happens to change (#832).
-		if hashUnchanged && by == ApprovedByBuiltin && g.builtinPinned {
-			if rec, ok := g.lock.Get(id); ok && rec.Commit == "" {
-				if err := g.lock.RecordCommit(id, g.commitFn(k)); err != nil {
-					g.log.Warn("approval: commit backfill failed",
-						zap.String("task", id), zap.Error(err))
-				}
-			}
-		}
 	}
 	return true, g.arm(k)
-}
-
-// builtinPinnedDrift reports whether k is a buildin-source task whose
-// resolved git commit has moved since the last commit on record for it,
-// while the buildin source is pinned to a tag (SetBuiltinPinned) — the case
-// #832 names: a pinned tag re-cut to different content, which the plain
-// buildin bypass would otherwise auto-approve without anyone ever seeing it.
-//
-// Returns false — the bypass stays open — when: buildin isn't pinned (the
-// default; a moving branch is expected to move), k's commit can't be
-// resolved (a dir-less task, or a local buildin override outside any
-// repository), or there is no commit on record yet for id (a fresh install,
-// or one upgrading onto this check for the first time — seeded as a
-// baseline by the backfill above rather than stranding the whole buildin
-// inventory pending).
-func (g *Gate) builtinPinnedDrift(id string, k task.Kinded) bool {
-	if !g.builtinPinned {
-		return false
-	}
-	commit := g.commitFn(k)
-	if commit == "" {
-		return false
-	}
-	rec, ok := g.lock.Get(id)
-	if !ok || rec.Commit == "" {
-		return false
-	}
-	return rec.Commit != commit
 }
 
 // taskDirOf returns k's on-disk task directory, mirroring the *task.Spec /
@@ -510,33 +473,20 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // task files fresh on every run, so an edit that lands between reconcile
 // cycles would otherwise execute new code under a stale approval before the
 // gate re-pends it. Trusted / builtin tasks (and a disabled gate) skip the
-// re-hash: their trust does not bind to a specific content hash. The one
-// exception is a pinned buildin task (#832): it gets an equivalent live
-// recheck keyed on commit instead of hash, for the same reconcile-window
-// reason — see the inline comment below.
+// re-hash: their trust does not bind to a specific content hash. A pinned
+// buildin task (#832) is not in that trusted set — see trusted — so it gets
+// the same live re-hash as any other gated source, closing the identical
+// reconcile-window race for it with no extra machinery.
 func (g *Gate) FireGuard(taskID string) error {
 	if g.IsPending(taskID) {
 		return fmt.Errorf("%w: %s", ErrPending, taskID)
 	}
-	g.mu.Lock()
-	k, ok := g.admitted[taskID]
-	g.mu.Unlock()
-	// A pinned buildin task's drift veto must be checked live here, not only
-	// inferred from IsPending above: the reconciler updates a git source's
-	// working tree, then walks its tasks admitting each one in turn, so a
-	// task whose content already moved on disk can still read IsPending as
-	// false for the span between the checkout landing and this task's own
-	// turn at Admit. trusted() below would otherwise wave it through
-	// unconditionally for that whole window — the same live-recheck gap
-	// FireGuard already closes for a non-trusted source's content hash (see
-	// TestFireGuardVetoesEditedApprovedTask), just keyed on commit instead
-	// of hash for buildin.
-	if ok && SourceOf(taskID) == BuiltinSource && g.builtinPinnedDrift(taskID, k) {
-		return fmt.Errorf("%w: %s (buildin source's pinned tag was re-cut; content changed since approval)", ErrPending, taskID)
-	}
 	if g.trusted(taskID) {
 		return nil
 	}
+	g.mu.Lock()
+	k, ok := g.admitted[taskID]
+	g.mu.Unlock()
 	if !ok {
 		// A gate-enabled, non-trusted task the gate has not yet admitted must
 		// not run: fail closed rather than leave a startup window open between
@@ -554,16 +504,15 @@ func (g *Gate) FireGuard(taskID string) error {
 }
 
 // trusted reports whether id is approved independent of its content hash:
-// builtin tasks, operator-trusted tasks/sources, or a disabled gate. Mirrors
-// the hash-independent auto-approve arms of Admit so FireGuard never vetoes a
-// task Admit would have armed unconditionally — except a pinned buildin task
-// observed drifted, which FireGuard vetoes itself before ever calling this,
-// since that check needs the task.Kinded handle this id-only method doesn't
-// carry (see FireGuard).
+// builtin tasks (unless buildin is pinned — see builtinPinned's doc
+// comment), operator-trusted tasks/sources, or a disabled gate. Mirrors the
+// hash-independent auto-approve arms of Admit so FireGuard never vetoes a
+// task Admit would have armed unconditionally, and — as importantly — never
+// waves through a task Admit would have gated.
 func (g *Gate) trusted(id string) bool {
 	switch {
 	case SourceOf(id) == BuiltinSource:
-		return true
+		return !g.builtinPinned
 	case g.policy.TrustedTasks[id]:
 		return true
 	case g.policy.TrustedSources[SourceOf(id)]:
