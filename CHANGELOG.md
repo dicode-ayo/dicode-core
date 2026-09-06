@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.2](https://github.com/dicode-ayo/dicode-core/compare/v0.6.1...v0.6.2) (2026-09-06)
+
+
+### Features
+
+* **webui:** accept fire-time params on the manual run endpoint ([#836](https://github.com/dicode-ayo/dicode-core/issues/836)) ([35c5154](https://github.com/dicode-ayo/dicode-core/commit/35c51549857978fbc1b2de32f4e576cd8c979e9c))
+
+
+### Bug Fixes
+
+* **cli:** say when a data dir already holds a dashboard passphrase ([#834](https://github.com/dicode-ayo/dicode-core/issues/834)) ([6175180](https://github.com/dicode-ayo/dicode-core/commit/61751803aaa0712732662775b552b2e8ee7fad38))
+* **tasks:** stop cron-firing ops/relay-edge with unsatisfiable required params ([#837](https://github.com/dicode-ayo/dicode-core/issues/837)) ([a7f6106](https://github.com/dicode-ayo/dicode-core/commit/a7f6106a97e4329ae6a1dc7b145e1c70b1537d1b))
+
 ## [0.6.1](https://github.com/dicode-ayo/dicode-core/compare/v0.6.0...v0.6.1) (2026-09-05)
 
 
