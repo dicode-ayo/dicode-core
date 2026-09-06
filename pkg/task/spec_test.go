@@ -626,6 +626,12 @@ trigger:
 	}
 }
 
+// TestUnsatisfiableRequiredParam_Warnings guards unsatisfiableRequiredParamWarnings
+// (#821/#837): a required param with no default can never be satisfied on a
+// cron, daemon, or un-overridden chain trigger, so validate() must warn for
+// those and stay silent for triggers that can actually supply the param
+// (manual, webhook), a param that already has a default, and a chain trigger
+// whose own overrides patch one in.
 func TestUnsatisfiableRequiredParam_Warnings(t *testing.T) {
 	cases := []struct {
 		name      string
