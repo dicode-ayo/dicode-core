@@ -891,6 +891,7 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	s.Warnings = append(s.Warnings, webhookSecretGatedFieldWarnings(s.Trigger.WebhookSecret, s.Trigger.ReplayProtection, s.Trigger.RequireTimestamp)...)
+	s.Warnings = append(s.Warnings, cronDaemonRequiredParamWarnings(s.Trigger, s.Params)...)
 	if s.OnFailureChain != nil {
 		warns, err := s.OnFailureChain.Validate()
 		if err != nil {
@@ -974,6 +975,38 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 	}
 	if requireTimestamp != nil && *requireTimestamp {
 		warnings = append(warnings, "trigger.require_timestamp is set but trigger.webhook_secret is empty — the webhook is unauthenticated and require_timestamp has no effect")
+	}
+	return warnings
+}
+
+// cronDaemonRequiredParamWarnings flags a required param with no default on
+// a task whose sole trigger is cron or daemon. Neither trigger can ever
+// supply fire-time params — cron fires on a schedule and daemon fires once
+// at process start, both with no caller-supplied overrides — so such a
+// param's effective value is always empty and every fire fails preflight
+// with a params_invalid fail_reason (see the enforcement added in #800,
+// pkg/trigger/run.go) before the task body ever runs, rather than running
+// once. #821 shipped exactly this bug in tasks/ops/relay-edge, where a
+// defaults.on_failure_chain turned every hourly failure into a
+// notification too. Advisory only, like webhookSecretGatedFieldWarnings /
+// dockerHardeningWarnings below: the param may still be reachable via a
+// per-edge override on a chain trigger swapped in later, or the task may
+// simply ship disabled until an operator supplies the values.
+func cronDaemonRequiredParamWarnings(t TriggerConfig, params Params) []string {
+	var kind string
+	switch {
+	case t.Cron != "":
+		kind = "cron"
+	case t.Daemon:
+		kind = "daemon"
+	default:
+		return nil
+	}
+	var warnings []string
+	for _, p := range params {
+		if p.Required && p.Default == "" {
+			warnings = append(warnings, fmt.Sprintf("params.%s is required with no default, but trigger.%s never supplies fire-time params — every fire will fail preflight (params_invalid) instead of running", p.Name, kind))
+		}
 	}
 	return warnings
 }

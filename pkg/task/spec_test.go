@@ -626,6 +626,109 @@ trigger:
 	}
 }
 
+func TestCronDaemonRequiredParam_Warnings(t *testing.T) {
+	cases := []struct {
+		name      string
+		yaml      string
+		mustMatch []string // substrings that must appear in s.Warnings
+	}{
+		{
+			name: "cron trigger with required param and no default warns",
+			yaml: `
+name: t
+trigger:
+  cron: "0 * * * *"
+params:
+  zone:
+    required: true
+`,
+			mustMatch: []string{"params.zone", "trigger.cron"},
+		},
+		{
+			name: "daemon trigger with required param and no default warns",
+			yaml: `
+name: t
+trigger:
+  daemon: true
+params:
+  api_key:
+    required: true
+`,
+			mustMatch: []string{"params.api_key", "trigger.daemon"},
+		},
+		{
+			name: "cron trigger with required param that has a default does not warn",
+			yaml: `
+name: t
+trigger:
+  cron: "0 * * * *"
+params:
+  zone:
+    required: true
+    default: dicode.io
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "manual trigger with required param and no default does not warn",
+			yaml: `
+name: t
+trigger:
+  manual: true
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "webhook trigger with required param and no default does not warn",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "chain trigger with required param and no default does not warn",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := s.validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			joined := strings.Join(s.Warnings, "|")
+			for _, want := range tc.mustMatch {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing warning containing %q; got %v", want, s.Warnings)
+				}
+			}
+			if len(tc.mustMatch) == 0 && len(s.Warnings) != 0 {
+				t.Errorf("expected no warnings, got %v", s.Warnings)
+			}
+		})
+	}
+}
+
 func TestChainTrigger_Params_Parses(t *testing.T) {
 	src := strings.TrimSpace(`
 name: downstream

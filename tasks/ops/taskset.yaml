@@ -5,6 +5,12 @@ metadata:
 spec:
   entries:
     relay-edge:
+      # Disabled by default: its 4 required params (zone, public_hostname,
+      # control_hostname, control_ip) are deployment-specific and have no
+      # generic default, so an un-overridden install would otherwise cron-fire
+      # this hourly and fail preflight every tick (#821). See
+      # ./relay-edge/README.md#enabling-this-task for how to enable it.
+      enabled: false
       ref:
         path: ./relay-edge/task.yaml
     relay-cloudflared:

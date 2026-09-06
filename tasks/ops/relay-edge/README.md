@@ -54,6 +54,42 @@ that is ever proxied throws and no API call is made.
   the connector, set `ingress_host=host.docker.internal` here so the ingress
   targets the host from inside the container.
 
+## Enabling this task
+
+This task ships **disabled** (`enabled: false` in `../taskset.yaml`): its 4
+required params — `zone`, `public_hostname`, `control_hostname`,
+`control_ip` — are specific to your Cloudflare account and host, so there's
+no generic default that would make sense out of the box. Left enabled with
+no override, the hourly cron drift check would fail preflight
+(`params_invalid`) on every tick (#821).
+
+Enable it in your `dicode.yaml` with an `overrides.entries.relay-edge` block
+under the `ops` source entry (see `spec.entries.ops` in the shipped
+`dicode.yaml`), flipping `enabled` and supplying the required params:
+
+```yaml
+# dicode.yaml
+spec:
+  entries:
+    ops:
+      ref:
+        path: ${CONFIGDIR}/tasks/ops/taskset.yaml
+      overrides:
+        entries:
+          relay-edge:
+            enabled: true
+            params:
+              zone: dicode.io
+              public_hostname: relay.dicode.io
+              control_hostname: broker.relay.dicode.io
+              control_ip: "203.0.113.7"
+```
+
+`params.<name>` under an override sets that param's `default`, which is what
+the cron drift check reads (cron cannot supply fire-time param overrides).
+Any of the other params below can be overridden the same way if you need a
+non-default `tunnel_name`, `local_port`, `ingress_host`, or `dry_run`.
+
 ## Required Cloudflare API token scopes
 
 - **Zone → DNS: Edit**
