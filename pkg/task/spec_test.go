@@ -626,7 +626,7 @@ trigger:
 	}
 }
 
-func TestCronDaemonRequiredParam_Warnings(t *testing.T) {
+func TestUnsatisfiableRequiredParam_Warnings(t *testing.T) {
 	cases := []struct {
 		name      string
 		yaml      string
@@ -694,7 +694,10 @@ params:
 			mustMatch: nil,
 		},
 		{
-			name: "chain trigger with required param and no default does not warn",
+			// A plain chain dispatch never populates RunOptions.Params (see
+			// fireSuccessChains) any more than cron/daemon do, so this is the
+			// same bug unless the edge's own overrides patch in a default.
+			name: "chain trigger with required param and no default warns",
 			yaml: `
 name: t
 trigger:
@@ -704,7 +707,56 @@ params:
   zone:
     required: true
 `,
+			mustMatch: []string{"params.zone", "trigger.chain"},
+		},
+		{
+			name: "chain trigger whose own overrides supply a default does not warn",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        zone: dicode.io
+params:
+  zone:
+    required: true
+`,
 			mustMatch: nil,
+		},
+		{
+			name: "chain trigger whose own overrides drop required does not warn",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        - name: zone
+          required: false
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "chain trigger whose overrides patch a different param still warns",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        other: value
+params:
+  zone:
+    required: true
+`,
+			mustMatch: []string{"params.zone"},
 		},
 	}
 	for _, tc := range cases {
