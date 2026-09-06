@@ -993,11 +993,15 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 // notification too. Advisory only, like webhookSecretGatedFieldWarnings /
 // dockerHardeningWarnings below.
 //
-// Scope: kind: Task only. A cron-triggered kind: PipelineTask can hit the
-// same failure mode through a stage that references a task with an
-// unsatisfiable required param, but catching that needs the stage's target
-// Spec resolved (cross-file, at taskset-resolution time) — this function
-// only ever sees one task.yaml in isolation. Tracked separately as #838.
+// Scope: only covers a task's own declared trigger. Two related cases still
+// go unwarned because they need cross-task/cross-file resolution this
+// function doesn't have: a cron-triggered kind: PipelineTask whose stage
+// references a task with an unsatisfiable required param, and a task
+// reachable only as an on_failure_chain / defaults.on_failure_chain target
+// whose own trigger (e.g. manual, just to satisfy "at least one trigger")
+// reads as fine in isolation. Both dispatch the same no-Params way as
+// cron/daemon/chain above. Tracked separately as #838 (needs
+// taskset-resolution-time cross-referencing, once every entry is loaded).
 func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string {
 	var kind string
 	effective := params
