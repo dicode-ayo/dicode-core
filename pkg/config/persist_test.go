@@ -120,6 +120,33 @@ func TestMergeTaskOverride_PrunesEmptyOverrides(t *testing.T) {
 	}
 }
 
+// TestMergeTaskOverride_PrunesEmptiedParamsMap: clearing the last param
+// override has to leave the file as clean as it was before the first one,
+// or the entry keeps an inert `params: {}` that the cascade below cannot
+// prune because the entry itself is not empty.
+func TestMergeTaskOverride_PrunesEmptiedParamsMap(t *testing.T) {
+	yaml := strings.Replace(baseYAML, "    buildin:\n      ref:\n        path: /tmp/tasks/buildin/taskset.yaml",
+		`    buildin:
+      ref:
+        path: /tmp/tasks/buildin/taskset.yaml
+      overrides:
+        entries:
+          x:
+            params:
+              endpoint: http://loki:3100`, 1)
+	p, mt := writeTempYAML(t, yaml)
+	if err := MergeTaskOverride(p, "buildin/x", []byte(`{"params": {"endpoint": null}}`), mt); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	got, _ := os.ReadFile(p)
+	if strings.Contains(string(got), "params") {
+		t.Errorf("emptied params map should be pruned; got:\n%s", got)
+	}
+	if strings.Contains(string(got), "overrides:") {
+		t.Errorf("entry left with nothing should prune its overrides block; got:\n%s", got)
+	}
+}
+
 func TestMergeTaskOverride_GenericFields(t *testing.T) {
 	p, mt := writeTempYAML(t, baseYAML)
 	patch := []byte(`{"params": {"model": "gpt-4o"}, "timeout": "5m"}`)

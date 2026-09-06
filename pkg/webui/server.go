@@ -1850,18 +1850,100 @@ func (s *Server) writePipelineDetail(w http.ResponseWriter, p *task.PipelineTask
 	jsonOK(w, detail)
 }
 
+// runTaskMaxBodyBytes bounds apiRunTask's optional JSON body. Params are
+// unbounded by shape, so the byte count is the only thing standing between an
+// authenticated caller and a gigabyte of JSON.
+const runTaskMaxBodyBytes = 64 * 1024
+
+// runTaskRequest is the optional JSON body accepted by apiRunTask. An absent
+// body, an empty object, or an absent params key all mean "fire with the
+// task's declared defaults" — the shape every caller sent before params were
+// accepted here.
+type runTaskRequest struct {
+	Params map[string]any `json:"params,omitempty"`
+}
+
+// apiRunTask fires a manual run, optionally with fire-time param overrides —
+// the browser equivalent of `dicode run <task> key=value`.
+//
+// Supplied params are validated against the task's declared schema before a
+// run row exists, so a typo or a missing required value comes back as a 422
+// the operator can correct in place rather than as a run that fails preflight
+// (params_invalid) two seconds later with no logs to show for it.
+//
+// A kind: PipelineTask declares no params of its own, so there is no schema to
+// validate against; its values are passed through and must already be strings.
+//
+// Status codes:
+//   - 200 — run created; body carries runId
+//   - 400 — bad JSON, non-string param on a pipeline, or the engine refused the fire
+//   - 422 — params failed the task's schema; body carries per-field detail
 func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 	s.log.Info("run requested via API", zap.String("task", id))
+
+	var req runTaskRequest
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, runTaskMaxBodyBytes)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	params, ok := s.coerceRunParams(w, id, req.Params)
+	if !ok {
+		return
+	}
+
 	// Record the operator principal (the session's client IP — the best
 	// identity available under single-passphrase auth) so the run_triggered
 	// audit event (#45) can answer "who triggered this manual run".
-	runID, err := s.engine.FireManualWithActor(r.Context(), id, nil, clientIP(r, s.cfg.Server.TrustProxy))
+	runID, err := s.engine.FireManualWithActor(r.Context(), id, params, clientIP(r, s.cfg.Server.TrustProxy))
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	jsonOK(w, map[string]string{"runId": runID})
+}
+
+// coerceRunParams turns a JSON params object into the string map the engine
+// merges over a task's declared defaults, writing the error response itself
+// and reporting false when it did. A nil result fires the task unchanged.
+func (s *Server) coerceRunParams(w http.ResponseWriter, id string, raw map[string]any) (map[string]string, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		// Pipelines (and anything else without a param schema) take values
+		// verbatim; a non-string would reach the stage as Go's %v rendering
+		// of whatever JSON produced, so refuse it instead of guessing.
+		out := make(map[string]string, len(raw))
+		for k, v := range raw {
+			str, isStr := v.(string)
+			if !isStr {
+				jsonErr(w, "param "+k+" must be a string for a task with no declared schema",
+					http.StatusBadRequest)
+				return nil, false
+			}
+			out[k] = str
+		}
+		return out, true
+	}
+	coerced, errs := task.ValidateParams(spec.Params, raw)
+	if len(errs) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":  "invalid params",
+			"fields": errs,
+		})
+		return nil, false
+	}
+	return coerced, true
 }
 
 // apiPatchTaskOverrides accepts an RFC 7396 JSON Merge Patch against the
