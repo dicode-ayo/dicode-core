@@ -1002,11 +1002,13 @@ func cronDaemonRequiredParamWarnings(t TriggerConfig, params Params) []string {
 	default:
 		return nil
 	}
+	// Reuse the same "is this required param satisfied" rule the fire path
+	// itself enforces (pkg/trigger/run.go's preflightParams), rather than
+	// re-deriving it here — nil overrides is exactly what cron/daemon fire
+	// with, so this reports precisely the params that would fail preflight.
 	var warnings []string
-	for _, p := range params {
-		if p.Required && p.Default == "" {
-			warnings = append(warnings, fmt.Sprintf("params.%s is required with no default, but trigger.%s never supplies fire-time params — every fire will fail preflight (params_invalid) instead of running", p.Name, kind))
-		}
+	for _, name := range MissingRequiredParams(params, nil) {
+		warnings = append(warnings, fmt.Sprintf("params.%s is required with no default, but trigger.%s never supplies fire-time params — every fire will fail preflight (params_invalid) instead of running", name, kind))
 	}
 	return warnings
 }
