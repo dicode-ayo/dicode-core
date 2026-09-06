@@ -626,6 +626,186 @@ trigger:
 	}
 }
 
+// TestUnsatisfiableRequiredParam_Warnings guards unsatisfiableRequiredParamWarnings
+// (#821/#837): a required param with no default can never be satisfied on a
+// cron, daemon, or un-overridden chain trigger, so validate() must warn for
+// those and stay silent for triggers that can actually supply the param
+// (manual, webhook), a param that already has a default, and a chain trigger
+// whose own overrides patch one in.
+func TestUnsatisfiableRequiredParam_Warnings(t *testing.T) {
+	cases := []struct {
+		name      string
+		yaml      string
+		mustMatch []string // substrings that must appear in s.Warnings
+	}{
+		{
+			name: "cron trigger with required param and no default warns",
+			yaml: `
+name: t
+trigger:
+  cron: "0 * * * *"
+params:
+  zone:
+    required: true
+`,
+			mustMatch: []string{"params.zone", "trigger.cron"},
+		},
+		{
+			name: "daemon trigger with required param and no default warns",
+			yaml: `
+name: t
+trigger:
+  daemon: true
+params:
+  api_key:
+    required: true
+`,
+			mustMatch: []string{"params.api_key", "trigger.daemon"},
+		},
+		{
+			name: "cron trigger with required param that has a default does not warn",
+			yaml: `
+name: t
+trigger:
+  cron: "0 * * * *"
+params:
+  zone:
+    required: true
+    default: dicode.io
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "manual trigger with required param and no default does not warn",
+			yaml: `
+name: t
+trigger:
+  manual: true
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "webhook trigger with required param and no default does not warn",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			// A plain chain dispatch never populates RunOptions.Params (see
+			// fireSuccessChains) any more than cron/daemon do, so this is the
+			// same bug unless the edge's own overrides patch in a default.
+			name: "chain trigger with required param and no default warns",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+params:
+  zone:
+    required: true
+`,
+			mustMatch: []string{"params.zone", "trigger.chain"},
+		},
+		{
+			name: "chain trigger whose own overrides supply a default does not warn",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        zone: dicode.io
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "chain trigger whose own overrides drop required does not warn",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        - name: zone
+          required: false
+params:
+  zone:
+    required: true
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "chain trigger whose overrides patch a different param still warns",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        other: value
+params:
+  zone:
+    required: true
+`,
+			mustMatch: []string{"params.zone"},
+		},
+		{
+			// pkg/taskset/override.go's mergeParams appends an override that
+			// names a param the task never declared, so an override can
+			// introduce a brand-new required-with-no-default param — just as
+			// unsatisfiable as one declared in the task's own params.
+			name: "chain trigger whose overrides introduce a new undeclared required param warns",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        - name: region
+          required: true
+params: {}
+`,
+			mustMatch: []string{"params.region", "trigger.chain"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := s.validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			joined := strings.Join(s.Warnings, "|")
+			for _, want := range tc.mustMatch {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing warning containing %q; got %v", want, s.Warnings)
+				}
+			}
+			if len(tc.mustMatch) == 0 && len(s.Warnings) != 0 {
+				t.Errorf("expected no warnings, got %v", s.Warnings)
+			}
+		})
+	}
+}
+
 func TestChainTrigger_Params_Parses(t *testing.T) {
 	src := strings.TrimSpace(`
 name: downstream

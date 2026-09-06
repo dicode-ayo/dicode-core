@@ -143,6 +143,22 @@ obstacle to testing the task. It does reject undeclared keys and coerce values
 to their declared `type` for whatever params a caller passes it; the fire path
 does neither.
 
+**Cron, daemon, and plain chain triggers can never satisfy `required`.**
+None of the three carries a fire-time param override — cron fires on a
+schedule, daemon fires once at process start, and a chain dispatch sets
+only the downstream's `input`, never its `params` — so a `required: true`
+param with no `default` on a task whose only trigger is one of these is
+unsatisfiable by construction: every single fire fails preflight with
+`params_invalid` instead of running. A chain trigger's own
+`overrides.params` (applied to itself before dispatch) can still patch in a
+default and clear the warning; cron and daemon have no equivalent escape
+hatch. Config load catches this and appends a non-fatal warning to the
+task's `Warnings` (logged by the reconciler at registration/reload — the
+same advisory mechanism used for webhook-secret-gating and
+docker-hardening misconfigurations) rather than refusing to load — give
+the param a `default`, drop `required`, or ship the task `enabled: false`
+until an override supplies the value (#821).
+
 ### Trigger types
 
 **Cron** — runs on a schedule:

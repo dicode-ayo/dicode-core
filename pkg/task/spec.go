@@ -891,6 +891,7 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	s.Warnings = append(s.Warnings, webhookSecretGatedFieldWarnings(s.Trigger.WebhookSecret, s.Trigger.ReplayProtection, s.Trigger.RequireTimestamp)...)
+	s.Warnings = append(s.Warnings, unsatisfiableRequiredParamWarnings(s.Trigger, s.Params)...)
 	if s.OnFailureChain != nil {
 		warns, err := s.OnFailureChain.Validate()
 		if err != nil {
@@ -976,6 +977,96 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 		warnings = append(warnings, "trigger.require_timestamp is set but trigger.webhook_secret is empty — the webhook is unauthenticated and require_timestamp has no effect")
 	}
 	return warnings
+}
+
+// unsatisfiableRequiredParamWarnings flags a required param with no default
+// on a task whose sole trigger never supplies fire-time params: cron fires
+// on a schedule, daemon fires once at process start, and a plain chain
+// dispatch (fireSuccessChains, pkg/trigger/chain.go) sets RunOptions.Input
+// from trigger.chain.params but never RunOptions.Params — so absent a
+// trigger.chain.overrides.params patch supplying a default, a chain-fired
+// task is in exactly the same boat. Every one of these fires preflight-fails
+// with a params_invalid fail_reason (see the enforcement added in #800,
+// pkg/trigger/run.go) before the task body ever runs, rather than running
+// once. #821 shipped exactly this bug in tasks/ops/relay-edge (cron), where
+// a defaults.on_failure_chain turned every hourly failure into a
+// notification too. Advisory only, like webhookSecretGatedFieldWarnings /
+// dockerHardeningWarnings below.
+//
+// Scope: only covers a task's own declared trigger. Two related cases still
+// go unwarned because they need cross-task/cross-file resolution this
+// function doesn't have: a cron-triggered kind: PipelineTask whose stage
+// references a task with an unsatisfiable required param, and a task
+// reachable only as an on_failure_chain / defaults.on_failure_chain target
+// whose own trigger (e.g. manual, just to satisfy "at least one trigger")
+// reads as fine in isolation. Both dispatch the same no-Params way as
+// cron/daemon/chain above. Tracked separately as #838 (needs
+// taskset-resolution-time cross-referencing, once every entry is loaded).
+func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string {
+	var kind string
+	effective := params
+	switch {
+	case t.Cron != "":
+		kind = "cron"
+	case t.Daemon:
+		kind = "daemon"
+	case t.Chain != nil:
+		kind = "chain"
+		if t.Chain.Overrides != nil && len(t.Chain.Overrides.Params) > 0 {
+			effective = applyParamOverridePatch(params, t.Chain.Overrides.Params)
+		}
+	default:
+		return nil
+	}
+	// Reuse the same "is this required param satisfied" rule the fire path
+	// itself enforces (pkg/trigger/run.go's preflightParams), rather than
+	// re-deriving it here — nil overrides is exactly what all three of
+	// these trigger kinds fire with, so this reports precisely the params
+	// that would fail preflight.
+	var warnings []string
+	for _, name := range MissingRequiredParams(effective, nil) {
+		warnings = append(warnings, fmt.Sprintf("params.%s is required with no default, but trigger.%s never supplies fire-time params — every fire will fail preflight (params_invalid) instead of running", name, kind))
+	}
+	return warnings
+}
+
+// applyParamOverridePatch returns a copy of params with each override
+// applied — matching entries get their Default (and, when set, Required)
+// patched in, and an override naming a param that isn't already declared is
+// appended as a new one — mirroring pkg/taskset/override.go's mergeParams
+// exactly (same field-by-field patch, same append-if-not-found fallback),
+// reimplemented here rather than imported because pkg/taskset imports
+// pkg/task and a reverse import would cycle. Only used to predict whether a
+// chain-trigger edge's own declared overrides
+// (trigger.chain.overrides.params, applied to itself before dispatch — see
+// fireSuccessChains) would satisfy an otherwise-unsatisfiable required
+// param; the append case matters because an override can introduce a
+// brand-new required-with-no-default param that was never in the task's
+// own declared params, and that is exactly as unsatisfiable as one that was.
+func applyParamOverridePatch(params Params, overrides ParamOverrides) Params {
+	out := make(Params, len(params), len(params)+len(overrides))
+	copy(out, params)
+	for _, po := range overrides {
+		found := false
+		for i := range out {
+			if out[i].Name == po.Name {
+				out[i].Default = po.Default
+				if po.Required != nil {
+					out[i].Required = *po.Required
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			p := Param{Name: po.Name, Default: po.Default}
+			if po.Required != nil {
+				p.Required = *po.Required
+			}
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // dockerHardeningWarnings flags container settings that visibly weaken
