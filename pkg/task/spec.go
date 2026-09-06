@@ -1030,28 +1030,40 @@ func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string
 	return warnings
 }
 
-// applyParamOverridePatch returns a copy of params with each matching
-// override's Default (and, when set, Required) patched in — mirroring
-// pkg/taskset/override.go's mergeParams exactly (same field-by-field patch
-// semantics), reimplemented here rather than imported because pkg/taskset
-// imports pkg/task and a reverse import would cycle. Only used to predict
-// whether a chain-trigger edge's own declared overrides (trigger.chain.overrides.params,
-// applied to itself before dispatch — see fireSuccessChains) would satisfy
-// an otherwise-unsatisfiable required param; it does not append params an
-// override names that aren't already declared, since a warning about an
-// existing param is all this needs.
+// applyParamOverridePatch returns a copy of params with each override
+// applied — matching entries get their Default (and, when set, Required)
+// patched in, and an override naming a param that isn't already declared is
+// appended as a new one — mirroring pkg/taskset/override.go's mergeParams
+// exactly (same field-by-field patch, same append-if-not-found fallback),
+// reimplemented here rather than imported because pkg/taskset imports
+// pkg/task and a reverse import would cycle. Only used to predict whether a
+// chain-trigger edge's own declared overrides
+// (trigger.chain.overrides.params, applied to itself before dispatch — see
+// fireSuccessChains) would satisfy an otherwise-unsatisfiable required
+// param; the append case matters because an override can introduce a
+// brand-new required-with-no-default param that was never in the task's
+// own declared params, and that is exactly as unsatisfiable as one that was.
 func applyParamOverridePatch(params Params, overrides ParamOverrides) Params {
-	out := make(Params, len(params))
+	out := make(Params, len(params), len(params)+len(overrides))
 	copy(out, params)
 	for _, po := range overrides {
+		found := false
 		for i := range out {
 			if out[i].Name == po.Name {
 				out[i].Default = po.Default
 				if po.Required != nil {
 					out[i].Required = *po.Required
 				}
+				found = true
 				break
 			}
+		}
+		if !found {
+			p := Param{Name: po.Name, Default: po.Default}
+			if po.Required != nil {
+				p.Required = *po.Required
+			}
+			out = append(out, p)
 		}
 	}
 	return out

@@ -764,6 +764,25 @@ params:
 `,
 			mustMatch: []string{"params.zone"},
 		},
+		{
+			// pkg/taskset/override.go's mergeParams appends an override that
+			// names a param the task never declared, so an override can
+			// introduce a brand-new required-with-no-default param — just as
+			// unsatisfiable as one declared in the task's own params.
+			name: "chain trigger whose overrides introduce a new undeclared required param warns",
+			yaml: `
+name: t
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        - name: region
+          required: true
+params: {}
+`,
+			mustMatch: []string{"params.region", "trigger.chain"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
