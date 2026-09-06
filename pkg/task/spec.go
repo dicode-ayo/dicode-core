@@ -992,6 +992,12 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 // dockerHardeningWarnings below: the param may still be reachable via a
 // per-edge override on a chain trigger swapped in later, or the task may
 // simply ship disabled until an operator supplies the values.
+//
+// Scope: kind: Task only. A cron-triggered kind: PipelineTask can hit the
+// same failure mode through a stage that references a task with an
+// unsatisfiable required param, but catching that needs the stage's target
+// Spec resolved (cross-file, at taskset-resolution time) — this function
+// only ever sees one task.yaml in isolation. Tracked separately as #838.
 func cronDaemonRequiredParamWarnings(t TriggerConfig, params Params) []string {
 	var kind string
 	switch {
