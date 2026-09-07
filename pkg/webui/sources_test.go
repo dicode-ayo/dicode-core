@@ -288,6 +288,60 @@ func TestApiSaveConfigRaw_SyncsSourceManagerCfg(t *testing.T) {
 	}
 }
 
+// TestApiSaveConfigRaw_RejectsSemanticallyInvalidConfig_NoWrite is the
+// regression guard for #806: apiSaveConfigRaw checked only that the
+// submitted content parsed as a YAML mapping, then wrote it to dicode.yaml
+// before calling config.Load to hot-reload. When that reload failed
+// validation, the error was logged and swallowed — the response was still
+// 200 OK, the invalid config was already on disk, and the daemon would
+// refuse to start on the next restart with no link back to this edit.
+//
+// server.public_url without server.auth: true is syntactically valid YAML
+// that has always failed cfg.validate() — exactly the class of error the
+// raw-mapping check let through. The endpoint must now reject it with 400
+// and, critically, must never have written it to disk.
+func TestApiSaveConfigRaw_RejectsSemanticallyInvalidConfig_NoWrite(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	originalYAML := "server:\n  port: 8080\nspec:\n  entries:\n    old-source:\n      ref:\n        path: /tmp/old\n"
+	if err := os.WriteFile(cfgPath, []byte(originalYAML), 0600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	initialCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load initial config: %v", err)
+	}
+	srv, _ := newTestServerWithSourceMgr(t, initialCfg, cfgPath, nil)
+
+	invalidYAML := "server:\n  port: 8080\n  public_url: https://dicode.example.com\nspec:\n  entries:\n    old-source:\n      ref:\n        path: /tmp/old\n"
+	body := `{"content":` + string(mustJSON(t, invalidYAML)) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config/raw", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/config/raw returned %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+
+	onDisk, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read cfgPath: %v", err)
+	}
+	if string(onDisk) != originalYAML {
+		t.Errorf("dicode.yaml was modified despite a 400 response:\ngot:\n%s\nwant (unchanged):\n%s", onDisk, originalYAML)
+	}
+
+	// The in-memory config must also be untouched.
+	srv.cfgMu.RLock()
+	gotPort := srv.cfg.Server.Port
+	srv.cfgMu.RUnlock()
+	if gotPort != initialCfg.Server.Port {
+		t.Errorf("srv.cfg was mutated despite a 400 response: port = %d, want %d", gotPort, initialCfg.Server.Port)
+	}
+}
+
 // mustJSON marshals v as JSON, failing the test on error.
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()

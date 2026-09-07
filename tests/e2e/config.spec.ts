@@ -96,6 +96,31 @@ test.describe('Config API', () => {
     expect(res.status()).toBe(400);
   });
 
+  // #806: apiSaveConfigRaw used to check only that the submitted content
+  // parsed as a YAML mapping, write it to dicode.yaml, and only then try to
+  // reload it through config.Load (which runs full validation). When that
+  // reload failed, the error was logged and swallowed — the response was
+  // still 200 OK, and the invalid config was already on disk, stranding the
+  // next daemon restart. server.public_url without server.auth: true is
+  // syntactically valid YAML that has always failed full validation, so it
+  // exercises exactly the gap the raw-mapping check let through.
+  test('POST /api/config/raw rejects a semantically invalid config with 400 and leaves the file unchanged', async ({ request }) => {
+    const rawRes = await request.get('/api/config/raw');
+    expect(rawRes.ok()).toBe(true);
+    const { content: original } = await rawRes.json() as { content: string };
+
+    const invalid = original + '\nserver:\n  public_url: https://dicode.example.com\n';
+    const saveRes = await request.post('/api/config/raw', {
+      data: { content: invalid },
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect(saveRes.status()).toBe(400);
+
+    const readBackRes = await request.get('/api/config/raw');
+    const { content: readBack } = await readBackRes.json() as { content: string };
+    expect(readBack).toBe(original);
+  });
+
   test('POST /api/config/raw persists valid YAML and round-trips a marker', async ({ request }) => {
     const rawRes = await request.get('/api/config/raw');
     expect(rawRes.ok()).toBe(true);
