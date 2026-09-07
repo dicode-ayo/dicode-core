@@ -109,7 +109,13 @@ test.describe('Config API', () => {
     expect(rawRes.ok()).toBe(true);
     const { content: original } = await rawRes.json() as { content: string };
 
-    const invalid = original + '\nserver:\n  public_url: https://dicode.example.com\n';
+    // Merge into the existing `server:` mapping rather than appending a
+    // second top-level `server:` key — a duplicate key would make this test
+    // pass for the wrong reason (YAML's last-key-wins on a duplicate mapping
+    // key would silently drop the original server.auth/server.port instead
+    // of exercising public_url validation against the real config).
+    expect(original).toMatch(/^server:\n/m);
+    const invalid = original.replace(/^server:\n/m, 'server:\n  public_url: https://dicode.example.com\n');
     const saveRes = await request.post('/api/config/raw', {
       data: { content: invalid },
       headers: { 'Content-Type': 'application/json' },
