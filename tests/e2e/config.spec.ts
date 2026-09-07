@@ -110,17 +110,22 @@ test.describe('Config API', () => {
     const { content: original } = await rawRes.json() as { content: string };
 
     // Merge into the existing `server:` mapping rather than appending a
-    // second top-level `server:` key — a duplicate key would make this test
-    // pass for the wrong reason (YAML's last-key-wins on a duplicate mapping
-    // key would silently drop the original server.auth/server.port instead
-    // of exercising public_url validation against the real config).
-    expect(original).toMatch(/^server:\n/m);
-    const invalid = original.replace(/^server:\n/m, 'server:\n  public_url: https://dicode.example.com\n');
+    // second top-level `server:` key — gopkg.in/yaml.v3 rejects a duplicate
+    // mapping key outright, so a second `server:` block would make this
+    // test pass with 400 for the wrong reason (a YAML parse error) instead
+    // of exercising cfg.validate()'s public_url check against the real
+    // config.
+    const serverBlock = original.match(/^server:\n(\s+)/m);
+    expect(serverBlock).toBeTruthy();
+    const indent = serverBlock![1];
+    const invalid = original.replace(/^server:\n/m, `server:\n${indent}public_url: https://dicode.example.com\n`);
     const saveRes = await request.post('/api/config/raw', {
       data: { content: invalid },
       headers: { 'Content-Type': 'application/json' },
     });
     expect(saveRes.status()).toBe(400);
+    const { error } = await saveRes.json() as { error: string };
+    expect(error).toContain('requires server.auth');
 
     const readBackRes = await request.get('/api/config/raw');
     const { content: readBack } = await readBackRes.json() as { content: string };
