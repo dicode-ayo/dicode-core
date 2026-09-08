@@ -918,10 +918,16 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate: must parse as valid YAML mapping.
-	var check map[string]any
-	if err := yaml.Unmarshal([]byte(content), &check); err != nil {
-		jsonErr(w, "invalid YAML: "+err.Error(), http.StatusBadRequest)
+	// Validate the submitted content in full — parse, defaults, and
+	// cfg.validate() — before anything touches disk. This mirrors exactly
+	// what config.Load would do once the content is written, so a config
+	// that would refuse to start the daemon (e.g. server.public_url without
+	// server.auth) is caught here as a 400 instead of landing on disk with
+	// a swallowed error, only to strand the next daemon restart (#806).
+	configDir, _ := filepath.Abs(filepath.Dir(s.cfgPath))
+	newCfg, err := config.LoadBytes([]byte(content), configDir)
+	if err != nil {
+		jsonErr(w, "invalid config: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -930,37 +936,35 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hot-reload config into memory (best-effort; server restart needed for port changes).
-	if newCfg, err := config.Load(s.cfgPath); err == nil {
-		s.cfgMu.Lock()
-		s.cfg = newCfg
-		if s.sourceMgr != nil {
-			s.sourceMgr.SetCfg(newCfg)
-		}
-		s.cfgMu.Unlock()
+	// Content already validated above, so newCfg is applied directly — no
+	// need to re-Load (and no possibility of the reload silently failing
+	// after the file write, which was the other half of #806).
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	if s.sourceMgr != nil {
+		s.sourceMgr.SetCfg(newCfg)
+	}
+	s.cfgMu.Unlock()
 
-		// Both override-mutation surfaces (this editor and PATCH
-		// /api/tasks/{id}/overrides) must drive the same re-resolve →
-		// EventUpdated → re-Admit pipeline. SetCfg alone only refreshes the
-		// snapshot the REST API reads; the running taskset.Source keeps its
-		// stale parentOverrides until restart, so a revoked permission
-		// elevation would otherwise keep running with the broader grant.
-		// Re-applying every entry's overrides joins the editor path to that
-		// pipeline (SetParentOverrides coalesces no-op signals). Deleting a
-		// whole source entry here does not tear down its running source —
-		// source removal must go through DELETE /api/settings/sources/{name}.
-		if s.sourceMgr != nil {
-			for name, entry := range newCfg.Spec.Entries {
-				if entry == nil {
-					continue
-				}
-				if src, ok := s.sourceMgr.Get(name); ok {
-					src.SetParentOverrides(entry.Overrides)
-				}
+	// Both override-mutation surfaces (this editor and PATCH
+	// /api/tasks/{id}/overrides) must drive the same re-resolve →
+	// EventUpdated → re-Admit pipeline. SetCfg alone only refreshes the
+	// snapshot the REST API reads; the running taskset.Source keeps its
+	// stale parentOverrides until restart, so a revoked permission
+	// elevation would otherwise keep running with the broader grant.
+	// Re-applying every entry's overrides joins the editor path to that
+	// pipeline (SetParentOverrides coalesces no-op signals). Deleting a
+	// whole source entry here does not tear down its running source —
+	// source removal must go through DELETE /api/settings/sources/{name}.
+	if s.sourceMgr != nil {
+		for name, entry := range newCfg.Spec.Entries {
+			if entry == nil {
+				continue
+			}
+			if src, ok := s.sourceMgr.Get(name); ok {
+				src.SetParentOverrides(entry.Overrides)
 			}
 		}
-	} else {
-		s.log.Warn("config reload after raw save failed", zap.Error(err))
 	}
 
 	s.log.Info("config saved via code editor")

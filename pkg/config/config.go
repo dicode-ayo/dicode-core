@@ -468,6 +468,18 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
 
+	configDir, _ := filepath.Abs(filepath.Dir(path))
+	return LoadBytes(data, configDir)
+}
+
+// LoadBytes parses config content already in memory, applies defaults, and
+// validates it — the same pipeline Load runs after its os.ReadFile, split
+// out so a caller with unsaved edits (e.g. the webui raw-config editor) can
+// validate them before ever writing to disk. configDir is the directory
+// dicode.yaml would live in (used to expand ${CONFIGDIR} and resolve
+// relative paths); pass the directory Load would have derived from its
+// path argument.
+func LoadBytes(data []byte, configDir string) (*Config, error) {
 	// Probe for removed top-level keys before decoding into Config. Fail
 	// fast with a clear migration error instead of silently dropping the
 	// block — yaml.v3 does not enforce KnownFields by default, so an
@@ -490,7 +502,6 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	configDir, _ := filepath.Abs(filepath.Dir(path))
 	applyDefaults(&cfg, configDir)
 
 	if err := cfg.validate(); err != nil {

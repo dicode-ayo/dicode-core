@@ -421,7 +421,7 @@ Originally implemented as `pkg/tray/` (`fyne.io/systray`, DBus StatusNotifierIte
 
 - `GET /config/code` — full-viewport Monaco editor (YAML language mode, dark theme)
 - `GET /api/config/raw` — returns raw file content as JSON
-- `POST /api/config/raw` — validates YAML (must parse cleanly), writes to disk, hot-reloads config into memory
+- `POST /api/config/raw` — fully validates the submitted content (parse + defaults + `cfg.validate()`, the same checks `config.Load` runs) *before* writing anything; a config that would fail to start the daemon is rejected with 400 and the file on disk is left untouched. Only a config that passes validation is written to disk and hot-reloaded into memory (#806)
 - Ctrl+S / Cmd+S shortcut to save; dirty indicator (`● unsaved`) when modified
 - "← Visual view" link back to the form-based config page
 - **Edit as code** button added to `/config` visual page

@@ -87,6 +87,57 @@ database:
 	}
 }
 
+// TestLoadBytes_MatchesLoad verifies Load is a thin os.ReadFile wrapper over
+// LoadBytes: parsing the same content in memory (LoadBytes) or from disk
+// (Load) must produce the same resolved config. This is the regression guard
+// for #806 — the webui raw-config editor needs to validate submitted content
+// before it is ever written to disk, which requires LoadBytes to behave
+// identically to Load minus the file read.
+func TestLoadBytes_MatchesLoad(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := "server:\n  port: 9090\nspec:\n  entries:\n    tasks:\n      ref:\n        path: ${CONFIGDIR}/tasks\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	viaLoad, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	configDir, _ := filepath.Abs(dir)
+	viaLoadBytes, err := LoadBytes([]byte(content), configDir)
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+
+	if viaLoadBytes.Server.Port != viaLoad.Server.Port {
+		t.Errorf("Server.Port = %d, want %d", viaLoadBytes.Server.Port, viaLoad.Server.Port)
+	}
+	if viaLoadBytes.Spec.Entries["tasks"].Ref.Path != viaLoad.Spec.Entries["tasks"].Ref.Path {
+		t.Errorf("resolved ${CONFIGDIR} path = %q, want %q",
+			viaLoadBytes.Spec.Entries["tasks"].Ref.Path, viaLoad.Spec.Entries["tasks"].Ref.Path)
+	}
+}
+
+// TestLoadBytes_RejectsSemanticallyInvalidConfig verifies that LoadBytes runs
+// full cfg.validate() — not just a YAML-mapping parse — so a caller (the
+// webui raw-config editor) can catch a config that would fail validation
+// before writing it to disk. server.public_url without server.auth is the
+// concrete case #806 was filed against: syntactically valid YAML that
+// config.Load has always rejected once written, silently, until this fix.
+func TestLoadBytes_RejectsSemanticallyInvalidConfig(t *testing.T) {
+	content := "server:\n  public_url: https://dicode.example.com\n"
+	_, err := LoadBytes([]byte(content), t.TempDir())
+	if err == nil {
+		t.Fatal("LoadBytes: expected an error for public_url without server.auth, got nil")
+	}
+	if !strings.Contains(err.Error(), "requires server.auth") {
+		t.Errorf("error = %v, want it to mention the server.auth requirement", err)
+	}
+}
+
 // TestLoad_RejectsLegacySources ensures the old `sources:` array is rejected
 // at load time with a clear error pointing at the migration guide.
 func TestLoad_RejectsLegacySources(t *testing.T) {
