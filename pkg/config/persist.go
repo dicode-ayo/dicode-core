@@ -160,16 +160,44 @@ func getMap(parent map[string]any, key string) map[string]any {
 
 // pruneEmptyMaps drops keys whose value merged down to an empty map, so
 // clearing the last param override leaves the file as clean as it was before
-// the first one — `params: {}` parses to the same nothing it renders as, and
-// the cascade below can only prune an entry that holds no keys at all.
+// the first one — `params: {}` parses to the same nothing it renders as.
+// Recurses bottom-up: a child map has its own nested maps pruned first, and
+// is only then checked for emptiness, so an override nested arbitrarily
+// deep (overrides.entries nests recursively — Overrides.Entries is
+// map[string]*Overrides) collapses all the way up instead of leaving inert
+// empty maps behind at every level past the first (#841).
 func pruneEmptyMaps(m map[string]any) {
 	for k, v := range m {
 		switch typed := v.(type) {
 		case map[string]any:
+			pruneEmptyMaps(typed)
 			if len(typed) == 0 {
 				delete(m, k)
 			}
 		case map[any]any:
+			pruneEmptyMapsAny(typed)
+			if len(typed) == 0 {
+				delete(m, k)
+			}
+		}
+	}
+}
+
+// pruneEmptyMapsAny is pruneEmptyMaps for a map[any]any — yaml.v3's type for
+// a nested mapping that mergeMap never touched (only the branch a JSON patch
+// actually walked gets normalised to map[string]any by getMap). Maps are
+// reference types, so pruning in place here is visible to the caller without
+// needing to write the map back into its parent.
+func pruneEmptyMapsAny(m map[any]any) {
+	for k, v := range m {
+		switch typed := v.(type) {
+		case map[string]any:
+			pruneEmptyMaps(typed)
+			if len(typed) == 0 {
+				delete(m, k)
+			}
+		case map[any]any:
+			pruneEmptyMapsAny(typed)
 			if len(typed) == 0 {
 				delete(m, k)
 			}

@@ -147,6 +147,42 @@ func TestMergeTaskOverride_PrunesEmptiedParamsMap(t *testing.T) {
 	}
 }
 
+// TestMergeTaskOverride_PrunesNestedEmptyEntriesMap is the regression guard
+// for #841: pruneEmptyMaps used to only check whether each *direct* child
+// was already an empty map, so a nested override three levels deep (a
+// taskset entry's own overrides.entries — Overrides.Entries is
+// map[string]*Overrides, so entries nest recursively) pruned incompletely.
+// Clearing the last param on a grandchild entry must collapse all the way
+// up — entries.grandchild.params, entries.grandchild, entries, and finally
+// overrides itself — leaving the file exactly as it was before any override
+// was ever added, the same guarantee TestMergeTaskOverride_PrunesEmptiedParamsMap
+// already established one level shallower.
+func TestMergeTaskOverride_PrunesNestedEmptyEntriesMap(t *testing.T) {
+	yaml := strings.Replace(baseYAML, "    buildin:\n      ref:\n        path: /tmp/tasks/buildin/taskset.yaml",
+		`    buildin:
+      ref:
+        path: /tmp/tasks/buildin/taskset.yaml
+      overrides:
+        entries:
+          child:
+            entries:
+              grandchild:
+                params:
+                  foo: bar`, 1)
+	p, mt := writeTempYAML(t, yaml)
+	patch := []byte(`{"entries": {"grandchild": {"params": {"foo": null}}}}`)
+	if err := MergeTaskOverride(p, "buildin/child", patch, mt); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	got, _ := os.ReadFile(p)
+	if strings.Contains(string(got), "grandchild") {
+		t.Errorf("emptied grandchild entry should be pruned; got:\n%s", got)
+	}
+	if strings.Contains(string(got), "overrides:") {
+		t.Errorf("entry left with nothing should prune its overrides block all the way up; got:\n%s", got)
+	}
+}
+
 func TestMergeTaskOverride_GenericFields(t *testing.T) {
 	p, mt := writeTempYAML(t, baseYAML)
 	patch := []byte(`{"params": {"model": "gpt-4o"}, "timeout": "5m"}`)
