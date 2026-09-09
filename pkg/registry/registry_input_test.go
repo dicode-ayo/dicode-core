@@ -2,10 +2,13 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/google/uuid"
 )
 
@@ -258,10 +261,16 @@ func TestGetRunInputKeys_ClearRunInputs_Batch(t *testing.T) {
 
 // TestClearRunInputs_ChunksAcrossManyRows verifies ClearRunInputs and
 // GetRunInputKeys still work correctly when the row count exceeds a single
-// IN (...) clause's chunk size (#819), by driving the underlying chunking at
-// a size small enough to exercise multiple chunks without creating hundreds
-// of real rows.
+// IN (...) clause's chunk size (#819). It shrinks the package's
+// maxInClauseVars for the duration of the test so GetRunInputKeys and
+// ClearRunInputs themselves are forced to issue multiple real SQL round
+// trips and reassemble the results — not just chunkStrings in isolation —
+// without needing 500+ real rows to hit the production chunk size.
 func TestClearRunInputs_ChunksAcrossManyRows(t *testing.T) {
+	orig := maxInClauseVars
+	maxInClauseVars = 3
+	t.Cleanup(func() { maxInClauseVars = orig })
+
 	r := newTestRegistry(t)
 	ctx := context.Background()
 
@@ -278,15 +287,10 @@ func TestClearRunInputs_ChunksAcrossManyRows(t *testing.T) {
 		}
 	}
 
-	// Exercise chunkStrings directly at a chunk size smaller than n to prove
-	// the multi-chunk path used internally by GetRunInputKeys/ClearRunInputs
-	// (chunked at maxInClauseVars) reassembles correctly regardless of how
-	// many chunks it takes — chunkStrings itself is unit-tested above for
-	// the boundary arithmetic, so this proves the batch methods behave the
-	// same whether or not chunking is needed.
-	chunks := chunkStrings(ids, 3)
-	if len(chunks) != 3 {
-		t.Fatalf("chunkStrings(ids, 3) produced %d chunks, want 3", len(chunks))
+	// n=7 rows over a chunk size of 3 forces GetRunInputKeys/ClearRunInputs
+	// below to each issue 3 real chunks (3+3+1), not 1.
+	if got, want := len(chunkStrings(ids, maxInClauseVars)), 3; got != want {
+		t.Fatalf("chunkStrings(ids, %d) produced %d chunks, want %d — test setup no longer forces multiple chunks", maxInClauseVars, got, want)
 	}
 
 	keys, err := r.GetRunInputKeys(ctx, ids)
@@ -315,6 +319,98 @@ func TestClearRunInputs_EmptyIsNoOp(t *testing.T) {
 	r := newTestRegistry(t)
 	if err := r.ClearRunInputs(context.Background(), nil); err != nil {
 		t.Fatalf("ClearRunInputs(nil): %v", err)
+	}
+}
+
+// failNthExecDB wraps a db.DB and fails the n-th Exec call whose query
+// contains match, succeeding on every other call (including later calls
+// matching the same substring). Used to simulate one chunk of a batched
+// write failing without the others.
+type failNthExecDB struct {
+	db.DB
+	match string
+	n     int
+	seen  int
+}
+
+func (f *failNthExecDB) Exec(ctx context.Context, query string, args ...any) error {
+	if strings.Contains(query, f.match) {
+		f.seen++
+		if f.seen == f.n {
+			return errors.New("simulated exec failure")
+		}
+	}
+	return f.DB.Exec(ctx, query, args...)
+}
+
+// TestClearRunInputs_ContinuesPastFailingChunk is the regression test for the
+// code-review follow-up on #819: ClearRunInputs must attempt every chunk even
+// after one fails, rather than bailing out and leaving every row in every
+// later chunk with a dangling input_storage_key (their blobs are already
+// deleted by the delete_inputs IPC handler before ClearRunInputs is ever
+// called — see pkg/ipc/server.go).
+func TestClearRunInputs_ContinuesPastFailingChunk(t *testing.T) {
+	orig := maxInClauseVars
+	maxInClauseVars = 2
+	t.Cleanup(func() { maxInClauseVars = orig })
+
+	real, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { real.Close() })
+	r := New(real)
+	ctx := context.Background()
+
+	// 6 ids over a chunk size of 2 makes 3 chunks: [0,1] [2,3] [4,5].
+	const n = 6
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		id := uuid.New().String()
+		ids[i] = id
+		if _, err := r.StartRunWithID(ctx, id, "task-a", "", "manual", "task"); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.SetRunInput(ctx, id, fmt.Sprintf("key-%d", i), 1, time.Now().Unix(), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Fail the 2nd UPDATE (the middle chunk, ids[2:4]) only.
+	r.db = &failNthExecDB{DB: real, match: "UPDATE runs SET input_storage_key", n: 2}
+
+	err = r.ClearRunInputs(ctx, ids)
+	if err == nil {
+		t.Fatal("expected an error from the failing middle chunk")
+	}
+
+	// Swap back to the real db to read state without going through the fake.
+	r.db = real
+
+	cleared := func(id string) bool {
+		got, gerr := r.GetRun(ctx, id)
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		return got.InputStorageKey == ""
+	}
+
+	for _, id := range []string{ids[0], ids[1]} {
+		if !cleared(id) {
+			t.Errorf("chunk 1 run %s should be cleared", id)
+		}
+	}
+	for _, id := range []string{ids[2], ids[3]} {
+		if cleared(id) {
+			t.Errorf("chunk 2 run %s should NOT be cleared (its UPDATE failed)", id)
+		}
+	}
+	// The key point of this test: chunk 3 must still have been attempted
+	// (and succeeded) despite chunk 2 failing first.
+	for _, id := range []string{ids[4], ids[5]} {
+		if !cleared(id) {
+			t.Errorf("chunk 3 run %s should be cleared — ClearRunInputs must not stop after chunk 2 fails", id)
+		}
 	}
 }
 

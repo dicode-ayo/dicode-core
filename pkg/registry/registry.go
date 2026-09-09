@@ -776,8 +776,9 @@ func (r *Registry) ClearRunInput(ctx context.Context, runID string) error {
 // maxInClauseVars caps how many placeholders a single IN (...) clause built
 // by this file uses per statement. Chunking at this size keeps every query
 // well under SQLite's bound-variable ceiling regardless of how many run IDs
-// a caller passes in one batch (#819).
-const maxInClauseVars = 500
+// a caller passes in one batch (#819). A var, not a const, so tests can
+// shrink it to exercise the multi-chunk path without needing 500+ real rows.
+var maxInClauseVars = 500
 
 // chunkStrings splits ids into slices of at most n elements (n must be > 0).
 func chunkStrings(ids []string, n int) [][]string {
@@ -837,7 +838,16 @@ func (r *Registry) GetRunInputKeys(ctx context.Context, runIDs []string) (map[st
 // run ID in a handful of statements (chunked per maxInClauseVars) instead of
 // one UPDATE round trip per row (#819). Same caller contract as
 // ClearRunInput — delete the blobs first.
+//
+// Every chunk is attempted even if an earlier one fails: by the time this is
+// called, the caller has already deleted the blobs for the whole batch (see
+// the dicode.runs.delete_inputs handler), so bailing out on the first failing
+// chunk would leave every row in every *later* chunk pointing at an
+// already-deleted blob instead of just the rows in the one chunk that
+// errored. Errors from every failing chunk are joined into the returned
+// error.
 func (r *Registry) ClearRunInputs(ctx context.Context, runIDs []string) error {
+	var errs []error
 	for _, chunk := range chunkStrings(runIDs, maxInClauseVars) {
 		args := make([]any, len(chunk))
 		for i, id := range chunk {
@@ -847,10 +857,10 @@ func (r *Registry) ClearRunInputs(ctx context.Context, runIDs []string) error {
 			`UPDATE runs SET input_storage_key = NULL, input_size = NULL,
 			                  input_stored_at = NULL, input_redacted_fields = NULL
 			 WHERE id IN (`+inClausePlaceholders(len(chunk))+`)`, args...); err != nil {
-			return fmt.Errorf("clear run inputs: %w", err)
+			errs = append(errs, fmt.Errorf("clear run inputs (chunk of %d): %w", len(chunk), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // PinRunInput sets input_pinned = 1 on the given run.

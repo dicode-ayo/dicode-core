@@ -1025,6 +1025,13 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
+			// count is the number of IDs submitted, not a confirmed
+			// affected-row count: like the singular verb, this never checks
+			// whether a given run ID actually exists — an unknown or
+			// already-cleared ID is silently a no-op (GetRunInputKeys omits
+			// it, the UPDATE matches zero rows for it), so a caller cannot
+			// tell "5 requested, 5 existed" from "5 requested, 3 existed"
+			// from this reply alone.
 			reply(req.ID, map[string]any{"ok": true, "count": len(req.RunIDs)}, "")
 
 		case "dicode.runs.pin_input":
