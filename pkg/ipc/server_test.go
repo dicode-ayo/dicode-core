@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -1825,6 +1826,82 @@ func TestIPC_DeleteInputs_ClearsAllRowsInOneCall(t *testing.T) {
 			t.Fatalf("GetRun(%s): %v", id, err)
 		}
 		if got.InputStorageKey != "" {
+			t.Errorf("run %s InputStorageKey not cleared: %q", id, got.InputStorageKey)
+		}
+	}
+}
+
+// fakeInputBlobStore is a test double for inputBlobStore that fails Delete
+// for a configured set of keys, without needing a real storage-task round
+// trip.
+type fakeInputBlobStore struct {
+	failKeys map[string]bool
+}
+
+func (f *fakeInputBlobStore) Delete(_ context.Context, key string) error {
+	if f.failKeys[key] {
+		return errors.New("simulated blob delete failure")
+	}
+	return nil
+}
+
+func (f *fakeInputBlobStore) Fetch(_ context.Context, _, _ string, _ int64) (registry.PersistedInput, error) {
+	return registry.PersistedInput{}, errors.New("fakeInputBlobStore: Fetch not implemented")
+}
+
+// TestIPC_DeleteInputs_LeavesFailedBlobDeletesUncleared is the regression
+// test for the CodeRabbit-flagged bug on #819/PR#844: if a row's blob delete
+// fails, delete_inputs must NOT clear that row's input_storage_key — doing
+// so would drop it from every future ListExpiredInputs sweep, leaking the
+// blob forever with no retry path. Rows whose blob delete succeeds (or that
+// have no blob at all) still get cleared and counted; only the failures are
+// left intact and reported back in "failed".
+func TestIPC_DeleteInputs_LeavesFailedBlobDeletesUncleared(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.startWithSpec(t, nil, nil, deleteInputsSpec(), nil)
+
+	ctx := context.Background()
+	ids := make([]string, 3)
+	keys := make([]string, 3)
+	for i := range ids {
+		id := fmt.Sprintf("run-fail-%d-%d", i, time.Now().UnixNano())
+		ids[i] = id
+		key := "run-inputs/" + id
+		keys[i] = key
+		if _, err := e.reg.StartRunWithID(ctx, id, "test-task", "", "manual", "task"); err != nil {
+			t.Fatalf("StartRunWithID: %v", err)
+		}
+		if err := e.reg.SetRunInput(ctx, id, key, 10, time.Now().Unix(), nil); err != nil {
+			t.Fatalf("SetRunInput: %v", err)
+		}
+	}
+	// The middle run's blob delete fails; the other two succeed.
+	srv.inputStore = &fakeInputBlobStore{failKeys: map[string]bool{keys[1]: true}}
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_inputs", "runIDs": ids})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("delete_inputs error: %v", resp["error"])
+	}
+	result, _ := resp["result"].(map[string]any)
+	if count, _ := result["count"].(float64); int(count) != 2 {
+		t.Errorf("count = %v, want 2", result["count"])
+	}
+	failedRaw, _ := result["failed"].([]any)
+	if len(failedRaw) != 1 || failedRaw[0] != ids[1] {
+		t.Errorf("failed = %v, want [%s]", failedRaw, ids[1])
+	}
+
+	for i, id := range ids {
+		got, err := e.reg.GetRun(ctx, id)
+		if err != nil {
+			t.Fatalf("GetRun(%s): %v", id, err)
+		}
+		if i == 1 {
+			if got.InputStorageKey != keys[1] {
+				t.Errorf("run %s InputStorageKey = %q, want it left intact (%q) so the next sweep retries it", id, got.InputStorageKey, keys[1])
+			}
+		} else if got.InputStorageKey != "" {
 			t.Errorf("run %s InputStorageKey not cleared: %q", id, got.InputStorageKey)
 		}
 	}
