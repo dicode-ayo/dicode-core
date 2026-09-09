@@ -984,6 +984,49 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			reply(req.ID, map[string]any{"ok": true}, "")
 
+		case "dicode.runs.delete_inputs":
+			// Batched delete_input (#819): a retention sweep draining a large
+			// backlog was paying one IPC round trip AND one UPDATE per row —
+			// at ~15/s a 40k-row backlog took ~30h to drain. This collapses
+			// both into a handful of calls: one query to resolve storage
+			// keys, one (chunked) UPDATE to clear columns, same permission
+			// gate as the singular verb since it performs the same action
+			// on more rows.
+			if !hasCap(caps, CapRunsDeleteInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.delete_input)")
+				continue
+			}
+			if len(req.RunIDs) == 0 {
+				reply(req.ID, nil, "ipc: runIDs required")
+				continue
+			}
+			if len(req.RunIDs) > maxDeleteInputsBatch {
+				reply(req.ID, nil, fmt.Sprintf("ipc: runIDs exceeds max batch size %d", maxDeleteInputsBatch))
+				continue
+			}
+			if s.inputStore != nil {
+				keys, err := s.registry.GetRunInputKeys(s.ctx, req.RunIDs)
+				if err != nil {
+					reply(req.ID, nil, err.Error())
+					continue
+				}
+				for runID, key := range keys {
+					if err := s.inputStore.Delete(s.ctx, key); err != nil {
+						// Sanitized log only — see the singular delete_input
+						// case above for why the error itself isn't logged.
+						_ = err
+						s.log.Warn("delete_inputs: storage delete failed; will still clear columns",
+							zap.String("run", runID),
+							zap.String("error_class", "storage_delete"))
+					}
+				}
+			}
+			if err := s.registry.ClearRunInputs(s.ctx, req.RunIDs); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true, "count": len(req.RunIDs)}, "")
+
 		case "dicode.runs.pin_input":
 			if !hasCap(caps, CapRunsPinInput) {
 				reply(req.ID, nil, "ipc: permission denied (runs.pin_input)")
@@ -1637,6 +1680,12 @@ const (
 	logFlushSize     = 50
 	logBufMaxSize    = 1000 // hard cap to prevent unbounded memory growth
 )
+
+// maxDeleteInputsBatch caps how many run IDs a single dicode.runs.delete_inputs
+// call accepts (#819). The registry chunks its own SQL statements well below
+// this, so the cap exists purely to bound one request's blob-delete fan-out
+// and memory footprint — a caller with a bigger backlog issues more calls.
+const maxDeleteInputsBatch = 5000
 
 // bufferLog enqueues a log entry. If the buffer reaches logFlushSize the
 // batch is flushed immediately (inline) to bound memory use. If the buffer

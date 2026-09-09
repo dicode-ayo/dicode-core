@@ -151,6 +151,9 @@ export interface Dicode {
 export interface DicodeRuns {
   list_expired(opts?: { before_ts?: number }): Promise<unknown>;
   delete_input(runID: string): Promise<unknown>;
+  // Batched delete_input (#819): one call clears many rows instead of one
+  // IPC round trip per row.
+  delete_inputs(runIDs: string[]): Promise<unknown>;
   pin_input(runID: string): Promise<unknown>;
   unpin_input(runID: string): Promise<unknown>;
   get_input(runID: string): Promise<unknown>;

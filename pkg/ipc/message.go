@@ -96,7 +96,8 @@ type Request struct {
 	WaitMs      int    `json:"waitMs,omitempty"`      // cli.ready — max ms to block for readiness (0 = probe only)
 
 	// dicode.runs.* — run-input retention management (#233)
-	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
+	BeforeTs int64    `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
+	RunIDs   []string `json:"runIDs,omitempty"`    // dicode.runs.delete_inputs: batched form of RunID (#819)
 
 	// dicode.set_group — free-text label for the caller's run (#116).
 	Group string `json:"group,omitempty"`

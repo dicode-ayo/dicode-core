@@ -1727,6 +1727,109 @@ func TestCapRunsGetInput_GrantedFromYAML(t *testing.T) {
 	_ = conn // suppress unused warning from startWithSpec above
 }
 
+// ── dicode.runs.delete_inputs tests (#819) ──────────────────────────────────
+
+func deleteInputsSpec() *task.Spec {
+	return &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				RunsDeleteInput: true,
+			},
+		},
+	}
+}
+
+// TestIPC_DeleteInputs_RequiresCap verifies a task without
+// permissions.dicode.runs_delete_input: true cannot call
+// dicode.runs.delete_inputs — same gate as the singular delete_input verb.
+func TestIPC_DeleteInputs_RequiresCap(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil) // no permissions.dicode at all
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_inputs", "runIDs": []string{"a", "b"}})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for delete_inputs without runs.delete_input cap")
+	}
+}
+
+// TestIPC_DeleteInputs_RequiresNonEmptyRunIDs verifies the empty-batch guard.
+func TestIPC_DeleteInputs_RequiresNonEmptyRunIDs(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.startWithSpec(t, nil, nil, deleteInputsSpec(), nil)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_inputs", "runIDs": []string{}})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Error("expected error for empty runIDs")
+	}
+}
+
+// TestIPC_DeleteInputs_RejectsOversizedBatch verifies the batch-size guard
+// (#819) refuses a request over maxDeleteInputsBatch rather than accepting an
+// unbounded fan-out of blob deletes in one call.
+func TestIPC_DeleteInputs_RejectsOversizedBatch(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.startWithSpec(t, nil, nil, deleteInputsSpec(), nil)
+
+	oversized := make([]string, maxDeleteInputsBatch+1)
+	for i := range oversized {
+		oversized[i] = fmt.Sprintf("run-%d", i)
+	}
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_inputs", "runIDs": oversized})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Error("expected error for a batch exceeding maxDeleteInputsBatch")
+	}
+}
+
+// TestIPC_DeleteInputs_ClearsAllRowsInOneCall is the correctness regression
+// for #819: a single dicode.runs.delete_inputs call clears the input columns
+// for every run ID given, the same end state N sequential delete_input calls
+// would have produced, and a row that never had an input is left untouched
+// (no error, no spurious write).
+func TestIPC_DeleteInputs_ClearsAllRowsInOneCall(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.startWithSpec(t, nil, nil, deleteInputsSpec(), nil)
+
+	ctx := context.Background()
+	ids := make([]string, 3)
+	for i := range ids {
+		id := fmt.Sprintf("run-%d-%d", i, time.Now().UnixNano())
+		ids[i] = id
+		if _, err := e.reg.StartRunWithID(ctx, id, "test-task", "", "manual", "task"); err != nil {
+			t.Fatalf("StartRunWithID: %v", err)
+		}
+	}
+	// Two of the three rows get an input; the third never does.
+	if err := e.reg.SetRunInput(ctx, ids[0], "run-inputs/"+ids[0], 10, time.Now().Unix(), nil); err != nil {
+		t.Fatalf("SetRunInput: %v", err)
+	}
+	if err := e.reg.SetRunInput(ctx, ids[1], "run-inputs/"+ids[1], 20, time.Now().Unix(), nil); err != nil {
+		t.Fatalf("SetRunInput: %v", err)
+	}
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_inputs", "runIDs": ids})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("delete_inputs error: %v", resp["error"])
+	}
+	result, _ := resp["result"].(map[string]any)
+	if count, _ := result["count"].(float64); int(count) != len(ids) {
+		t.Errorf("result count = %v, want %d", result["count"], len(ids))
+	}
+
+	for _, id := range ids {
+		got, err := e.reg.GetRun(ctx, id)
+		if err != nil {
+			t.Fatalf("GetRun(%s): %v", id, err)
+		}
+		if got.InputStorageKey != "" {
+			t.Errorf("run %s InputStorageKey not cleared: %q", id, got.InputStorageKey)
+		}
+	}
+}
+
 // TestIPC_RunsReplay_RequiresCap verifies that a task spec WITHOUT
 // permissions.dicode.runs_replay: true cannot call dicode.runs.replay —
 // it must receive "permission denied".
