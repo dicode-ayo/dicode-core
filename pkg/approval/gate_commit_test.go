@@ -286,6 +286,38 @@ func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 	}
 }
 
+// TestPendingApproval_FirstApprovalSkipsRemoteLookup pins finding-3's fix:
+// on a task's first-ever approval From is always "" (no prior lock record),
+// so compareURL is guaranteed to return "" regardless of the remote — and
+// PendingApproval must not pay for the filesystem walk g.remoteFn performs
+// to find out. A remote resolver that fails the test if invoked is the
+// assertion.
+func TestPendingApproval_FirstApprovalSkipsRemoteLookup(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	g.SetRemoteFunc(func(k task.Kinded) string {
+		t.Fatal("remote resolver called even though From/To can't produce a compare link")
+		return ""
+	})
+
+	to := fakeCommit("b")
+	g.SetCommitFunc(func(k task.Kinded) string { return to })
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+
+	hash, cr, ok := g.PendingApproval("repo/deploy")
+	if !ok {
+		t.Fatal("PendingApproval: ok = false, want true for a pending task")
+	}
+	if hash == "" {
+		t.Error("hash = \"\", want a non-empty observed hash")
+	}
+	if cr.CompareURL != "" {
+		t.Errorf("CompareURL = %q, want empty (remote lookup must be skipped, not merely unresolved)", cr.CompareURL)
+	}
+}
+
 // TestPendingApproval_ReflectsPriorApproval pins the repeat-pend case: once a
 // task has been approved at some commit and later re-pends at a new one, From
 // carries the prior approval's commit and To the newly pending one — the

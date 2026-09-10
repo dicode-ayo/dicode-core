@@ -87,6 +87,30 @@ func TestCompareURL(t *testing.T) {
 			want: "",
 		},
 		{
+			name:   "gitlab.com nested subgroup remote preserves the full namespace path",
+			remote: "https://gitlab.com/group/subgroup/project.git",
+			from:   from40, to: to40,
+			want: "https://gitlab.com/group/subgroup/project/-/compare/" + from40 + "..." + to40,
+		},
+		{
+			name:   "gitlab.com deeply nested subgroup remote",
+			remote: "git@gitlab.com:group/subgroup/subsubgroup/project.git",
+			from:   from40, to: to40,
+			want: "https://gitlab.com/group/subgroup/subsubgroup/project/-/compare/" + from40 + "..." + to40,
+		},
+		{
+			name:   "gitlab.com bare single-segment path is not a valid project reference",
+			remote: "https://gitlab.com/onlyname",
+			from:   from40, to: to40,
+			want: "",
+		},
+		{
+			name:   "github.com remote with more than two path segments produces no link",
+			remote: "https://github.com/owner/repo/extra.git",
+			from:   from40, to: to40,
+			want: "",
+		},
+		{
 			name:   "empty remote",
 			remote: "",
 			from:   from40, to: to40,
@@ -142,34 +166,40 @@ func containsSubstring(s, substr string) bool {
 
 func TestParseRemote(t *testing.T) {
 	cases := []struct {
-		name                          string
-		remote                        string
-		wantHost, wantOwner, wantRepo string
-		wantOK                        bool
+		name     string
+		remote   string
+		wantHost string
+		wantPath string
+		wantOK   bool
 	}{
-		{"https with .git", "https://github.com/o/r.git", "github.com", "o", "r", true},
-		{"https without .git", "https://github.com/o/r", "github.com", "o", "r", true},
-		{"scp-like", "git@github.com:o/r.git", "github.com", "o", "r", true},
-		{"ssh scheme", "ssh://git@github.com/o/r.git", "github.com", "o", "r", true},
-		{"gitlab https", "https://gitlab.com/group/proj.git", "gitlab.com", "group", "proj", true},
-		{"empty", "", "", "", "", false},
-		{"no owner segment", "https://github.com/onlyrepo", "", "", "", false},
-		{"garbage", "not a url at all ::::", "", "", "", false},
-		{"uppercase/mixed-case host is lowercased", "https://GitHub.com/owner/repo.git", "github.com", "owner", "repo", true},
-		{"explicit port is stripped from the host", "https://github.com:443/owner/repo.git", "github.com", "owner", "repo", true},
+		{"https with .git", "https://github.com/o/r.git", "github.com", "o/r", true},
+		{"https without .git", "https://github.com/o/r", "github.com", "o/r", true},
+		{"scp-like", "git@github.com:o/r.git", "github.com", "o/r", true},
+		{"ssh scheme", "ssh://git@github.com/o/r.git", "github.com", "o/r", true},
+		{"gitlab https", "https://gitlab.com/group/proj.git", "gitlab.com", "group/proj", true},
+		{"gitlab subgroup https", "https://gitlab.com/group/subgroup/project.git", "gitlab.com", "group/subgroup/project", true},
+		{"empty", "", "", "", false},
+		// parseRemote no longer decides owner/repo segment counts — that
+		// is compareURL's per-host job now (see exactlyTwoSegments) — so a
+		// single-segment path parses fine here; it just won't be a valid
+		// GitHub repo reference downstream.
+		{"single-segment path still parses", "https://github.com/onlyrepo", "github.com", "onlyrepo", true},
+		{"garbage (no scheme, no host — treated as a local path)", "not a url at all ::::", "", "", false},
+		{"uppercase/mixed-case host is lowercased", "https://GitHub.com/owner/repo.git", "github.com", "owner/repo", true},
+		{"explicit port is stripped from the host", "https://github.com:443/owner/repo.git", "github.com", "owner/repo", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			host, owner, repo, ok := parseRemote(tc.remote)
+			host, path, ok := parseRemote(tc.remote)
 			if ok != tc.wantOK {
 				t.Fatalf("parseRemote(%q) ok = %v, want %v", tc.remote, ok, tc.wantOK)
 			}
 			if !ok {
 				return
 			}
-			if host != tc.wantHost || owner != tc.wantOwner || repo != tc.wantRepo {
-				t.Errorf("parseRemote(%q) = (%q, %q, %q), want (%q, %q, %q)",
-					tc.remote, host, owner, repo, tc.wantHost, tc.wantOwner, tc.wantRepo)
+			if host != tc.wantHost || path != tc.wantPath {
+				t.Errorf("parseRemote(%q) = (%q, %q), want (%q, %q)",
+					tc.remote, host, path, tc.wantHost, tc.wantPath)
 			}
 		})
 	}

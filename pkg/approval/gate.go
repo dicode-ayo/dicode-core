@@ -540,6 +540,13 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // The lock and remote lookups run outside g.mu, after the pending entry is
 // read under lock — same shape as approve(): a Lock.Get and a repository
 // open are I/O and must never happen while the gate's mutex is held.
+//
+// The remote lookup itself — a filesystem walk for a .git directory — is
+// skipped whenever From/To are in a state that makes compareURL return ""
+// regardless of the remote (no prior approval, no resolvable pending
+// commit, or an unchanged commit): every /approve/{token} request,
+// including link-prefetches, would otherwise re-walk the tree for an
+// answer it is guaranteed to discard.
 func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
@@ -553,8 +560,12 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 		from = rec.Commit
 	}
 	to := ent.commit
-	remote := g.remoteFn(ent.kinded)
 
+	if from == "" || to == "" || from == to {
+		return ent.hash, CommitRange{From: from, To: to}, true
+	}
+
+	remote := g.remoteFn(ent.kinded)
 	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(remote, from, to)}, true
 }
 
