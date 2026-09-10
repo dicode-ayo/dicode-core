@@ -286,18 +286,21 @@ func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 	}
 }
 
-// TestPendingApproval_FirstApprovalSkipsRemoteLookup pins finding-3's fix:
-// on a task's first-ever approval From is always "" (no prior lock record),
-// so compareURL is guaranteed to return "" regardless of the remote — and
-// PendingApproval must not pay for the filesystem walk g.remoteFn performs
-// to find out. A remote resolver that fails the test if invoked is the
-// assertion.
-func TestPendingApproval_FirstApprovalSkipsRemoteLookup(t *testing.T) {
+// TestPendingApproval_CachesRemoteAtAdmitTime pins the fix for a round-5
+// code-review finding: the remote is resolved once per Admit (alongside
+// commit, in the same pattern pendingEntry.remote's doc comment describes)
+// and cached on the pending entry, rather than re-walked by PendingApproval
+// on every call — including the repeated /approve/{token} link-prefetches
+// mail clients and chat unfurlers are expected to make. A counting remote
+// resolver pins this: one Admit followed by several PendingApproval calls
+// must resolve the remote exactly once, not once per call.
+func TestPendingApproval_CachesRemoteAtAdmitTime(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	var calls int
 	g.SetRemoteFunc(func(k task.Kinded) string {
-		t.Fatal("remote resolver called even though From/To can't produce a compare link")
-		return ""
+		calls++
+		return "https://github.com/o/r.git"
 	})
 
 	to := fakeCommit("b")
@@ -305,16 +308,27 @@ func TestPendingApproval_FirstApprovalSkipsRemoteLookup(t *testing.T) {
 	if armed, err := g.Admit(spec); err != nil || armed {
 		t.Fatalf("Admit: armed=%v err=%v", armed, err)
 	}
+	if calls != 1 {
+		t.Fatalf("remote resolver called %d times during Admit, want exactly 1", calls)
+	}
 
-	hash, cr, ok := g.PendingApproval("repo/deploy")
-	if !ok {
-		t.Fatal("PendingApproval: ok = false, want true for a pending task")
+	for i := 0; i < 3; i++ {
+		hash, cr, ok := g.PendingApproval("repo/deploy")
+		if !ok {
+			t.Fatal("PendingApproval: ok = false, want true for a pending task")
+		}
+		if hash == "" {
+			t.Error("hash = \"\", want a non-empty observed hash")
+		}
+		// From == "" on a first-ever approval, so CompareURL is still "" —
+		// this test is about call count, not about exercising a populated
+		// CompareURL (see TestPendingApproval_PopulatesCompareURL for that).
+		if cr.CompareURL != "" {
+			t.Errorf("CompareURL = %q, want empty (no prior approval to range from)", cr.CompareURL)
+		}
 	}
-	if hash == "" {
-		t.Error("hash = \"\", want a non-empty observed hash")
-	}
-	if cr.CompareURL != "" {
-		t.Errorf("CompareURL = %q, want empty (remote lookup must be skipped, not merely unresolved)", cr.CompareURL)
+	if calls != 1 {
+		t.Errorf("remote resolver called %d times total, want exactly 1 (cached at Admit, never re-walked by PendingApproval)", calls)
 	}
 }
 

@@ -108,6 +108,16 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
+	// remote is the task directory's git "origin" remote URL, observed
+	// alongside commit in the same critical section, "" when there is none
+	// (see headRemoteURLOf). Cached here rather than re-resolved by
+	// PendingApproval on every call — a git remote changes far less often
+	// than a commit does, and this mirrors the existing cost/benefit
+	// decision commit itself already makes: both are filesystem walks
+	// resolved once per Admit of a genuinely pending task (every ~30s
+	// reconcile tick while it stays pending, not on every /approve/{token}
+	// view or mail/chat link-prefetch that reads this entry).
+	remote string
 	// enabled is the resolved enabled flag observed alongside hash, after
 	// previewFn (if any) — the same value State() renders and
 	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
@@ -269,14 +279,17 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// commit is the baseline the next comparison runs from, and one that
 		// lags behind the last commit this content was seen at yields a range
 		// full of commits that never touched the task. Kept outside the lock —
-		// it opens the repository.
+		// it opens the repository. remote is resolved alongside it, against the
+		// same already-open repository, so PendingApproval never needs to
+		// re-walk the directory itself (see pendingEntry.remote's doc comment).
 		commit := g.commitFn(k)
+		remote := g.remoteFn(k)
 
 		g.mu.Lock()
-		// hash and commit are written together in one critical section: a
-		// concurrent Approve/ApproveIfHash can never observe a pending[id]
-		// whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, enabled: enabled}
+		// hash, commit, and remote are written together in one critical
+		// section: a concurrent Approve/ApproveIfHash can never observe a
+		// pending[id] whose fields disagree on which generation they describe.
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, enabled: enabled}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -537,16 +550,14 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // pending for the first time, exactly as PendingHash's zero hash would be —
 // this is decoration, and its absence is never an error (ADR-0001).
 //
-// The lock and remote lookups run outside g.mu, after the pending entry is
-// read under lock — same shape as approve(): a Lock.Get and a repository
-// open are I/O and must never happen while the gate's mutex is held.
-//
-// The remote lookup itself — a filesystem walk for a .git directory — is
-// skipped whenever From/To are in a state that makes compareURL return ""
-// regardless of the remote (no prior approval, no resolvable pending
-// commit, or an unchanged commit): every /approve/{token} request,
-// including link-prefetches, would otherwise re-walk the tree for an
-// answer it is guaranteed to discard.
+// The Lock.Get lookup runs outside g.mu, after the pending entry is read
+// under lock — same shape as approve(): I/O must never happen while the
+// gate's mutex is held. The remote itself is not looked up here at all: it
+// was already resolved once at Admit time and cached on the pending entry
+// (see pendingEntry.remote's doc comment), so every call to this method —
+// including the repeated /approve/{token} link-prefetches mail clients and
+// chat unfurlers are expected to make — is a pure in-memory read, never a
+// filesystem walk.
 //
 // Known limitation, accepted rather than guarded against: From is read from
 // whatever remote's history it was originally recorded against, but the
@@ -588,12 +599,12 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 		from = ""
 	}
 
-	if from == "" || to == "" {
-		return ent.hash, CommitRange{From: from, To: to}, true
-	}
-
-	remote := g.remoteFn(ent.kinded)
-	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(remote, from, to)}, true
+	// ent.remote was resolved once at Admit time (see pendingEntry.remote's
+	// doc comment), not re-walked here — compareURL itself already returns
+	// "" for from == "" || to == "", so there is no separate short-circuit
+	// needed at this level; it's a cheap string comparison either way, not
+	// I/O, now that the walk has already happened.
+	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not
