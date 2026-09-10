@@ -85,8 +85,12 @@ async function latestNotifyRunID(
 ): Promise<string | undefined> {
   const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=1`);
   if (!res.ok()) return undefined;
-  const runs = await res.json() as Run[];
-  return runs[0] ? runID(runs[0]) : undefined;
+  // ListRuns (pkg/registry) returns a nil slice for zero rows, which encodes
+  // as JSON null, not [] — the ordinary state before notify-echo has ever
+  // fired in this daemon instance. res.json() then yields null, so runs[0]
+  // must be guarded rather than assumed to be an (possibly empty) array.
+  const runs = await res.json() as Run[] | null;
+  return runs?.[0] ? runID(runs[0]) : undefined;
 }
 
 /**
@@ -103,10 +107,21 @@ async function waitForNewNotifyRun(
 ): Promise<Run> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=5`);
+    const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=1`);
     if (res.ok()) {
-      const runs = await res.json() as Run[];
-      const done = runs.find((r) => runID(r) !== beforeID && runStatus(r) === 'success');
+      // null (not []) is what a zero-run task's endpoint returns — see
+      // latestNotifyRunID's comment on ListRuns' nil-slice-to-null encoding.
+      const runs = await res.json() as Run[] | null;
+      // Only the newest run counts. notify-echo is wired suite-wide (it fires
+      // on every true pending transition, not just this test's), so accepting
+      // any run whose ID differs from beforeID — rather than specifically the
+      // newest — could match an older, unrelated run from a different spec's
+      // pending transition, with a stale approve_url for a different task
+      // entirely, instead of waiting for the one this test just caused.
+      const newest = runs?.[0];
+      const done = newest && runID(newest) !== beforeID && runStatus(newest) === 'success'
+        ? newest
+        : undefined;
       if (done) return done;
     }
     await new Promise((r) => setTimeout(r, 500));
