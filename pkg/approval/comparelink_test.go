@@ -98,6 +98,18 @@ func TestCompareURL(t *testing.T) {
 			from:   from40, to: to40,
 			want: "https://github.com/dicode-ayo/dicode-core/compare/" + from40 + "..." + to40,
 		},
+		{
+			name:   "uppercase/mixed-case host still matches (DNS is case-insensitive)",
+			remote: "https://GitHub.com/owner/repo.git",
+			from:   from40, to: to40,
+			want: "https://github.com/owner/repo/compare/" + from40 + "..." + to40,
+		},
+		{
+			name:   "explicit port is stripped from the host before matching",
+			remote: "https://github.com:443/owner/repo.git",
+			from:   from40, to: to40,
+			want: "https://github.com/owner/repo/compare/" + from40 + "..." + to40,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,6 +155,8 @@ func TestParseRemote(t *testing.T) {
 		{"empty", "", "", "", "", false},
 		{"no owner segment", "https://github.com/onlyrepo", "", "", "", false},
 		{"garbage", "not a url at all ::::", "", "", "", false},
+		{"uppercase/mixed-case host is lowercased", "https://GitHub.com/owner/repo.git", "github.com", "owner", "repo", true},
+		{"explicit port is stripped from the host", "https://github.com:443/owner/repo.git", "github.com", "owner", "repo", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

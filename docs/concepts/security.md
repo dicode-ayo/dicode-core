@@ -901,7 +901,7 @@ truncation banner and no "too large to display" state to design.
   the task ID and its short hash, nothing about the task's contents, and —
   when resolvable — the "what moved" decoration: the commit range from the
   previously-approved commit to the one the pending content was observed at,
-  and a link to the git host's compare view (`Gate.PendingCommitRange`,
+  and a link to the git host's compare view (`Gate.PendingApproval`,
   `pkg/approval/comparelink.go`). Every piece of that degrades to simply not
   rendering rather than an error or a broken link — no prior approval, no git
   history, or an unrecognized remote host all just omit it (ADR-0001).

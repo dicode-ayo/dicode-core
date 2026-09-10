@@ -22,7 +22,7 @@ import (
 type ApprovalGate interface {
 	IsPending(id string) bool
 	PendingHash(id string) (string, bool)
-	PendingCommitRange(id string) (approval.CommitRange, bool)
+	PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
@@ -274,20 +274,25 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The link must only ever approve what it was minted for: if the task is
-	// no longer pending at that exact hash, say so up front.
-	if hash, ok := s.approvalGate.PendingHash(info.TaskID); !ok || hash != info.Hash {
+	// no longer pending at that exact hash, say so up front. hash and cr are
+	// read together in one locked Gate.PendingApproval call — not a separate
+	// PendingHash call followed by a separate commit-range lookup — so a
+	// concurrent Admit (the reconciler's ~30s tick) can never replace the
+	// pending entry between the two and leave the rendered commit range
+	// describing a different generation than the hash just confirmed to
+	// match the token.
+	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
+	if !ok || hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
 	data := approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)}
-	// Decoration only (#672): when it cannot be resolved, ok is still true —
-	// the confirm page above already has everything it needs — so a missed
-	// commit range never blocks rendering, it just renders without one.
-	if cr, ok := s.approvalGate.PendingCommitRange(info.TaskID); ok {
-		data.CommitFrom = shortHash(cr.From)
-		data.CommitTo = shortHash(cr.To)
-		data.CompareURL = cr.CompareURL
-	}
+	// Decoration only (#672): every field of cr degrades to "" rather than
+	// blocking rendering when it cannot be resolved (see approval.CommitRange
+	// and ADR-0001), so a missed commit range just renders without one.
+	data.CommitFrom = shortHash(cr.From)
+	data.CommitTo = shortHash(cr.To)
+	data.CompareURL = cr.CompareURL
 	s.renderApprovePage(w, http.StatusOK, data)
 }
 

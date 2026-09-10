@@ -86,12 +86,19 @@ func parseRemote(remote string) (host, owner, repo string, ok bool) {
 	if err != nil || u.Host == "" {
 		return "", "", "", false
 	}
-	return splitOwnerRepo(u.Host, u.Path)
+	// Hostname() strips a trailing ":port" (e.g. "github.com:443") that a bare
+	// u.Host would carry straight into compareURL's exact-match switch.
+	return splitOwnerRepo(u.Hostname(), u.Path)
 }
 
 // splitOwnerRepo pulls owner/repo off the trailing two path segments of
-// path (leading/trailing slashes and a trailing ".git" ignored).
+// path (leading/trailing slashes and a trailing ".git" ignored). The host is
+// lowercased here — the single point every parseRemote branch (scp-like and
+// URL) funnels through — so a differently-cased remote (DNS hosts are
+// case-insensitive; "GitHub.com" and "github.com" are the same host) still
+// matches compareURL's literal-lowercase switch.
 func splitOwnerRepo(host, path string) (h, owner, repo string, ok bool) {
+	host = strings.ToLower(host)
 	path = strings.Trim(path, "/")
 	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(path, "/")

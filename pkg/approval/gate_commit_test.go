@@ -253,12 +253,12 @@ func TestApproveRecordsNoCommitForUntrackedTaskDir(t *testing.T) {
 	}
 }
 
-// ── PendingCommitRange ───────────────────────────────────────────────────────
+// ── PendingApproval ──────────────────────────────────────────────────────────
 
-// TestPendingCommitRange_FirstApprovalHasNoFrom pins the ordinary state for a
+// TestPendingApproval_FirstApprovalHasNoFrom pins the ordinary state for a
 // task pending for the first time: there is no prior lock record, so From is
 // empty even though a commit was observed for the currently pending content.
-func TestPendingCommitRange_FirstApprovalHasNoFrom(t *testing.T) {
+func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
@@ -268,9 +268,12 @@ func TestPendingCommitRange_FirstApprovalHasNoFrom(t *testing.T) {
 		t.Fatalf("Admit: armed=%v err=%v", armed, err)
 	}
 
-	cr, ok := g.PendingCommitRange("repo/deploy")
+	hash, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {
-		t.Fatal("PendingCommitRange: ok = false, want true for a pending task")
+		t.Fatal("PendingApproval: ok = false, want true for a pending task")
+	}
+	if hash == "" {
+		t.Error("hash = \"\", want a non-empty observed hash")
 	}
 	if cr.From != "" {
 		t.Errorf("From = %q, want empty (no prior approval)", cr.From)
@@ -283,11 +286,11 @@ func TestPendingCommitRange_FirstApprovalHasNoFrom(t *testing.T) {
 	}
 }
 
-// TestPendingCommitRange_ReflectsPriorApproval pins the repeat-pend case: once
-// a task has been approved at some commit and later re-pends at a new one,
-// From carries the prior approval's commit and To the newly pending one — the
+// TestPendingApproval_ReflectsPriorApproval pins the repeat-pend case: once a
+// task has been approved at some commit and later re-pends at a new one, From
+// carries the prior approval's commit and To the newly pending one — the
 // exact range the operator needs to reason about "what moved".
-func TestPendingCommitRange_ReflectsPriorApproval(t *testing.T) {
+func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
@@ -311,9 +314,12 @@ func TestPendingCommitRange_ReflectsPriorApproval(t *testing.T) {
 		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
 	}
 
-	cr, ok := g.PendingCommitRange("repo/deploy")
+	hash, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {
-		t.Fatal("PendingCommitRange: ok = false, want true")
+		t.Fatal("PendingApproval: ok = false, want true")
+	}
+	if wantHash, _ := g.PendingHash("repo/deploy"); hash != wantHash {
+		t.Errorf("hash = %q, want the currently pending hash %q", hash, wantHash)
 	}
 	if cr.From != first {
 		t.Errorf("From = %q, want the prior approval's commit %q", cr.From, first)
@@ -323,9 +329,9 @@ func TestPendingCommitRange_ReflectsPriorApproval(t *testing.T) {
 	}
 }
 
-// TestPendingCommitRange_PopulatesCompareURL wires a fake remote resolver and
+// TestPendingApproval_PopulatesCompareURL wires a fake remote resolver and
 // confirms CompareURL is built from it once From/To are both known.
-func TestPendingCommitRange_PopulatesCompareURL(t *testing.T) {
+func TestPendingApproval_PopulatesCompareURL(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 	g.SetRemoteFunc(func(k task.Kinded) string { return "https://github.com/o/r.git" })
@@ -349,9 +355,9 @@ func TestPendingCommitRange_PopulatesCompareURL(t *testing.T) {
 		t.Fatalf("re-Admit: %v", err)
 	}
 
-	cr, ok := g.PendingCommitRange("repo/deploy")
+	_, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {
-		t.Fatal("PendingCommitRange: ok = false, want true")
+		t.Fatal("PendingApproval: ok = false, want true")
 	}
 	want := "https://github.com/o/r/compare/" + first + "..." + second
 	if cr.CompareURL != want {
@@ -359,11 +365,12 @@ func TestPendingCommitRange_PopulatesCompareURL(t *testing.T) {
 	}
 }
 
-// TestPendingCommitRange_NotPending pins the not-pending case: ok is false
-// and the returned CommitRange is the zero value, mirroring PendingHash.
-func TestPendingCommitRange_NotPending(t *testing.T) {
+// TestPendingApproval_NotPending pins the not-pending case: ok is false and
+// the returned hash and CommitRange are their zero values, mirroring
+// PendingHash.
+func TestPendingApproval_NotPending(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
-	if cr, ok := g.PendingCommitRange("repo/ghost"); ok || cr != (CommitRange{}) {
-		t.Fatalf("PendingCommitRange(not pending) = (%+v, %v), want (zero value, false)", cr, ok)
+	if hash, cr, ok := g.PendingApproval("repo/ghost"); ok || hash != "" || cr != (CommitRange{}) {
+		t.Fatalf("PendingApproval(not pending) = (%q, %+v, %v), want (\"\", zero value, false)", hash, cr, ok)
 	}
 }

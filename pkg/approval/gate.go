@@ -516,10 +516,17 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	return ent.hash, ent.enabled, true
 }
 
-// PendingCommitRange returns the "what moved" decoration for id's pending
-// hold — the commit range from the previously-approved commit to the commit
-// the currently pending content was observed at, plus a compare-view link —
-// and whether id is pending at all.
+// PendingApproval returns the content hash observed when id was held
+// pending together with its "what moved" commit-range decoration — the
+// commit range from the previously-approved commit to the commit the
+// currently pending content was observed at, plus a compare-view link — all
+// read under one locked call. Callers that need both (e.g. the token-link
+// confirm page) must use this rather than two separate locked calls (e.g.
+// PendingHash followed by a second lookup for the commit range): those calls
+// can straddle a concurrent Approve/Forget/Admit and pair the hash confirmed
+// by one call with the commit range of a different pending generation
+// returned by the other — exactly the cross-generation mismatch PendingInfo's
+// doc comment documents for hash+enabled.
 //
 // From is Lock.Get(id)'s recorded Record.Commit: "" when the task has never
 // been approved, or when it was approved without a resolvable commit. To is
@@ -533,12 +540,12 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // The lock and remote lookups run outside g.mu, after the pending entry is
 // read under lock — same shape as approve(): a Lock.Get and a repository
 // open are I/O and must never happen while the gate's mutex is held.
-func (g *Gate) PendingCommitRange(id string) (CommitRange, bool) {
+func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
 	g.mu.Unlock()
 	if !ok {
-		return CommitRange{}, false
+		return "", CommitRange{}, false
 	}
 
 	var from string
@@ -548,7 +555,7 @@ func (g *Gate) PendingCommitRange(id string) (CommitRange, bool) {
 	to := ent.commit
 	remote := g.remoteFn(ent.kinded)
 
-	return CommitRange{From: from, To: to, CompareURL: compareURL(remote, from, to)}, true
+	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(remote, from, to)}, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not
