@@ -361,6 +361,52 @@ func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
 	}
 }
 
+// TestPendingApproval_UnchangedCommitCollapsesToSingleCommit covers a task
+// re-pending with the SAME commit it was last approved at — e.g. a
+// taskset/dicode.yaml override changed the resolved hash with no new git
+// commit. From must collapse to "" rather than repeat To: a
+// "Commit range: abc123…abc123" render would misleadingly imply a diff
+// exists to review when git shows no change at all (see PendingApproval's
+// doc comment and compareURL's own from == to short-circuit, which this
+// mirrors at the CommitRange level too).
+func TestPendingApproval_UnchangedCommitCollapsesToSingleCommit(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+
+	only := fakeCommit("a")
+	g.SetCommitFunc(func(k task.Kinded) string { return only })
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if rec, ok := lock.Get("repo/deploy"); !ok || rec.Commit != only {
+		t.Fatalf("precondition: lock commit = %+v, want %q", rec, only)
+	}
+
+	// Re-pend with a different resolved hash (a different spec body), but
+	// the SAME commit — the git history hasn't moved.
+	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
+	if armed, err := g.Admit(spec2); err != nil || armed {
+		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
+	}
+
+	_, cr, ok := g.PendingApproval("repo/deploy")
+	if !ok {
+		t.Fatal("PendingApproval: ok = false, want true")
+	}
+	if cr.From != "" {
+		t.Errorf("From = %q, want \"\" (nothing moved, so no range) not the repeated commit", cr.From)
+	}
+	if cr.To != only {
+		t.Errorf("To = %q, want %q", cr.To, only)
+	}
+	if cr.CompareURL != "" {
+		t.Errorf("CompareURL = %q, want \"\" when nothing moved", cr.CompareURL)
+	}
+}
+
 // TestPendingApproval_PopulatesCompareURL wires a fake remote resolver and
 // confirms CompareURL is built from it once From/To are both known.
 func TestPendingApproval_PopulatesCompareURL(t *testing.T) {

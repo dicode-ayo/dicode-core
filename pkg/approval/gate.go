@@ -561,7 +561,19 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 	}
 	to := ent.commit
 
-	if from == "" || to == "" || from == to {
+	// Nothing moved: from and to are the same non-empty commit (e.g. the task
+	// re-pended from a taskset/dicode.yaml override change alone, with no new
+	// git commit). Reporting that as a "range" would render "Commit range:
+	// abc123…abc123" — a range of one, implying a diff exists to review when
+	// there is none — so it collapses to From == "", the same single-commit
+	// shape as a task with no prior approval. CompareURL stays "": compareURL
+	// itself treats from == to identically, so this is purely about not
+	// exposing the redundant From through CommitRange too.
+	if from == to {
+		from = ""
+	}
+
+	if from == "" || to == "" {
 		return ent.hash, CommitRange{From: from, To: to}, true
 	}
 
