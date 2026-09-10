@@ -134,6 +134,12 @@ func TestCompareURL(t *testing.T) {
 			from:   from40, to: to40,
 			want: "https://github.com/owner/repo/compare/" + from40 + "..." + to40,
 		},
+		{
+			name:   "trailing FQDN-root dot still matches (github.com. names the same host as github.com)",
+			remote: "https://github.com./owner/repo.git",
+			from:   from40, to: to40,
+			want: "https://github.com/owner/repo/compare/" + from40 + "..." + to40,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,6 +193,7 @@ func TestParseRemote(t *testing.T) {
 		{"garbage (no scheme, no host — treated as a local path)", "not a url at all ::::", "", "", false},
 		{"uppercase/mixed-case host is lowercased", "https://GitHub.com/owner/repo.git", "github.com", "owner/repo", true},
 		{"explicit port is stripped from the host", "https://github.com:443/owner/repo.git", "github.com", "owner/repo", true},
+		{"trailing FQDN-root dot is dropped", "https://github.com./owner/repo.git", "github.com", "owner/repo", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

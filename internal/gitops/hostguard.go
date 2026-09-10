@@ -56,13 +56,13 @@ func ValidateRemoteHost(rawURL string) error {
 		return fmt.Errorf("invalid remote url: %w: %w", err, ErrNoRemoteHost)
 	}
 
-	// normalizeHost strips go-git's IPv6 brackets and lowercases. It also drops
+	// NormalizeHost strips go-git's IPv6 brackets and lowercases. It also drops
 	// a trailing FQDN-root dot: "metadata.google.internal." resolves identically
 	// to "metadata.google.internal" but would otherwise slip past the literal
 	// hostname-suffix checks below (which match ".internal"/".local" as a true
 	// suffix). Sharing this with the allowlist matcher keeps both sides comparing
 	// under one canonical form.
-	host := normalizeHost(ep.Host)
+	host := NormalizeHost(ep.Host)
 	if host == "" {
 		return fmt.Errorf("url has no remote host: %w", ErrNoRemoteHost)
 	}

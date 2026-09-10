@@ -3,6 +3,7 @@ package approval
 import (
 	"strings"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
@@ -103,11 +104,16 @@ func parseRemote(remote string) (host, path string, ok bool) {
 	if err != nil || ep.Host == "" {
 		return "", "", false
 	}
-	// Host is lowercased here — DNS hosts are case-insensitive
-	// ("GitHub.com" and "github.com" are the same host) — so a
-	// differently-cased remote still matches compareURL's literal-lowercase
-	// switch.
-	host = strings.ToLower(ep.Host)
+	// Canonicalized via the same NormalizeHost internal/gitops's SSRF guard
+	// uses on every remote host it classifies (hostguard.go's
+	// ValidateRemoteHost) — not just a bare lowercase — so a host is
+	// recognized here under exactly the same rules that decide whether it's
+	// safe to fetch from in the first place: lowercase (DNS is
+	// case-insensitive: "GitHub.com" and "github.com" are the same host),
+	// IPv6 brackets stripped, and a trailing FQDN-root dot dropped (RFC 952 —
+	// "github.com." names the same host as "github.com", but a bare
+	// ToLower/Trim wouldn't recognize the two as equal).
+	host = gitops.NormalizeHost(ep.Host)
 	path = strings.TrimSuffix(strings.Trim(ep.Path, "/"), ".git")
 	return host, path, true
 }

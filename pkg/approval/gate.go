@@ -547,6 +547,21 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 // commit, or an unchanged commit): every /approve/{token} request,
 // including link-prefetches, would otherwise re-walk the tree for an
 // answer it is guaranteed to discard.
+//
+// Known limitation, accepted rather than guarded against: From is read from
+// whatever remote's history it was originally recorded against, but the
+// remote used to build CompareURL is always the CURRENT one for this task's
+// directory. Lock.Get's Record does not persist which remote was in effect
+// when From was approved, so if an operator repoints a source's git URL at
+// an unrelated repository between two approvals, the resulting compare link
+// pairs a From commit from the old repository with a To commit from the new
+// one — a link that may 404 or show "no common ancestor" on the host rather
+// than a real diff. This requires a deliberate operator reconfiguration
+// (not attacker input), and the failure mode is a broken/confusing link
+// rather than a misleading one that renders as if it were a valid diff, so
+// it falls on the "decoration, not guaranteed" side of ADR-0001 rather than
+// warranting a Record.Remote field and the lock-schema migration that would
+// require.
 func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
