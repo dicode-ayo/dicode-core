@@ -1,6 +1,9 @@
 package approval
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const (
 	from40 = "1111111111111111111111111111111111111111"
@@ -152,22 +155,13 @@ func TestCompareURL(t *testing.T) {
 					if leak == "@" {
 						continue // legitimate compare URLs never contain "@" anyway; skip the trivial case
 					}
-					if containsSubstring(got, leak) {
+					if strings.Contains(got, leak) {
 						t.Errorf("compareURL leaked credential material %q into %q", leak, got)
 					}
 				}
 			}
 		})
 	}
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestParseRemote(t *testing.T) {
