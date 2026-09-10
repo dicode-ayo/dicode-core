@@ -1,0 +1,12 @@
+apiVersion: dicode/v1
+kind: Task
+name: Yml Manifest Target
+description: >-
+  Regression fixture for #765 — this task's manifest is named task.yml
+  (not task.yaml) and its taskset entry (see ../taskset.yaml) refs this
+  directory rather than a specific file, exercising the resolver's
+  directory probe (resolveYAMLPath) landing on task.yml end to end.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

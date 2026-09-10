@@ -619,6 +619,16 @@ type Spec struct {
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
+	// ManifestFile is the basename of the manifest actually loaded from
+	// TaskDir — "task.yaml" or "task.yml" (not stored in YAML). Set by
+	// loadDirWithVars so a caller that later needs to read-modify-write the
+	// on-disk manifest (e.g. pkg/webui's trigger-editing endpoint) targets
+	// the exact file this spec came from, rather than re-probing TaskDir and
+	// risking a same-directory sibling manifest with different content
+	// (#765). Empty for a Spec constructed without going through the
+	// loader (e.g. directly in a test); callers should fall back to
+	// ReadManifest's probing in that case.
+	ManifestFile string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
 	// Warnings holds non-fatal config-load warnings emitted during validate().
@@ -680,9 +690,130 @@ func LoadDir(dir string) (*Spec, error) {
 	return LoadDirWithVars(dir, nil)
 }
 
+// ReadManifest returns the path and raw content of dir's task manifest file
+// — task.yaml, falling back to task.yml (see openTaskSpecFile) — as a
+// single open+read, not a path lookup a caller then reopens (which would
+// double the syscalls and open a TOCTOU window against a concurrent source
+// sync). Callers that need to read-modify-write a task's on-disk manifest
+// directly (e.g. pkg/webui's trigger-editing endpoint) use this instead of
+// hardcoding task.yaml, so a task.yml-only task (#765) can still be edited
+// rather than hitting a spurious "no such file" error.
+func ReadManifest(dir string) (path string, data []byte, err error) {
+	return readManifest(dir, "")
+}
+
+// ReadManifestFile is ReadManifest for a caller that already knows the exact
+// manifest filename to read (e.g. spec.ManifestFile, as recorded by the
+// loader that produced spec) — it reads dir/filename directly, with no
+// task.yaml/task.yml probing, so a read-modify-write cycle always targets
+// the same file the spec was actually loaded from, never a same-directory
+// sibling with different content (#765). filename must be non-empty.
+func ReadManifestFile(dir, filename string) (path string, data []byte, err error) {
+	if filename == "" {
+		return "", nil, fmt.Errorf("ReadManifestFile: filename must be non-empty for %s (use ReadManifest for probing)", dir)
+	}
+	return readManifest(dir, filename)
+}
+
+func readManifest(dir, filename string) (path string, data []byte, err error) {
+	f, specPath, err := openTaskSpecFile(dir, filename)
+	if err != nil {
+		return "", nil, fmt.Errorf("open %s: %w", specPath, err)
+	}
+	defer f.Close()
+	data, err = io.ReadAll(f)
+	if err != nil {
+		return "", nil, fmt.Errorf("read %s: %w", specPath, err)
+	}
+	return specPath, data, nil
+}
+
+// openTaskSpecFile opens a task manifest in dir. When filename is non-empty,
+// it opens exactly dir/filename — no probing — for callers (the taskset
+// resolver) that already know which manifest name a prior kind-detection
+// pass vetted, so the file actually loaded is always the same file that was
+// checked, never a different sibling. When filename is empty, it probes
+// task.yaml then task.yml, accepting them interchangeably — the same pair
+// pkg/taskset/resolver.go's isTaskFileName and resolveYAMLPath recognize —
+// for callers (LoadDir, ScanDir-discovered sources) that only have a bare
+// directory. Without this fallback, a ref that resolves onto a bare
+// task.yml (#765) passed resolver kind-detection but then failed to load
+// here with a confusing "open task.yaml ...: no such file or directory",
+// since the ref's resolved file was discarded in favor of re-deriving a
+// hardcoded task.yaml path from its parent directory. In probe mode,
+// task.yaml is tried first and preferred on ties (a directory with both is
+// not expected, but favors the conventional name); if task.yml exists but
+// fails to open for a reason other than not-existing (e.g. a permission
+// error), that error is returned rather than silently falling back to the
+// task.yaml-not-found error.
+//
+// filename (when non-empty) is expected to already be a bare basename — the
+// resolver passes filepath.Base(...) of an already ref-resolution-validated
+// path — but this backs an exported entry point (LoadDirWithVarsFile/
+// LoadPipelineDirFile), so containment is enforced explicitly via os.Root
+// (Go 1.24+) — the standard library's own sandboxed file-access API, which
+// rejects a name that would resolve outside dir (including through a
+// symlink) at the OS level — rather than trusting every future caller to
+// pre-sanitize.
+//
+// This intentionally does not go through internal/pathguard — dicode's
+// usual single audited containment check — despite the duplication: a
+// static-analysis pass over this exact code flagged the equivalent
+// pathguard.Within call (and, after that, an inlined filepath.Rel-based
+// check) as an unrecognized barrier and kept alerting on the os.Open sink,
+// where os.Root's stdlib-native sandboxing is what it accepted. One Root is
+// opened per call and shared across both probe candidates (rather than one
+// os.OpenRoot per candidate) to avoid a redundant directory-open syscall on
+// the common task.yml-only path.
+func openTaskSpecFile(dir, filename string) (*os.File, string, error) {
+	hint := filename
+	if hint == "" {
+		hint = "task.yaml"
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, filepath.Join(dir, hint), err
+	}
+	defer root.Close()
+
+	if filename != "" {
+		p := filepath.Join(dir, filename)
+		f, err := root.Open(filename)
+		return f, p, err
+	}
+
+	specPath := filepath.Join(dir, "task.yaml")
+	f, err := root.Open("task.yaml")
+	if err == nil {
+		return f, specPath, nil
+	}
+	// Try task.yml regardless of why task.yaml failed (not found, or some
+	// other error like permission-denied) — a readable task.yml should
+	// still load even if a stray, unreadable task.yaml sits alongside it.
+	ymlPath := filepath.Join(dir, "task.yml")
+	ymlFile, ymlErr := root.Open("task.yml")
+	if ymlErr == nil {
+		return ymlFile, ymlPath, nil
+	}
+	// Both failed: prefer surfacing whichever error isn't a plain "not
+	// found" (more actionable — e.g. a permission error) over the other's
+	// not-found, defaulting to task.yaml's error when both are equally
+	// uninformative not-found errors.
+	if !os.IsNotExist(err) {
+		return nil, specPath, err
+	}
+	if !os.IsNotExist(ymlErr) {
+		return nil, ymlPath, ymlErr
+	}
+	return nil, specPath, err
+}
+
 // LoadDirWithVars reads a task from its directory, expanding ${VAR} references
 // in the spec using built-in variables merged with the caller-supplied extras.
 // Pass nil for extras when loading a task outside of a source context.
+// Probes for task.yaml then task.yml (see openTaskSpecFile) — use
+// LoadDirWithVarsFile instead when the caller already knows the exact
+// manifest filename a prior kind-detection pass vetted.
 //
 // Typical extras:
 //   - TASK_SET_DIR: directory of the root taskset.yaml for taskset sources,
@@ -692,15 +823,35 @@ func LoadDir(dir string) (*Spec, error) {
 // See pkg/task/template.go and docs/task-template-vars.md for the full
 // variable set and resolution rules.
 func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
-	specPath := filepath.Join(dir, "task.yaml")
-	f, err := os.Open(specPath)
+	return loadDirWithVars(dir, "", extras)
+}
+
+// LoadDirWithVarsFile is LoadDirWithVars for a caller that already knows the
+// exact manifest filename to load (e.g. pkg/taskset/resolver.go, after its
+// own DetectKind/mustBeTask check already read that specific file) — it
+// opens dir/filename directly, with no task.yaml/task.yml probing, so the
+// file actually loaded is always the same file the kind-detection/security
+// check already vetted, never a same-directory sibling with different
+// content. filename must be non-empty — pass it through LoadDirWithVars
+// instead of "" to get the probing behavior; that distinction is enforced,
+// not silently interchangeable, so an accidental empty filename can't
+// reintroduce the sibling-manifest mismatch this function exists to close.
+func LoadDirWithVarsFile(dir, filename string, extras map[string]string) (*Spec, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("LoadDirWithVarsFile: filename must be non-empty for %s (use LoadDirWithVars for probing)", dir)
+	}
+	return loadDirWithVars(dir, filename, extras)
+}
+
+func loadDirWithVars(dir, filename string, extras map[string]string) (*Spec, error) {
+	f, specPath, err := openTaskSpecFile(dir, filename)
 	if err != nil {
-		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("open %s: %w", specPath, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, fmt.Errorf("read task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("read %s: %w", specPath, err)
 	}
 
 	// Probe for the removed `notify:` block before decoding. yaml.v3's
@@ -711,14 +862,14 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 		Notify any `yaml:"notify"`
 	}
 	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
-		return nil, fmt.Errorf("task.yaml in %s: legacy `notify` block detected. "+
+		return nil, fmt.Errorf("%s: legacy `notify` block detected. "+
 			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
-			"to fire a notification task on failure — see docs.", dir)
+			"to fire a notification task on failure — see docs", specPath)
 	}
 
 	var spec Spec
 	if err := yaml.Unmarshal(data, &spec); err != nil {
-		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)
+		return nil, fmt.Errorf("parse %s: %w", specPath, err)
 	}
 
 	if err := spec.validate(); err != nil {
@@ -726,6 +877,7 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	}
 
 	spec.TaskDir = dir
+	spec.ManifestFile = filepath.Base(specPath)
 	spec.ID = filepath.Base(dir)
 	// Default Enabled to true; the taskset resolver may flip it to false if
 	// an override or entry-level `enabled: false` is in effect.
