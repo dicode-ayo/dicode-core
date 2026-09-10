@@ -57,6 +57,7 @@ type Gate struct {
 	arm      func(task.Kinded) error
 	hashFn   func(task.Kinded) (string, error)
 	commitFn func(task.Kinded) string
+	remoteFn func(task.Kinded) string
 	log      *zap.Logger
 
 	mu          sync.Mutex
@@ -133,6 +134,7 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		arm:      arm,
 		hashFn:   ContentHash,
 		commitFn: headCommitOf,
+		remoteFn: headRemoteURLOf,
 		log:      log,
 		pending:  map[string]pendingEntry{},
 		admitted: map[string]task.Kinded{},
@@ -144,6 +146,9 @@ func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn
 
 // SetCommitFunc overrides the commit resolver (tests).
 func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
+
+// SetRemoteFunc overrides the remote-URL resolver (tests).
+func (g *Gate) SetRemoteFunc(fn func(task.Kinded) string) { g.remoteFn = fn }
 
 // SetBuiltinPinned records whether the buildin source is pinned to a tag.
 // Call once at startup, before Admit runs concurrently — it is not
@@ -338,6 +343,25 @@ func headCommitOf(k task.Kinded) string {
 	return commit
 }
 
+// headRemoteURLOf returns the "origin" remote URL of the git repository
+// tracking k's task directory, or "" when there is none: a dir-less inline
+// task, a local source outside any repository, or a repository with no
+// "origin" remote configured. Every failure degrades to "" rather than
+// surfacing, mirroring headCommitOf: the remote only ever feeds the
+// decorative compare-view link on the review surface, never a gate
+// decision.
+func headRemoteURLOf(k task.Kinded) string {
+	dir := taskDirOf(k)
+	if dir == "" {
+		return ""
+	}
+	remote, err := gitops.RemoteURL(dir)
+	if err != nil {
+		return ""
+	}
+	return remote
+}
+
 // Approve approves a pending task: records its observed hash in the lock and
 // arms its triggers. Returns an error when the task is not pending.
 func (g *Gate) Approve(id string) error {
@@ -490,6 +514,41 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
 	return ent.hash, ent.enabled, true
+}
+
+// PendingCommitRange returns the "what moved" decoration for id's pending
+// hold — the commit range from the previously-approved commit to the commit
+// the currently pending content was observed at, plus a compare-view link —
+// and whether id is pending at all.
+//
+// From is Lock.Get(id)'s recorded Record.Commit: "" when the task has never
+// been approved, or when it was approved without a resolvable commit. To is
+// the commit captured in the pending entry itself (see pendingEntry's doc
+// comment) — the commit the CURRENTLY pending content was observed at, not
+// whatever HEAD has moved to since. A zero-value CommitRange with ok true is
+// the ordinary state for a local source with no git history, or a task
+// pending for the first time, exactly as PendingHash's zero hash would be —
+// this is decoration, and its absence is never an error (ADR-0001).
+//
+// The lock and remote lookups run outside g.mu, after the pending entry is
+// read under lock — same shape as approve(): a Lock.Get and a repository
+// open are I/O and must never happen while the gate's mutex is held.
+func (g *Gate) PendingCommitRange(id string) (CommitRange, bool) {
+	g.mu.Lock()
+	ent, ok := g.pending[id]
+	g.mu.Unlock()
+	if !ok {
+		return CommitRange{}, false
+	}
+
+	var from string
+	if rec, ok := g.lock.Get(id); ok {
+		from = rec.Commit
+	}
+	to := ent.commit
+	remote := g.remoteFn(ent.kinded)
+
+	return CommitRange{From: from, To: to, CompareURL: compareURL(remote, from, to)}, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not

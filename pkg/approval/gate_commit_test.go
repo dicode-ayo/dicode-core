@@ -252,3 +252,118 @@ func TestApproveRecordsNoCommitForUntrackedTaskDir(t *testing.T) {
 		t.Fatalf("Commit = %q, want empty for a task the repository does not track", rec.Commit)
 	}
 }
+
+// ── PendingCommitRange ───────────────────────────────────────────────────────
+
+// TestPendingCommitRange_FirstApprovalHasNoFrom pins the ordinary state for a
+// task pending for the first time: there is no prior lock record, so From is
+// empty even though a commit was observed for the currently pending content.
+func TestPendingCommitRange_FirstApprovalHasNoFrom(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+
+	to := fakeCommit("b")
+	g.SetCommitFunc(func(k task.Kinded) string { return to })
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+
+	cr, ok := g.PendingCommitRange("repo/deploy")
+	if !ok {
+		t.Fatal("PendingCommitRange: ok = false, want true for a pending task")
+	}
+	if cr.From != "" {
+		t.Errorf("From = %q, want empty (no prior approval)", cr.From)
+	}
+	if cr.To != to {
+		t.Errorf("To = %q, want %q", cr.To, to)
+	}
+	if cr.CompareURL != "" {
+		t.Errorf("CompareURL = %q, want empty (no remote configured)", cr.CompareURL)
+	}
+}
+
+// TestPendingCommitRange_ReflectsPriorApproval pins the repeat-pend case: once
+// a task has been approved at some commit and later re-pends at a new one,
+// From carries the prior approval's commit and To the newly pending one — the
+// exact range the operator needs to reason about "what moved".
+func TestPendingCommitRange_ReflectsPriorApproval(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+
+	first := fakeCommit("a")
+	g.SetCommitFunc(func(k task.Kinded) string { return first })
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if rec, ok := lock.Get("repo/deploy"); !ok || rec.Commit != first {
+		t.Fatalf("precondition: lock commit = %+v, want %q", rec, first)
+	}
+
+	// Content changes again, re-pending the task at a new commit.
+	second := fakeCommit("b")
+	g.SetCommitFunc(func(k task.Kinded) string { return second })
+	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
+	if armed, err := g.Admit(spec2); err != nil || armed {
+		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
+	}
+
+	cr, ok := g.PendingCommitRange("repo/deploy")
+	if !ok {
+		t.Fatal("PendingCommitRange: ok = false, want true")
+	}
+	if cr.From != first {
+		t.Errorf("From = %q, want the prior approval's commit %q", cr.From, first)
+	}
+	if cr.To != second {
+		t.Errorf("To = %q, want the newly pending commit %q", cr.To, second)
+	}
+}
+
+// TestPendingCommitRange_PopulatesCompareURL wires a fake remote resolver and
+// confirms CompareURL is built from it once From/To are both known.
+func TestPendingCommitRange_PopulatesCompareURL(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	g.SetRemoteFunc(func(k task.Kinded) string { return "https://github.com/o/r.git" })
+
+	first := fakeCommit("a")
+	g.SetCommitFunc(func(k task.Kinded) string { return first })
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if _, ok := lock.Get("repo/deploy"); !ok {
+		t.Fatal("precondition: no lock record written")
+	}
+
+	second := fakeCommit("b")
+	g.SetCommitFunc(func(k task.Kinded) string { return second })
+	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
+	if _, err := g.Admit(spec2); err != nil {
+		t.Fatalf("re-Admit: %v", err)
+	}
+
+	cr, ok := g.PendingCommitRange("repo/deploy")
+	if !ok {
+		t.Fatal("PendingCommitRange: ok = false, want true")
+	}
+	want := "https://github.com/o/r/compare/" + first + "..." + second
+	if cr.CompareURL != want {
+		t.Errorf("CompareURL = %q, want %q", cr.CompareURL, want)
+	}
+}
+
+// TestPendingCommitRange_NotPending pins the not-pending case: ok is false
+// and the returned CommitRange is the zero value, mirroring PendingHash.
+func TestPendingCommitRange_NotPending(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	if cr, ok := g.PendingCommitRange("repo/ghost"); ok || cr != (CommitRange{}) {
+		t.Fatalf("PendingCommitRange(not pending) = (%+v, %v), want (zero value, false)", cr, ok)
+	}
+}

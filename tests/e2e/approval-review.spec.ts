@@ -23,6 +23,7 @@ import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
 import { settleApproved } from './helpers/approval';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
+const NOTIFY_TASK_ID = 'e2e-tests/notify-echo';
 const BODY_MARKER = '// e2e-review-probe-marker';
 
 // CLAUDE.md documents the reconciler loop as syncing sources "every 30s";
@@ -50,6 +51,67 @@ function tasksDir(): string {
   const d = process.env.DICODE_E2E_TASKS_DIR;
   if (!d) throw new Error('DICODE_E2E_TASKS_DIR not set — global setup may have failed');
   return d;
+}
+
+// Run mirrors dev-mode-clone.spec.ts's Go-JSON-field-shape tolerance: the
+// registry.Run struct carries no json tags, so field names reach the wire
+// as Go's default PascalCase.
+interface Run {
+  ID?: string;
+  id?: string;
+  Status?: string;
+  status?: string;
+  ReturnValue?: string;
+  return_value?: string;
+}
+
+function runID(r: Run): string {
+  return (r.ID ?? r.id) as string;
+}
+function runStatus(r: Run): string {
+  return (r.Status ?? r.status) as string;
+}
+function runReturnValue(r: Run): string {
+  return (r.ReturnValue ?? r.return_value ?? '') as string;
+}
+
+/**
+ * latestNotifyRunID returns the ID of the most recent e2e-tests/notify-echo
+ * run, or undefined if it has never fired. Used as the "before" marker so a
+ * caller can recognize the run its own pending transition produces.
+ */
+async function latestNotifyRunID(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<string | undefined> {
+  const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=1`);
+  if (!res.ok()) return undefined;
+  const runs = await res.json() as Run[];
+  return runs[0] ? runID(runs[0]) : undefined;
+}
+
+/**
+ * waitForNewNotifyRun polls e2e-tests/notify-echo's run history for a
+ * completed run whose ID differs from beforeID — approval.notify_task
+ * (wired to this fixture task in dicode-unauth.yaml) fires exactly once per
+ * true pending transition (SetPendingHook's contract), asynchronously in a
+ * goroutine, so the run may not exist yet the instant pending_approval flips.
+ */
+async function waitForNewNotifyRun(
+  request: import('@playwright/test').APIRequestContext,
+  beforeID: string | undefined,
+  timeoutMs = 30_000,
+): Promise<Run> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=5`);
+    if (res.ok()) {
+      const runs = await res.json() as Run[];
+      const done = runs.find((r) => runID(r) !== beforeID && runStatus(r) === 'success');
+      if (done) return done;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`no new ${NOTIFY_TASK_ID} run observed within ${timeoutMs}ms`);
 }
 
 /** Poll GET /api/tasks/{id} until the predicate is satisfied, up to timeoutMs. */
@@ -196,6 +258,44 @@ test.describe('Approval review surface', () => {
         await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
       ).json() as Record<string, unknown>;
       expect(afterHandoff.pending_approval).toBe(true);
+    });
+  });
+
+  // Regression lock for #672's graceful-degradation contract: unlike the
+  // review-panel tests above, this drives the actual /approve/{token}
+  // surface with a real token minted through the daemon's own notify flow
+  // (see waitForNewNotifyRun's doc comment) — the session-less confirm page
+  // that travels through Slack/email/ntfy notifications.
+  //
+  // e2e cannot exercise the "real commit / real compare link" happy path
+  // here: tests/e2e/helpers/dicode-server.ts's setup() copies the fixture
+  // tasks directory into a plain temp directory with no `git init` anywhere
+  // in it, so internal/gitops.HeadCommit/RemoteURL always error for every
+  // e2e-run task and the commit-range decoration is always in its degraded
+  // "absent" state under this harness. That resolution and rendering logic
+  // is covered by pkg/approval's and pkg/webui's Go unit tests instead; this
+  // test locks in the one thing that IS reachable end-to-end — that the
+  // confirm page still renders correctly, with no commit-range markup and no
+  // error, when the decoration cannot be computed.
+  test('/approve/{token} confirm page renders with no commit-range markup outside a git checkout', async ({ request }) => {
+    const before = await latestNotifyRunID(request);
+    await withPendingChange(request, async () => {
+      const run = await waitForNewNotifyRun(request, before);
+      const payload = JSON.parse(runReturnValue(run)) as { approve_url?: string; task_id?: string };
+      expect(payload.task_id, `notify-echo's received params: ${runReturnValue(run)}`).toBe(MANUAL_TASK_ID);
+      expect(payload.approve_url).toBeTruthy();
+
+      const confirmRes = await request.get(payload.approve_url!);
+      expect(confirmRes.ok(), await confirmRes.text()).toBe(true);
+      const body = await confirmRes.text();
+
+      expect(body).toContain('Approve task?');
+      expect(body).toContain(MANUAL_TASK_ID);
+      // No commit range, no compare link, no error — the strip is simply
+      // absent (ADR-0001: "less contextual, never blank").
+      for (const missing of ['Commit range:', 'Commit:', 'compare</a>', 'Approval failed']) {
+        expect(body, `unexpected markup in a git-less checkout: ${missing}`).not.toContain(missing);
+      }
     });
   });
 

@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: Task
+name: Notify Echo
+description: |
+  approval.notify_task fixture for #672's e2e coverage: wired in
+  dicode-unauth.yaml so every pending transition in the suite mints a real
+  single-use approve-link token through the actual daemon flow
+  (Gate.SetPendingHook -> approvalNotifier.notify -> MintApproveLink ->
+  Engine.FireManual) and hands it back as this run's return value — there is
+  no dashboard/API endpoint that mints a link directly, so this is the only
+  way to obtain one honestly from outside the daemon process.
+runtime: deno
+trigger:
+  manual: true
+timeout: 5s

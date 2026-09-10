@@ -22,6 +22,7 @@ import (
 type ApprovalGate interface {
 	IsPending(id string) bool
 	PendingHash(id string) (string, bool)
+	PendingCommitRange(id string) (approval.CommitRange, bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
@@ -217,6 +218,12 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
 {{else}}
   <h1>Approve task?</h1>
   <p>This will approve task <code>{{.TaskID}}</code> at content hash <code>{{.Hash}}</code> and arm its triggers.</p>
+  {{if .CommitTo}}
+  <p class="meta">
+    {{if .CommitFrom}}Commit range: <code>{{.CommitFrom}}</code>&hellip;<code>{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
+    {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}" rel="noopener noreferrer">compare</a>{{end}}
+  </p>
+  {{end}}
   <p class="meta">Only approve if you reviewed this task change. The link is single-use.</p>
   <form method="post"><button type="submit">Approve task</button></form>
 {{end}}
@@ -227,6 +234,17 @@ type approvePageData struct {
 	Hash     string
 	Approved bool
 	Error    string
+
+	// CommitFrom, CommitTo, CompareURL are the "what moved" decoration (#672):
+	// the previously-approved commit, the commit the pending content was
+	// observed at, and a link to the git host's compare view. Populated only
+	// for the confirm ({{else}}) branch. Every field degrades to "" rather
+	// than an error or a broken link when it cannot be resolved — see
+	// approval.CommitRange and ADR-0001 — so the template must render nothing
+	// extra when CommitTo is empty, rather than a blank or malformed range.
+	CommitFrom string
+	CommitTo   string
+	CompareURL string
 }
 
 func (s *Server) renderApprovePage(w http.ResponseWriter, status int, data approvePageData) {
@@ -261,7 +279,16 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
-	s.renderApprovePage(w, http.StatusOK, approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)})
+	data := approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)}
+	// Decoration only (#672): when it cannot be resolved, ok is still true —
+	// the confirm page above already has everything it needs — so a missed
+	// commit range never blocks rendering, it just renders without one.
+	if cr, ok := s.approvalGate.PendingCommitRange(info.TaskID); ok {
+		data.CommitFrom = shortHash(cr.From)
+		data.CommitTo = shortHash(cr.To)
+		data.CompareURL = cr.CompareURL
+	}
+	s.renderApprovePage(w, http.StatusOK, data)
 }
 
 // handleApproveLinkRedeem serves POST /approve/{token}: consumes the token

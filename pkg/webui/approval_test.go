@@ -23,11 +23,12 @@ import (
 
 // fakeApprovalGate implements ApprovalGate over an in-memory pending map.
 type fakeApprovalGate struct {
-	mu        sync.Mutex
-	pending   map[string]string // task id → observed hash
-	approved  []string
-	states    map[string]approval.State // task id → canned State to assert against
-	stateErrs map[string]error          // task id → error State should return instead
+	mu           sync.Mutex
+	pending      map[string]string // task id → observed hash
+	approved     []string
+	states       map[string]approval.State       // task id → canned State to assert against
+	stateErrs    map[string]error                // task id → error State should return instead
+	commitRanges map[string]approval.CommitRange // task id → canned CommitRange to assert against
 }
 
 func newFakeGate() *fakeApprovalGate {
@@ -72,6 +73,30 @@ func (g *fakeApprovalGate) PendingHash(id string) (string, bool) {
 	defer g.mu.Unlock()
 	h, ok := g.pending[id]
 	return h, ok
+}
+
+// setCommitRange stashes the CommitRange PendingCommitRange(id) should
+// return, for tests that need a populated "what moved" strip.
+func (g *fakeApprovalGate) setCommitRange(id string, cr approval.CommitRange) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.commitRanges == nil {
+		g.commitRanges = map[string]approval.CommitRange{}
+	}
+	g.commitRanges[id] = cr
+}
+
+// PendingCommitRange mirrors PendingHash: ok reflects pending membership,
+// while the value defaults to the zero CommitRange (the ordinary,
+// nothing-to-show state) unless a test wired one in via setCommitRange.
+func (g *fakeApprovalGate) PendingCommitRange(id string) (approval.CommitRange, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.pending[id]
+	if !ok {
+		return approval.CommitRange{}, false
+	}
+	return g.commitRanges[id], true
 }
 
 func (g *fakeApprovalGate) Approve(id string) error {
@@ -707,6 +732,54 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 		if strings.Contains(body, leak) {
 			t.Errorf("confirm page leaked %q into a session-less surface: %s", leak, body)
 		}
+	}
+	// The common case for most tasks: no prior lock record / no remote /
+	// no resolvable commit at all. Per ADR-0001 the strip must be absent
+	// entirely rather than rendering as a blank or broken range — this is
+	// the regression lock for that invariant.
+	for _, missing := range []string{"Commit range:", "Commit:", "compare"} {
+		if strings.Contains(body, missing) {
+			t.Errorf("confirm page rendered commit-range markup with no CommitRange set: %q in %s", missing, body)
+		}
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersCommitRange is the populated-state
+// counterpart to TestApproveLink_ConfirmPageRendersNoTaskInternals's
+// zero-value regression lock: when the gate resolves a commit range, the
+// confirm page renders the shortened commit SHAs and the compare link.
+func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	compareURL := "https://github.com/o/r/compare/" + from + "..." + to
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{
+		From: from, To: to, CompareURL: compareURL,
+	})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	token := tokenFromLink(t, link)
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+token, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// shortHash trims to 12 chars + an ellipsis; both endpoints must appear
+	// shortened, and the compare link must carry the full URL as an href.
+	if !strings.Contains(body, from[:12]) {
+		t.Errorf("confirm page missing the shortened From commit %q: %s", from[:12], body)
+	}
+	if !strings.Contains(body, to[:12]) {
+		t.Errorf("confirm page missing the shortened To commit %q: %s", to[:12], body)
+	}
+	if !strings.Contains(body, `href="`+compareURL+`"`) {
+		t.Errorf("confirm page missing the compare link href %q: %s", compareURL, body)
 	}
 }
 
