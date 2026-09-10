@@ -65,12 +65,12 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway      *Gateway             // optional; enables http.register for daemon tasks
-	inputStore   *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
-	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
-	sourceMgr    SourceController     // optional; enables dicode.sources.*
-	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
-	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
+	gateway      *Gateway           // optional; enables http.register for daemon tasks
+	inputStore   inputBlobStore     // optional; enables dicode.runs.delete_input blob deletion
+	replayer     *registry.Replayer // optional; enables dicode.runs.replay
+	sourceMgr    SourceController   // optional; enables dicode.sources.*
+	repoResolver RepoPathResolver   // optional; enables dicode.git.commit_push
+	crypto       *cryptoHandler     // optional; enables dicode.crypto.{encrypt, decrypt}
 	// testGuard vetoes dicode.tasks.test for a given task ID. The approval
 	// gate wires its FireGuard here: a pending (unapproved) task's test file
 	// runs with full host permissions, so it must be refused exactly like a
@@ -360,6 +360,17 @@ func (s *Server) Stop() {
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 // Must be called before Start.
 func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
+
+// inputBlobStore is the subset of *registry.InputStore the IPC server calls
+// directly. Extracted as an interface — rather than referencing
+// *registry.InputStore on the Server struct — so tests can inject a store
+// whose Delete fails without needing a real storage-task round trip (#819
+// code-review follow-up: delete_inputs must not blindly clear a run's
+// metadata when the blob delete for it failed).
+type inputBlobStore interface {
+	Delete(ctx context.Context, key string) error
+	Fetch(ctx context.Context, runID, key string, storedAt int64) (registry.PersistedInput, error)
+}
 
 // SetInputStore attaches the InputStore so tasks with RunsDeleteInput permission
 // can call dicode.runs.delete_input() to remove the blob before clearing the
@@ -983,6 +994,83 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.runs.delete_inputs":
+			// Batched delete_input (#819): a retention sweep draining a large
+			// backlog was paying one IPC round trip AND one UPDATE per row —
+			// at ~15/s a 40k-row backlog took ~30h to drain. This collapses
+			// both into a handful of calls: one query to resolve storage
+			// keys, one (chunked) UPDATE to clear columns, same permission
+			// gate as the singular verb since it performs the same action
+			// on more rows.
+			if !hasCap(caps, CapRunsDeleteInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.delete_input)")
+				continue
+			}
+			if len(req.RunIDs) == 0 {
+				reply(req.ID, nil, "ipc: runIDs required")
+				continue
+			}
+			if len(req.RunIDs) > maxDeleteInputsBatch {
+				reply(req.ID, nil, fmt.Sprintf("ipc: runIDs exceeds max batch size %d", maxDeleteInputsBatch))
+				continue
+			}
+			// toClear accumulates the run IDs it's safe to mark "input gone"
+			// in the registry. Unlike the singular delete_input (which
+			// clears columns even when the blob delete fails, on the theory
+			// that a single failure is contained and rare), a batch failure
+			// here is deliberately NOT cleared: ListExpiredInputs only
+			// returns rows whose input_storage_key is still set, so clearing
+			// it despite a failed blob delete would permanently drop that
+			// row from every future retention sweep, leaking the blob
+			// forever with no retry path (#819 code-review follow-up). A
+			// row left uncleared just gets picked up again next sweep.
+			toClear := req.RunIDs
+			var failed []string
+			if s.inputStore != nil {
+				keys, err := s.registry.GetRunInputKeys(s.ctx, req.RunIDs)
+				if err != nil {
+					reply(req.ID, nil, err.Error())
+					continue
+				}
+				failedSet := make(map[string]bool, len(keys))
+				for runID, key := range keys {
+					if err := s.inputStore.Delete(s.ctx, key); err != nil {
+						// Sanitized log only — see the singular delete_input
+						// case above for why the error itself isn't logged.
+						_ = err
+						s.log.Warn("delete_inputs: storage delete failed; leaving row for the next sweep",
+							zap.String("run", runID),
+							zap.String("error_class", "storage_delete"))
+						failedSet[runID] = true
+						failed = append(failed, runID)
+					}
+				}
+				if len(failedSet) > 0 {
+					toClear = make([]string, 0, len(req.RunIDs)-len(failedSet))
+					for _, id := range req.RunIDs {
+						if !failedSet[id] {
+							toClear = append(toClear, id)
+						}
+					}
+				}
+			}
+			if err := s.registry.ClearRunInputs(s.ctx, toClear); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			// count is the number of IDs actually cleared (toClear), not the
+			// number submitted: like the singular verb, this never checks
+			// whether a given run ID actually exists — an unknown or
+			// already-cleared ID is silently a no-op (GetRunInputKeys omits
+			// it, the UPDATE matches zero rows for it) — but a failed blob
+			// delete now visibly reduces count and lists the culprits in
+			// "failed" rather than being silently swallowed.
+			result := map[string]any{"ok": true, "count": len(toClear)}
+			if len(failed) > 0 {
+				result["failed"] = failed
+			}
+			reply(req.ID, result, "")
 
 		case "dicode.runs.pin_input":
 			if !hasCap(caps, CapRunsPinInput) {
@@ -1637,6 +1725,12 @@ const (
 	logFlushSize     = 50
 	logBufMaxSize    = 1000 // hard cap to prevent unbounded memory growth
 )
+
+// maxDeleteInputsBatch caps how many run IDs a single dicode.runs.delete_inputs
+// call accepts (#819). The registry chunks its own SQL statements well below
+// this, so the cap exists purely to bound one request's blob-delete fan-out
+// and memory footprint — a caller with a bigger backlog issues more calls.
+const maxDeleteInputsBatch = 5000
 
 // bufferLog enqueues a log entry. If the buffer reaches logFlushSize the
 // batch is flushed immediately (inline) to bound memory use. If the buffer

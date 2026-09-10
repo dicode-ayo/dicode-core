@@ -1250,7 +1250,7 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
 | `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. Sub-keys are derived via HKDF-SHA256 (encrypt always uses this; decrypt falls back to the legacy Argon2id derivation so blobs sealed before this change keep working — see #607). **Daemon-private contexts (currently `dicode/run-inputs/v1` and `dicode/approval-lock/v1`) are always denied even when `["*"]` is granted.** |
 | `runs_list_expired: true` | `dicode.runs.list_expired()` — run IDs whose stored input has passed its retention window |
-| `runs_delete_input: true` | `dicode.runs.delete_input(runID)` — drop a run's stored trigger payload |
+| `runs_delete_input: true` | `dicode.runs.delete_input(runID)` — drop a run's stored trigger payload. `dicode.runs.delete_inputs(runIDs)` is the batched form, gated by the same permission: it clears up to 5000 rows per call instead of one IPC round trip per row (#819) |
 | `runs_pin_input: true` / `runs_unpin_input: true` | `dicode.runs.pin_input(runID)` / `unpin_input(runID)` — exempt a run's input from retention cleanup, or release it |
 | `runs_replay: true` | `dicode.runs.replay(runID)` — re-fire a persisted run with its stored input |
 | `runs_get_input: true` | `dicode.runs.get_input(runID)` — read another run's stored input. **Sensitive:** grants cross-task input access, bounded only by write-time redaction |

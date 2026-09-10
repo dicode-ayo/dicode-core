@@ -221,12 +221,16 @@ export interface Dicode {
   crypto:         DicodeCrypto;
   audit:          DicodeAudit;
   runs: {
-    list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
-    delete_input: (runID: string)                 => Promise<unknown>;
-    pin_input:    (runID: string)                 => Promise<unknown>;
-    unpin_input:  (runID: string)                 => Promise<unknown>;
-    get_input:    (runID: string)                 => Promise<unknown>;
-    replay:       (runID: string, taskName?: string) => Promise<unknown>;
+    list_expired:  (opts?: { before_ts?: number }) => Promise<unknown>;
+    delete_input:  (runID: string)                 => Promise<unknown>;
+    // Batched delete_input (#819): collapses N delete_input round trips into
+    // one call so a retention sweep can drain a large backlog without
+    // spending one IPC round trip (and one UPDATE) per row.
+    delete_inputs: (runIDs: string[])              => Promise<unknown>;
+    pin_input:     (runID: string)                 => Promise<unknown>;
+    unpin_input:   (runID: string)                 => Promise<unknown>;
+    get_input:     (runID: string)                 => Promise<unknown>;
+    replay:        (runID: string, taskName?: string) => Promise<unknown>;
   };
   tasks: {
     test: (taskID: string) => Promise<unknown>;
@@ -559,6 +563,8 @@ const dicode: Dicode = {
       __call__({ method: "dicode.runs.list_expired", before_ts: opts?.before_ts ?? 0 }),
     delete_input: (runID) =>
       __call__({ method: "dicode.runs.delete_input", runID }),
+    delete_inputs: (runIDs) =>
+      __call__({ method: "dicode.runs.delete_inputs", runIDs }),
     pin_input: (runID) =>
       __call__({ method: "dicode.runs.pin_input", runID }),
     unpin_input: (runID) =>

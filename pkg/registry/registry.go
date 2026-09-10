@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -770,6 +771,96 @@ func (r *Registry) ClearRunInput(ctx context.Context, runID string) error {
 		`UPDATE runs SET input_storage_key = NULL, input_size = NULL,
 		                  input_stored_at = NULL, input_redacted_fields = NULL
 		 WHERE id = ?`, runID)
+}
+
+// maxInClauseVars caps how many placeholders a single IN (...) clause built
+// by this file uses per statement. Chunking at this size keeps every query
+// well under SQLite's bound-variable ceiling regardless of how many run IDs
+// a caller passes in one batch (#819). A var, not a const, so tests can
+// shrink it to exercise the multi-chunk path without needing 500+ real rows.
+var maxInClauseVars = 500
+
+// chunkStrings splits ids into slices of at most n elements (n must be > 0).
+func chunkStrings(ids []string, n int) [][]string {
+	var chunks [][]string
+	for len(ids) > 0 {
+		end := n
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[:end])
+		ids = ids[end:]
+	}
+	return chunks
+}
+
+// inClausePlaceholders returns "?,?,...,?" (n placeholders) for building an
+// IN (...) clause.
+func inClausePlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// GetRunInputKeys returns the non-empty InputStorageKey for each of the given
+// run IDs that has one, keyed by run ID. Used by the batched delete_inputs
+// IPC verb (#819) to resolve which blobs need deleting in O(1) queries
+// instead of one GetRun call per row.
+func (r *Registry) GetRunInputKeys(ctx context.Context, runIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(runIDs))
+	for _, chunk := range chunkStrings(runIDs, maxInClauseVars) {
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		if err := r.db.Query(ctx,
+			`SELECT id, COALESCE(input_storage_key, '') FROM runs WHERE id IN (`+inClausePlaceholders(len(chunk))+`)`,
+			args,
+			func(rows db.Scanner) error {
+				for rows.Next() {
+					var id, key string
+					if err := rows.Scan(&id, &key); err != nil {
+						return err
+					}
+					if key != "" {
+						out[id] = key
+					}
+				}
+				return nil
+			},
+		); err != nil {
+			return nil, fmt.Errorf("get run input keys: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// ClearRunInputs is the batched form of ClearRunInput: it nulls the
+// input_storage_key/size/stored_at/redacted_fields columns for every given
+// run ID in a handful of statements (chunked per maxInClauseVars) instead of
+// one UPDATE round trip per row (#819). Same caller contract as
+// ClearRunInput — delete the blobs first.
+//
+// Every chunk is attempted even if an earlier one fails: by the time this is
+// called, the caller has already deleted the blobs for the whole batch (see
+// the dicode.runs.delete_inputs handler), so bailing out on the first failing
+// chunk would leave every row in every *later* chunk pointing at an
+// already-deleted blob instead of just the rows in the one chunk that
+// errored. Errors from every failing chunk are joined into the returned
+// error.
+func (r *Registry) ClearRunInputs(ctx context.Context, runIDs []string) error {
+	var errs []error
+	for _, chunk := range chunkStrings(runIDs, maxInClauseVars) {
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		if err := r.db.Exec(ctx,
+			`UPDATE runs SET input_storage_key = NULL, input_size = NULL,
+			                  input_stored_at = NULL, input_redacted_fields = NULL
+			 WHERE id IN (`+inClausePlaceholders(len(chunk))+`)`, args...); err != nil {
+			errs = append(errs, fmt.Errorf("clear run inputs (chunk of %d): %w", len(chunk), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // PinRunInput sets input_pinned = 1 on the given run.
