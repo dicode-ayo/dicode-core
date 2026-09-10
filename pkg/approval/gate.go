@@ -279,9 +279,12 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// commit is the baseline the next comparison runs from, and one that
 		// lags behind the last commit this content was seen at yields a range
 		// full of commits that never touched the task. Kept outside the lock —
-		// it opens the repository. remote is resolved alongside it, against the
-		// same already-open repository, so PendingApproval never needs to
-		// re-walk the directory itself (see pendingEntry.remote's doc comment).
+		// each opens the repository (independently — commitFn and remoteFn
+		// each do their own gitops.PlainOpenWithOptions, this does not share
+		// one handle between them, so a genuinely pending task now costs two
+		// repository opens per pend-tick rather than one; accepted as a small
+		// price for PendingApproval never re-walking the directory itself at
+		// all — see pendingEntry.remote's doc comment).
 		commit := g.commitFn(k)
 		remote := g.remoteFn(k)
 
