@@ -48,40 +48,40 @@ func initRepo(t *testing.T, root string) string {
 	return h.String()
 }
 
-func TestHeadCommit_TrackedNestedDirectory(t *testing.T) {
+func TestHeadInfo_TrackedNestedDirectory(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "tasks", "deploy")
 	writeFile(t, filepath.Join(nested, "task.yaml"), "name: t\n")
 	want := initRepo(t, root)
 
-	got, err := HeadCommit(nested)
+	got, _, err := HeadInfo(nested)
 	if err != nil {
-		t.Fatalf("HeadCommit: %v", err)
+		t.Fatalf("HeadInfo: %v", err)
 	}
 	if got != want {
-		t.Fatalf("HeadCommit = %q, want %q", got, want)
+		t.Fatalf("HeadInfo = %q, want %q", got, want)
 	}
 }
 
-func TestHeadCommit_RepositoryRoot(t *testing.T) {
+func TestHeadInfo_RepositoryRoot(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "task.yaml"), "name: t\n")
 	want := initRepo(t, root)
 
-	got, err := HeadCommit(root)
+	got, _, err := HeadInfo(root)
 	if err != nil {
-		t.Fatalf("HeadCommit: %v", err)
+		t.Fatalf("HeadInfo: %v", err)
 	}
 	if got != want {
-		t.Fatalf("HeadCommit = %q, want %q", got, want)
+		t.Fatalf("HeadInfo = %q, want %q", got, want)
 	}
 }
 
-// TestHeadCommit_UntrackedDirectory is the case that separates "this
+// TestHeadInfo_UntrackedDirectory is the case that separates "this
 // repository describes these files" from "these files merely sit inside a
 // repository": tasks dropped into a version-controlled home directory would
 // otherwise be stamped with a commit whose tree contains none of them.
-func TestHeadCommit_UntrackedDirectory(t *testing.T) {
+func TestHeadInfo_UntrackedDirectory(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "unrelated.txt"), "x\n")
 	initRepo(t, root)
@@ -89,23 +89,23 @@ func TestHeadCommit_UntrackedDirectory(t *testing.T) {
 	untracked := filepath.Join(root, "tasks", "deploy")
 	writeFile(t, filepath.Join(untracked, "task.yaml"), "name: t\n")
 
-	if got, err := HeadCommit(untracked); err == nil {
-		t.Fatalf("HeadCommit = %q, want an error for a directory HEAD does not track", got)
+	if got, _, err := HeadInfo(untracked); err == nil {
+		t.Fatalf("HeadInfo = %q, want an error for a directory HEAD does not track", got)
 	}
 }
 
-func TestHeadCommit_OutsideRepository(t *testing.T) {
-	if _, err := HeadCommit(t.TempDir()); err == nil {
+func TestHeadInfo_OutsideRepository(t *testing.T) {
+	if _, _, err := HeadInfo(t.TempDir()); err == nil {
 		t.Fatal("expected an error for a directory outside any repository")
 	}
 }
 
-func TestHeadCommit_UnbornBranch(t *testing.T) {
+func TestHeadInfo_UnbornBranch(t *testing.T) {
 	root := t.TempDir()
 	if _, err := gogit.PlainInit(root, false); err != nil {
 		t.Fatalf("PlainInit: %v", err)
 	}
-	if _, err := HeadCommit(root); err == nil {
+	if _, _, err := HeadInfo(root); err == nil {
 		t.Fatal("expected an error for a repository with no commits")
 	}
 }

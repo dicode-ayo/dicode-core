@@ -235,13 +235,9 @@ type approvePageData struct {
 	Approved bool
 	Error    string
 
-	// CommitFrom, CommitTo, CompareURL are the "what moved" decoration (#672):
-	// the previously-approved commit, the commit the pending content was
-	// observed at, and a link to the git host's compare view. Populated only
-	// for the confirm ({{else}}) branch. Every field degrades to "" rather
-	// than an error or a broken link when it cannot be resolved — see
-	// approval.CommitRange and ADR-0001 — so the template must render nothing
-	// extra when CommitTo is empty, rather than a blank or malformed range.
+	// CommitFrom, CommitTo and CompareURL carry the "what moved" decoration.
+	// Each is "" whenever it cannot be resolved, and the template renders
+	// nothing at all rather than a blank range when CommitTo is empty.
 	CommitFrom string
 	CommitTo   string
 	CompareURL string
@@ -274,26 +270,21 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The link must only ever approve what it was minted for: if the task is
-	// no longer pending at that exact hash, say so up front. hash and cr are
-	// read together in one locked Gate.PendingApproval call — not a separate
-	// PendingHash call followed by a separate commit-range lookup — so a
-	// concurrent Admit (the reconciler's ~30s tick) can never replace the
-	// pending entry between the two and leave the rendered commit range
-	// describing a different generation than the hash just confirmed to
-	// match the token.
+	// no longer pending at that exact hash, say so up front. One locked read
+	// for both, so a concurrent Admit cannot leave the rendered range
+	// describing a different generation than the hash matched here.
 	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
 	if !ok || hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
-	data := approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)}
-	// Decoration only (#672): every field of cr degrades to "" rather than
-	// blocking rendering when it cannot be resolved (see approval.CommitRange
-	// and ADR-0001), so a missed commit range just renders without one.
-	data.CommitFrom = shortHash(cr.From)
-	data.CommitTo = shortHash(cr.To)
-	data.CompareURL = cr.CompareURL
-	s.renderApprovePage(w, http.StatusOK, data)
+	s.renderApprovePage(w, http.StatusOK, approvePageData{
+		TaskID:     info.TaskID,
+		Hash:       shortHash(info.Hash),
+		CommitFrom: shortHash(cr.From),
+		CommitTo:   shortHash(cr.To),
+		CompareURL: cr.CompareURL,
+	})
 }
 
 // handleApproveLinkRedeem serves POST /approve/{token}: consumes the token

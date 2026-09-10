@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/dicode/dicode/internal/gitops"
-	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 // CommitRange is the "what moved" decoration for a pending task: the commit
@@ -12,14 +11,9 @@ import (
 // content was observed at, plus a link to the git host's compare view.
 //
 // Every field can be legitimately empty, and that is the ordinary
-// (non-error) state rather than a partial failure — see ADR-0001
-// ("End state needs no baseline... The 'what moved' strip is decoration:
-// when it cannot be computed, it is absent, and the screen is less
-// contextual, never blank"). From is empty on a task's first-ever approval,
-// or when the source has no git history; To is empty under the same
-// conditions for the currently pending content; CompareURL is empty
-// whenever a range cannot be resolved to a link at all — no From/To, an
-// unchanged commit, or a remote host this package does not recognize.
+// (non-error) state rather than a partial failure — ADR-0001 makes the strip
+// decoration: when it cannot be computed the screen is less contextual,
+// never blank.
 type CommitRange struct {
 	// From is the commit the task was approved at last time, or "" if there
 	// is no prior approval (or it recorded no commit).
@@ -33,27 +27,22 @@ type CommitRange struct {
 }
 
 // compareURL returns a link to the git host's compare view for the range
-// from...to on remote, or "" when no such link can be built.
-//
-// "" covers every case a caller should render as "no link" rather than a
-// broken one: no prior commit (from == ""), nothing moved (from == to), an
-// empty or unparseable remote, and a remote host this function does not
-// recognize. Guessing a URL shape for an unrecognized host would produce a
-// link that is wrong far more often than it is right, which is worse than no
-// link at all.
+// from...to on remote, or "" when no such link can be built: either endpoint
+// missing, an unparseable remote, or a host whose compare-view URL shape is
+// not known here. Guessing a shape for an unrecognized host produces a link
+// that is wrong far more often than right, which is worse than no link.
 func compareURL(remote, from, to string) string {
-	if from == "" || to == "" || from == to {
+	if from == "" || to == "" {
 		return ""
 	}
-	host, path, ok := parseRemote(remote)
+	host, path, ok := gitops.ParseRemote(remote)
 	if !ok {
 		return ""
 	}
 	switch host {
 	case "github.com":
 		// GitHub repo paths are always exactly owner/repo — there is no
-		// subgroup concept, so anything other than exactly two segments is
-		// not a valid GitHub repo reference.
+		// subgroup concept, so anything else is not a valid repo reference.
 		owner, repo, ok := exactlyTwoSegments(path)
 		if !ok {
 			return ""
@@ -61,11 +50,11 @@ func compareURL(remote, from, to string) string {
 		return "https://github.com/" + owner + "/" + repo + "/compare/" + from + "..." + to
 	case "gitlab.com":
 		// GitLab supports arbitrarily nested subgroups
-		// (group/subgroup/.../project), so the whole cleaned path is the
-		// project reference — never truncate to the trailing two segments.
-		// A bare single segment isn't a valid project path though (there is
-		// always at least a namespace and a project name).
-		if path == "" || !strings.Contains(path, "/") {
+		// (group/subgroup/.../project), so the whole path is the project
+		// reference — never truncate to the trailing two segments. A bare
+		// single segment is not a valid project path: there is always at
+		// least a namespace and a project name.
+		if !strings.Contains(path, "/") {
 			return ""
 		}
 		return "https://gitlab.com/" + path + "/-/compare/" + from + "..." + to
@@ -82,38 +71,4 @@ func exactlyTwoSegments(path string) (a, b string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
-}
-
-// parseRemote extracts the host and repository path out of a git remote
-// URL via go-git's transport.NewEndpoint, which understands http(s), ssh,
-// git, and the SCP shorthand form (git@host:path) uniformly — the same
-// parser internal/gitops/hostguard.go's ValidateRemoteHost uses for the
-// same purpose (extracting a remote's host). Using the library parser here
-// instead of hand-rolled SCP-vs-URL detection also means the port never
-// needs manual stripping: transport.Endpoint carries it as a separate Port
-// field rather than folding it into Host.
-//
-// ok is false for anything a remote host this function does not recognize
-// — an empty string, a remote transport.NewEndpoint rejects outright, or
-// one that parses but carries no host component.
-func parseRemote(remote string) (host, path string, ok bool) {
-	if remote == "" {
-		return "", "", false
-	}
-	ep, err := transport.NewEndpoint(remote)
-	if err != nil || ep.Host == "" {
-		return "", "", false
-	}
-	// Canonicalized via the same NormalizeHost internal/gitops's SSRF guard
-	// uses on every remote host it classifies (hostguard.go's
-	// ValidateRemoteHost) — not just a bare lowercase — so a host is
-	// recognized here under exactly the same rules that decide whether it's
-	// safe to fetch from in the first place: lowercase (DNS is
-	// case-insensitive: "GitHub.com" and "github.com" are the same host),
-	// IPv6 brackets stripped, and a trailing FQDN-root dot dropped (RFC 952 —
-	// "github.com." names the same host as "github.com", but a bare
-	// ToLower/Trim wouldn't recognize the two as equal).
-	host = gitops.NormalizeHost(ep.Host)
-	path = strings.TrimSuffix(strings.Trim(ep.Path, "/"), ".git")
-	return host, path, true
 }

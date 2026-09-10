@@ -24,70 +24,73 @@ func addOrigin(t *testing.T, root, url string) {
 	}
 }
 
-func TestRemoteURL_ReturnsOriginURL(t *testing.T) {
+func TestHeadInfo_ReturnsOriginURL(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "task.yaml"), "name: t\n")
 	initRepo(t, root)
 	addOrigin(t, root, "https://github.com/dicode-ayo/dicode-core.git")
 
-	got, err := RemoteURL(root)
+	_, got, err := HeadInfo(root)
 	if err != nil {
-		t.Fatalf("RemoteURL: %v", err)
+		t.Fatalf("HeadInfo: %v", err)
 	}
 	if want := "https://github.com/dicode-ayo/dicode-core.git"; got != want {
-		t.Fatalf("RemoteURL = %q, want %q", got, want)
+		t.Fatalf("remote = %q, want %q", got, want)
 	}
 }
 
-// TestRemoteURL_NestedDirectory pins that, exactly like HeadCommit, dir need
-// not be the repository root — parents are searched for it.
-func TestRemoteURL_NestedDirectory(t *testing.T) {
+// TestHeadInfo_NestedDirectoryResolvesOrigin pins that the remote resolves
+// from a directory nested inside the repository, not only from its root.
+func TestHeadInfo_NestedDirectoryResolvesOrigin(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "tasks", "deploy")
 	writeFile(t, filepath.Join(nested, "task.yaml"), "name: t\n")
 	initRepo(t, root)
 	addOrigin(t, root, "git@github.com:dicode-ayo/dicode-core.git")
 
-	got, err := RemoteURL(nested)
+	_, got, err := HeadInfo(nested)
 	if err != nil {
-		t.Fatalf("RemoteURL: %v", err)
+		t.Fatalf("HeadInfo: %v", err)
 	}
 	if want := "git@github.com:dicode-ayo/dicode-core.git"; got != want {
-		t.Fatalf("RemoteURL = %q, want %q", got, want)
+		t.Fatalf("remote = %q, want %q", got, want)
 	}
 }
 
-func TestRemoteURL_NoOriginRemote(t *testing.T) {
+// TestHeadInfo_NoOriginRemote pins that a missing "origin" is not an error:
+// the commit still resolves and the remote is simply absent.
+func TestHeadInfo_NoOriginRemote(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "task.yaml"), "name: t\n")
 	initRepo(t, root)
 
-	if got, err := RemoteURL(root); err == nil {
-		t.Fatalf("RemoteURL = %q, want an error for a repository with no origin remote", got)
+	commit, remote, err := HeadInfo(root)
+	if err != nil {
+		t.Fatalf("HeadInfo: %v", err)
+	}
+	if commit == "" {
+		t.Error("commit is empty, want the HEAD commit")
+	}
+	if remote != "" {
+		t.Errorf("remote = %q, want %q", remote, "")
 	}
 }
 
-func TestRemoteURL_OutsideRepository(t *testing.T) {
-	if _, err := RemoteURL(t.TempDir()); err == nil {
-		t.Fatal("expected an error for a directory outside any repository")
-	}
-}
-
-// TestRemoteURL_StripsCredentials pins that a remote URL carrying embedded
-// userinfo never reaches the caller intact — this URL only ever feeds a link
+// TestHeadInfo_StripsCredentials pins that a remote URL carrying embedded
+// userinfo never reaches the caller intact — it only ever feeds a link
 // handed to a human.
-func TestRemoteURL_StripsCredentials(t *testing.T) {
+func TestHeadInfo_StripsCredentials(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "task.yaml"), "name: t\n")
 	initRepo(t, root)
 	addOrigin(t, root, "https://user:ghp_supersecrettoken@github.com/dicode-ayo/dicode-core.git")
 
-	got, err := RemoteURL(root)
+	_, got, err := HeadInfo(root)
 	if err != nil {
-		t.Fatalf("RemoteURL: %v", err)
+		t.Fatalf("HeadInfo: %v", err)
 	}
 	if want := "https://github.com/dicode-ayo/dicode-core.git"; got != want {
-		t.Fatalf("RemoteURL = %q, want %q (credentials must be stripped)", got, want)
+		t.Fatalf("remote = %q, want %q (credentials must be stripped)", got, want)
 	}
 }
 
@@ -106,6 +109,31 @@ func TestStripCredentials(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := StripURLCredentials(tc.in); got != tc.want {
 				t.Errorf("StripURLCredentials(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRemote(t *testing.T) {
+	cases := []struct {
+		name           string
+		in             string
+		wantHost, want string
+		wantOK         bool
+	}{
+		{"https with .git", "https://github.com/o/r.git", "github.com", "o/r", true},
+		{"scp-like shorthand", "git@gitlab.com:group/sub/p.git", "gitlab.com", "group/sub/p", true},
+		{"ssh scheme with port", "ssh://git@github.com:2222/o/r.git", "github.com", "o/r", true},
+		{"mixed case and FQDN-root dot", "https://GitHub.Com./o/r.git", "github.com", "o/r", true},
+		{"empty", "", "", "", false},
+		{"unparseable", "not a url at all", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host, path, ok := ParseRemote(tc.in)
+			if ok != tc.wantOK || host != tc.wantHost || path != tc.want {
+				t.Errorf("ParseRemote(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.in, host, path, ok, tc.wantHost, tc.want, tc.wantOK)
 			}
 		})
 	}

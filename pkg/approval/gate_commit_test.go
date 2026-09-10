@@ -98,14 +98,14 @@ func TestCommitCapturedAtPendNotAtApprove(t *testing.T) {
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
 	atPend := fakeCommit("a")
-	g.SetCommitFunc(func(k task.Kinded) string { return atPend })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return atPend, "" })
 	if armed, err := g.Admit(spec); err != nil || armed {
 		t.Fatalf("Admit: armed=%v err=%v", armed, err)
 	}
 
 	// The repository moves on while the task sits pending, with no Admit in
 	// between to observe it.
-	g.SetCommitFunc(func(k task.Kinded) string { return fakeCommit("b") })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return fakeCommit("b"), "" })
 	if err := g.Approve("repo/deploy"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -124,12 +124,12 @@ func TestPendTracksLatestCommitAtUnchangedHash(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
-	g.SetCommitFunc(func(k task.Kinded) string { return fakeCommit("a") })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return fakeCommit("a"), "" })
 	if _, err := g.Admit(spec); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	latest := fakeCommit("b")
-	g.SetCommitFunc(func(k task.Kinded) string { return latest })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return latest, "" })
 	if _, err := g.Admit(spec); err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
@@ -173,9 +173,9 @@ func TestUnchangedTrustedTaskSkipsCommitLookup(t *testing.T) {
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
 	var calls atomic.Int32
-	g.SetCommitFunc(func(k task.Kinded) string {
+	g.SetCommitFunc(func(k task.Kinded) (string, string) {
 		calls.Add(1)
-		return fakeCommit("a")
+		return fakeCommit("a"), ""
 	})
 
 	for i := 0; i < 3; i++ {
@@ -214,10 +214,12 @@ func TestForgetDropsRecordedCommit(t *testing.T) {
 }
 
 // TestHeadCommitOfDirlessTask pins that an inline taskset entry, which has no
-// directory to locate a repository from, resolves to no commit.
+// directory to locate a repository from, resolves to neither commit nor
+// remote.
 func TestHeadCommitOfDirlessTask(t *testing.T) {
-	if got := headCommitOf(&task.Spec{ID: "repo/inline"}); got != "" {
-		t.Fatalf("headCommitOf(dir-less) = %q, want empty", got)
+	commit, remote := headCommitOf(&task.Spec{ID: "repo/inline"})
+	if commit != "" || remote != "" {
+		t.Fatalf("headCommitOf(dir-less) = (%q, %q), want both empty", commit, remote)
 	}
 }
 
@@ -263,7 +265,7 @@ func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 
 	to := fakeCommit("b")
-	g.SetCommitFunc(func(k task.Kinded) string { return to })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return to, "" })
 	if armed, err := g.Admit(spec); err != nil || armed {
 		t.Fatalf("Admit: armed=%v err=%v", armed, err)
 	}
@@ -286,62 +288,13 @@ func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 	}
 }
 
-// TestPendingApproval_CachesRemoteAtAdmitTime pins the fix for a round-5
-// code-review finding: the remote is resolved once per Admit (alongside
-// commit, in the same pattern pendingEntry.remote's doc comment describes)
-// and cached on the pending entry, rather than re-walked by PendingApproval
-// on every call — including the repeated /approve/{token} link-prefetches
-// mail clients and chat unfurlers are expected to make. A counting remote
-// resolver pins this: one Admit followed by several PendingApproval calls
-// must resolve the remote exactly once, not once per call.
-func TestPendingApproval_CachesRemoteAtAdmitTime(t *testing.T) {
-	g, _, _ := newTestGate(t, enabledPolicy())
+// approveThenRepend walks the repeat-pend shape every commit-range case
+// starts from: admit at first, approve, then re-admit a changed body at
+// second. remote is what the resolver reports for both admits.
+func approveThenRepend(t *testing.T, g *Gate, lock *Lock, first, second, remote string) {
+	t.Helper()
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
-	var calls int
-	g.SetRemoteFunc(func(k task.Kinded) string {
-		calls++
-		return "https://github.com/o/r.git"
-	})
-
-	to := fakeCommit("b")
-	g.SetCommitFunc(func(k task.Kinded) string { return to })
-	if armed, err := g.Admit(spec); err != nil || armed {
-		t.Fatalf("Admit: armed=%v err=%v", armed, err)
-	}
-	if calls != 1 {
-		t.Fatalf("remote resolver called %d times during Admit, want exactly 1", calls)
-	}
-
-	for i := 0; i < 3; i++ {
-		hash, cr, ok := g.PendingApproval("repo/deploy")
-		if !ok {
-			t.Fatal("PendingApproval: ok = false, want true for a pending task")
-		}
-		if hash == "" {
-			t.Error("hash = \"\", want a non-empty observed hash")
-		}
-		// From == "" on a first-ever approval, so CompareURL is still "" —
-		// this test is about call count, not about exercising a populated
-		// CompareURL (see TestPendingApproval_PopulatesCompareURL for that).
-		if cr.CompareURL != "" {
-			t.Errorf("CompareURL = %q, want empty (no prior approval to range from)", cr.CompareURL)
-		}
-	}
-	if calls != 1 {
-		t.Errorf("remote resolver called %d times total, want exactly 1 (cached at Admit, never re-walked by PendingApproval)", calls)
-	}
-}
-
-// TestPendingApproval_ReflectsPriorApproval pins the repeat-pend case: once a
-// task has been approved at some commit and later re-pends at a new one, From
-// carries the prior approval's commit and To the newly pending one — the
-// exact range the operator needs to reason about "what moved".
-func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
-	g, _, lock := newTestGate(t, enabledPolicy())
-	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
-
-	first := fakeCommit("a")
-	g.SetCommitFunc(func(k task.Kinded) string { return first })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return first, remote })
 	if armed, err := g.Admit(spec); err != nil || armed {
 		t.Fatalf("Admit: armed=%v err=%v", armed, err)
 	}
@@ -352,13 +305,59 @@ func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
 		t.Fatalf("precondition: lock commit = %+v, want %q", rec, first)
 	}
 
-	// Content changes again, re-pending the task at a new commit.
-	second := fakeCommit("b")
-	g.SetCommitFunc(func(k task.Kinded) string { return second })
+	g.SetCommitFunc(func(k task.Kinded) (string, string) { return second, remote })
 	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
 	if armed, err := g.Admit(spec2); err != nil || armed {
 		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
 	}
+}
+
+// TestPendingApproval_ResolvesGitOncePerAdmit pins that the commit and
+// remote come off the pending entry rather than the filesystem:
+// /approve/{token} is prefetched by mail clients and chat unfurlers, so any
+// number of reads must cost no repository opens.
+func TestPendingApproval_ResolvesGitOncePerAdmit(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	var calls int
+	to := fakeCommit("b")
+	g.SetCommitFunc(func(k task.Kinded) (string, string) {
+		calls++
+		return to, "https://github.com/o/r.git"
+	})
+
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+	if calls != 1 {
+		t.Fatalf("resolver called %d times during Admit, want exactly 1", calls)
+	}
+
+	for i := 0; i < 3; i++ {
+		hash, cr, ok := g.PendingApproval("repo/deploy")
+		if !ok {
+			t.Fatal("PendingApproval: ok = false, want true for a pending task")
+		}
+		if hash == "" {
+			t.Error("hash = \"\", want a non-empty observed hash")
+		}
+		if cr.To != to {
+			t.Errorf("To = %q, want %q", cr.To, to)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("resolver called %d times total, want exactly 1 — PendingApproval must never re-walk", calls)
+	}
+}
+
+// TestPendingApproval_ReflectsPriorApproval pins the repeat-pend case: once a
+// task has been approved at some commit and later re-pends at a new one, From
+// carries the prior approval's commit and To the newly pending one — the
+// exact range the operator needs to reason about "what moved".
+func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	first, second := fakeCommit("a"), fakeCommit("b")
+	approveThenRepend(t, g, lock, first, second, "")
 
 	hash, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {
@@ -380,31 +379,11 @@ func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
 // taskset/dicode.yaml override changed the resolved hash with no new git
 // commit. From must collapse to "" rather than repeat To: a
 // "Commit range: abc123…abc123" render would misleadingly imply a diff
-// exists to review when git shows no change at all (see PendingApproval's
-// doc comment and compareURL's own from == to short-circuit, which this
-// mirrors at the CommitRange level too).
+// exists to review when git shows no change at all.
 func TestPendingApproval_UnchangedCommitCollapsesToSingleCommit(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
-	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
-
 	only := fakeCommit("a")
-	g.SetCommitFunc(func(k task.Kinded) string { return only })
-	if _, err := g.Admit(spec); err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-	if err := g.Approve("repo/deploy"); err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
-	if rec, ok := lock.Get("repo/deploy"); !ok || rec.Commit != only {
-		t.Fatalf("precondition: lock commit = %+v, want %q", rec, only)
-	}
-
-	// Re-pend with a different resolved hash (a different spec body), but
-	// the SAME commit — the git history hasn't moved.
-	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
-	if armed, err := g.Admit(spec2); err != nil || armed {
-		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
-	}
+	approveThenRepend(t, g, lock, only, only, "https://github.com/o/r.git")
 
 	_, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {
@@ -421,31 +400,12 @@ func TestPendingApproval_UnchangedCommitCollapsesToSingleCommit(t *testing.T) {
 	}
 }
 
-// TestPendingApproval_PopulatesCompareURL wires a fake remote resolver and
-// confirms CompareURL is built from it once From/To are both known.
+// TestPendingApproval_PopulatesCompareURL confirms CompareURL is built from
+// the resolved remote once From and To are both known.
 func TestPendingApproval_PopulatesCompareURL(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
-	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
-	g.SetRemoteFunc(func(k task.Kinded) string { return "https://github.com/o/r.git" })
-
-	first := fakeCommit("a")
-	g.SetCommitFunc(func(k task.Kinded) string { return first })
-	if _, err := g.Admit(spec); err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-	if err := g.Approve("repo/deploy"); err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
-	if _, ok := lock.Get("repo/deploy"); !ok {
-		t.Fatal("precondition: no lock record written")
-	}
-
-	second := fakeCommit("b")
-	g.SetCommitFunc(func(k task.Kinded) string { return second })
-	spec2 := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
-	if _, err := g.Admit(spec2); err != nil {
-		t.Fatalf("re-Admit: %v", err)
-	}
+	first, second := fakeCommit("a"), fakeCommit("b")
+	approveThenRepend(t, g, lock, first, second, "https://github.com/o/r.git")
 
 	_, cr, ok := g.PendingApproval("repo/deploy")
 	if !ok {

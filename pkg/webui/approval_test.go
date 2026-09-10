@@ -86,10 +86,8 @@ func (g *fakeApprovalGate) setCommitRange(id string, cr approval.CommitRange) {
 	g.commitRanges[id] = cr
 }
 
-// PendingApproval mirrors PendingHash for the hash+ok pair (reading the same
-// pending map), and mirrors the old PendingCommitRange for the range (reading
-// commitRanges) — both in one method body, matching the real Gate's
-// single-locked-call shape.
+// PendingApproval reads the hash and the canned range in one method body,
+// matching the real Gate's single-locked-call shape.
 func (g *fakeApprovalGate) PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -734,10 +732,9 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 			t.Errorf("confirm page leaked %q into a session-less surface: %s", leak, body)
 		}
 	}
-	// The common case for most tasks: no prior lock record / no remote /
-	// no resolvable commit at all. Per ADR-0001 the strip must be absent
-	// entirely rather than rendering as a blank or broken range — this is
-	// the regression lock for that invariant.
+	// No prior lock record, no remote, no resolvable commit — the common
+	// case. ADR-0001 requires the strip be absent entirely rather than
+	// rendered blank or broken.
 	for _, missing := range []string{"Commit range:", "Commit:", "compare"} {
 		if strings.Contains(body, missing) {
 			t.Errorf("confirm page rendered commit-range markup with no CommitRange set: %q in %s", missing, body)
@@ -746,9 +743,8 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 }
 
 // TestApproveLink_ConfirmPageRendersCommitRange is the populated-state
-// counterpart to TestApproveLink_ConfirmPageRendersNoTaskInternals's
-// zero-value regression lock: when the gate resolves a commit range, the
-// confirm page renders the shortened commit SHAs and the compare link.
+// counterpart to the zero-value case above: when the gate resolves a commit
+// range, the confirm page renders the shortened SHAs and the compare link.
 func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
 	srv, gate, _ := newTokenLinkServer(t)
 	from := strings.Repeat("a", 40)

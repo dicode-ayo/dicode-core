@@ -10,8 +10,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-// HeadCommit returns the hex commit ID at HEAD of the git repository that
-// tracks dir. dir need not be the repository root — parents are searched for
+// HeadInfo returns the hex commit ID at HEAD of the git repository that
+// tracks dir, together with that repository's credential-stripped "origin"
+// remote URL. dir need not be the repository root — parents are searched for
 // it — so a task directory nested anywhere inside a clone resolves.
 //
 // dir must be present in HEAD's tree. A directory that merely sits underneath
@@ -19,30 +20,35 @@ import (
 // version-controlled — resolves no commit, because that repository's HEAD
 // describes none of dir's content.
 //
-// Errors when dir lies outside any repository, when the repository has no
-// commit yet, and when HEAD does not track dir. All three are ordinary states
-// for a local source, so callers that treat the commit as optional should
-// discard the error rather than report it.
+// remote is "" when the repository has no "origin"; that alone is never an
+// error, since callers treat the remote as optional decoration. err covers
+// the states that leave no commit either: dir outside any repository, a
+// repository with no commit yet, and a HEAD that does not track dir. All are
+// ordinary for a local source, so callers that treat the commit as optional
+// should discard the error rather than report it.
+//
+// Both values come from a single repository open: resolving them separately
+// would walk to .git and parse its config twice for one task.
 //
 // No blob is read: resolving a tree entry needs the tree objects along dir's
 // path and nothing else.
-func HeadCommit(dir string) (string, error) {
+func HeadInfo(dir string) (commit, remote string, err error) {
 	repo, err := gogit.PlainOpenWithOptions(dir, &gogit.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
-		return "", fmt.Errorf("open repository at %s: %w", dir, err)
+		return "", "", fmt.Errorf("open repository at %s: %w", dir, err)
 	}
 	ref, err := repo.Head()
 	if err != nil {
-		return "", fmt.Errorf("resolve HEAD at %s: %w", dir, err)
+		return "", "", fmt.Errorf("resolve HEAD at %s: %w", dir, err)
 	}
 	tracked, err := headTracks(repo, ref.Hash(), dir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !tracked {
-		return "", fmt.Errorf("HEAD does not track %s", dir)
+		return "", "", fmt.Errorf("HEAD does not track %s", dir)
 	}
-	return ref.Hash().String(), nil
+	return ref.Hash().String(), originURL(repo), nil
 }
 
 // headTracks reports whether dir appears in the tree of commit head. The

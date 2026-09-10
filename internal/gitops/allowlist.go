@@ -33,17 +33,13 @@ type Allowlist struct {
 // been configured: it authorises nothing.
 var emptyAllowlist = &Allowlist{}
 
-// NormalizeHost canonicalises a host for comparison: strip IPv6 brackets,
+// normalizeHost canonicalises a host for comparison: strip IPv6 brackets,
 // lowercase, and drop a trailing FQDN-root dot. The SSRF guard's literal-host
-// check and every host lookup in this package run through this one function
-// so an entry and a URL host can only ever compare under a single canonical
-// form — a second normalization rule added to one site but not the other
-// would let a host be stored under one form and matched under another.
-// Exported so other packages that classify a git remote's host (e.g.
-// pkg/approval's compare-view link builder) compare under the same
-// canonical form this package's own SSRF allowlisting does, rather than a
-// second, potentially-diverging lowercase-only rule.
-func NormalizeHost(host string) string {
+// check, every allowlist lookup, and ParseRemote all run through this one
+// function so two hosts can only ever compare under a single canonical form —
+// a second normalization rule added to one site but not the other would let a
+// host be stored under one form and matched under another.
+func normalizeHost(host string) string {
 	return strings.TrimRight(strings.ToLower(strings.Trim(host, "[]")), ".")
 }
 
@@ -100,7 +96,7 @@ func (a *Allowlist) AllowsHost(host string) bool {
 	if a == nil {
 		return false
 	}
-	h := NormalizeHost(host)
+	h := normalizeHost(host)
 	if h == "" {
 		return false
 	}
