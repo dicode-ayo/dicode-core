@@ -36,19 +36,22 @@ func RemoteURL(dir string) (string, error) {
 	if len(urls) == 0 {
 		return "", fmt.Errorf("origin remote at %s has no URL", dir)
 	}
-	return stripCredentials(urls[0]), nil
+	return StripURLCredentials(urls[0]), nil
 }
 
-// stripCredentials returns rawURL with any userinfo (user:password@ or
+// StripURLCredentials returns rawURL with any userinfo (user:password@ or
 // user:token@) removed. Returns rawURL unchanged if it cannot be parsed as a
 // URL (e.g. an SCP-like "git@host:owner/repo.git" remote, which carries no
 // URL scheme at all and so embeds no parseable userinfo in the first place)
 // or has no userinfo.
 //
-// A small duplicate of pkg/source/git's private stripURLCredentials — kept
-// separate rather than shared so this package's footprint stays contained to
-// itself.
-func stripCredentials(rawURL string) string {
+// Exported and shared: pkg/source/git.New uses this same logic to build the
+// deterministic local-dir name it derives from a credential-stripped source
+// URL, and previously carried a byte-for-byte private duplicate of it — one
+// implementation here means a future fix to the stripping logic (a new
+// credential-encoding edge case, say) can't silently apply to only one
+// caller.
+func StripURLCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
 		return rawURL

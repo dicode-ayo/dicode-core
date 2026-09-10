@@ -104,8 +104,8 @@ func TestStripCredentials(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stripCredentials(tc.in); got != tc.want {
-				t.Errorf("stripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := StripURLCredentials(tc.in); got != tc.want {
+				t.Errorf("StripURLCredentials(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
