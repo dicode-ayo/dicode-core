@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,17 +26,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"go.uber.org/zap"
 )
-
-// stripURLCredentials returns rawURL with any userinfo (user:password@) removed.
-// Returns rawURL unchanged if it cannot be parsed or has no userinfo.
-func stripURLCredentials(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil {
-		return rawURL
-	}
-	u.User = nil
-	return u.String()
-}
 
 const (
 	defaultPoll = 30 * time.Second
@@ -88,7 +76,7 @@ func New(dataDir, url, branch string, poll time.Duration, tokenEnv, sshKey strin
 	}
 	// Deterministic local dir name from credential-stripped URL so re-adding
 	// the same repo with different credentials reuses the existing clone.
-	displayURL := stripURLCredentials(url)
+	displayURL := gitops.StripURLCredentials(url)
 	h := sha256.Sum256([]byte(displayURL))
 	dir := filepath.Join(dataDir, "repos", fmt.Sprintf("%x", h[:8]))
 

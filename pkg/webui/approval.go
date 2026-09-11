@@ -22,6 +22,7 @@ import (
 type ApprovalGate interface {
 	IsPending(id string) bool
 	PendingHash(id string) (string, bool)
+	PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
@@ -217,6 +218,12 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
 {{else}}
   <h1>Approve task?</h1>
   <p>This will approve task <code>{{.TaskID}}</code> at content hash <code>{{.Hash}}</code> and arm its triggers.</p>
+  {{if .CommitTo}}
+  <p class="meta">
+    {{if and .CommitFrom (ne .CommitFrom .CommitTo)}}Commit range: <code>{{.CommitFrom}}...{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
+    {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}">compare</a>{{end}}
+  </p>
+  {{end}}
   <p class="meta">Only approve if you reviewed this task change. The link is single-use.</p>
   <form method="post"><button type="submit">Approve task</button></form>
 {{end}}
@@ -227,6 +234,13 @@ type approvePageData struct {
 	Hash     string
 	Approved bool
 	Error    string
+
+	// CommitFrom, CommitTo and CompareURL carry the "what moved" decoration.
+	// Each is "" whenever it cannot be resolved, and the template renders
+	// nothing at all rather than a blank range when CommitTo is empty.
+	CommitFrom string
+	CommitTo   string
+	CompareURL string
 }
 
 func (s *Server) renderApprovePage(w http.ResponseWriter, status int, data approvePageData) {
@@ -256,12 +270,21 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The link must only ever approve what it was minted for: if the task is
-	// no longer pending at that exact hash, say so up front.
-	if hash, ok := s.approvalGate.PendingHash(info.TaskID); !ok || hash != info.Hash {
+	// no longer pending at that exact hash, say so up front. One locked read
+	// for both, so a concurrent Admit cannot leave the rendered range
+	// describing a different generation than the hash matched here.
+	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
+	if !ok || hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
-	s.renderApprovePage(w, http.StatusOK, approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)})
+	s.renderApprovePage(w, http.StatusOK, approvePageData{
+		TaskID:     info.TaskID,
+		Hash:       shortHash(info.Hash),
+		CommitFrom: shortCommit(cr.From),
+		CommitTo:   shortCommit(cr.To),
+		CompareURL: cr.CompareURL,
+	})
 }
 
 // handleApproveLinkRedeem serves POST /approve/{token}: consumes the token
@@ -295,4 +318,14 @@ func shortHash(h string) string {
 		return h[:12] + "…"
 	}
 	return h
+}
+
+// shortCommit abbreviates a git commit SHA for display. Unlike a content
+// hash it takes no ellipsis: a bare prefix is git's own abbreviation, and the
+// page pairs two of them with the "..." range separator the compare link uses.
+func shortCommit(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

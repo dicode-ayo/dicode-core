@@ -33,11 +33,11 @@ type Allowlist struct {
 // been configured: it authorises nothing.
 var emptyAllowlist = &Allowlist{}
 
-// normalizeHost canonicalises a host for allowlist matching: strip IPv6
-// brackets, lowercase, and drop a trailing FQDN-root dot. The guard's
-// literal-host check and every host lookup run through this one function so an
-// entry and a URL host can only ever compare under a single canonical form — a
-// second normalization rule added to one site but not the other would let a
+// normalizeHost canonicalizes a host for comparison: strip IPv6 brackets,
+// lowercase, and drop a trailing FQDN-root dot. The SSRF guard's literal-host
+// check, every allowlist lookup, and ParseRemote all run through this one
+// function so two hosts can only ever compare under a single canonical form —
+// a second normalization rule added to one site but not the other would let a
 // host be stored under one form and matched under another.
 func normalizeHost(host string) string {
 	return strings.TrimRight(strings.ToLower(strings.Trim(host, "[]")), ".")

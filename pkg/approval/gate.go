@@ -56,7 +56,7 @@ type Gate struct {
 	lock     *Lock
 	arm      func(task.Kinded) error
 	hashFn   func(task.Kinded) (string, error)
-	commitFn func(task.Kinded) string
+	commitFn func(task.Kinded) (commit, remote string)
 	log      *zap.Logger
 
 	mu          sync.Mutex
@@ -93,9 +93,9 @@ type Gate struct {
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
-// commit observed alongside it.
+// commit and remote observed alongside it.
 //
-// Both are published in one critical section (see Admit's default case), so a
+// All are published in one critical section (see Admit's default case), so a
 // reader can never observe a hash paired with a commit from a different
 // generation. It does not make the two observations simultaneous: each is read
 // from disk in turn, so a source that syncs mid-Admit can pair a hash with a
@@ -107,6 +107,11 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
+	// remote is the "origin" remote URL of the repository commit was read
+	// from, "" when there is none. Resolved here so reads of this entry stay
+	// in-memory: /approve/{token} is prefetched by mail clients and chat
+	// unfurlers, and must never walk the filesystem per view.
+	remote string
 	// enabled is the resolved enabled flag observed alongside hash, after
 	// previewFn (if any) — the same value State() renders and
 	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
@@ -142,8 +147,8 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 // SetHashFunc overrides the content-hash function (tests).
 func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn }
 
-// SetCommitFunc overrides the commit resolver (tests).
-func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
+// SetCommitFunc overrides the commit/remote resolver (tests).
+func (g *Gate) SetCommitFunc(fn func(task.Kinded) (commit, remote string)) { g.commitFn = fn }
 
 // SetBuiltinPinned records whether the buildin source is pinned to a tag.
 // Call once at startup, before Admit runs concurrently — it is not
@@ -265,13 +270,13 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// lags behind the last commit this content was seen at yields a range
 		// full of commits that never touched the task. Kept outside the lock —
 		// it opens the repository.
-		commit := g.commitFn(k)
+		commit, remote := g.commitFn(k)
 
 		g.mu.Lock()
-		// hash and commit are written together in one critical section: a
-		// concurrent Approve/ApproveIfHash can never observe a pending[id]
-		// whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, enabled: enabled}
+		// hash, commit, and remote are written together in one critical
+		// section: a concurrent Approve/ApproveIfHash can never observe a
+		// pending[id] whose fields disagree on which generation they describe.
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, enabled: enabled}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -292,7 +297,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// of an unchanged trusted task would open the repository for nothing.
 		commit := ""
 		if !hashUnchanged {
-			commit = g.commitFn(k)
+			commit, _ = g.commitFn(k)
 		}
 		if err := g.lock.Record(id, hash, by, commit); err != nil {
 			// Inventory write failure must not keep a trusted task from
@@ -320,22 +325,23 @@ func taskDirOf(k task.Kinded) string {
 	}
 }
 
-// headCommitOf returns the git commit k's task directory currently sits at, or
-// "" when there is none: a dir-less inline task, a local source outside any
-// repository, or a repository with no commit yet. Every failure degrades to ""
-// rather than surfacing, because the commit is decoration on the approval
-// record — no gate decision reads it — and "outside a repository" is the
+// headCommitOf returns the git commit k's task directory currently sits at
+// and the "origin" remote of the repository holding it, or "" for both when
+// there is none: a dir-less inline task, a local source outside any
+// repository, or a repository with no commit yet. Every failure degrades to
+// "" rather than surfacing, because both are decoration on the approval
+// record — no gate decision reads them — and "outside a repository" is the
 // ordinary state of a local source rather than a fault.
-func headCommitOf(k task.Kinded) string {
+func headCommitOf(k task.Kinded) (commit, remote string) {
 	dir := taskDirOf(k)
 	if dir == "" {
-		return ""
+		return "", ""
 	}
-	commit, err := gitops.HeadCommit(dir)
+	commit, remote, err := gitops.HeadInfo(dir)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return commit
+	return commit, remote
 }
 
 // Approve approves a pending task: records its observed hash in the lock and
@@ -490,6 +496,40 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
 	return ent.hash, ent.enabled, true
+}
+
+// PendingApproval returns the content hash observed when id was held
+// pending together with its "what moved" commit-range decoration, both read
+// under one locked call. Callers that need both must use this rather than
+// PendingHash plus a second lookup: two calls can straddle a concurrent
+// Approve/Forget/Admit and pair the hash confirmed by one with the commit
+// range of a different pending generation.
+//
+// From is the commit recorded by the last approval, To the commit the
+// currently pending content was observed at — not whatever HEAD has moved to
+// since. A zero-value CommitRange with ok true is the ordinary state for a
+// source with no git history or a task pending for the first time; its
+// absence is never an error (ADR-0001).
+//
+// From is recorded without the remote it was resolved against, so
+// repointing a source at an unrelated repository between two approvals
+// yields a compare link across two histories, which the host renders as a
+// dead or empty diff rather than a misleading one.
+func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
+	g.mu.Lock()
+	ent, ok := g.pending[id]
+	g.mu.Unlock()
+	if !ok {
+		return "", CommitRange{}, false
+	}
+
+	var from string
+	if rec, ok := g.lock.Get(id); ok {
+		from = rec.Commit
+	}
+	to := ent.commit
+
+	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not

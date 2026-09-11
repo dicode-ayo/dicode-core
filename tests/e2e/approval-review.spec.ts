@@ -17,12 +17,14 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
 import { settleApproved } from './helpers/approval';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
+const NOTIFY_TASK_ID = 'e2e-tests/notify-echo';
 const BODY_MARKER = '// e2e-review-probe-marker';
 
 // CLAUDE.md documents the reconciler loop as syncing sources "every 30s";
@@ -50,6 +52,82 @@ function tasksDir(): string {
   const d = process.env.DICODE_E2E_TASKS_DIR;
   if (!d) throw new Error('DICODE_E2E_TASKS_DIR not set — global setup may have failed');
   return d;
+}
+
+// Run mirrors dev-mode-clone.spec.ts's Go-JSON-field-shape tolerance: the
+// registry.Run struct carries no json tags, so field names reach the wire
+// as Go's default PascalCase.
+interface Run {
+  ID?: string;
+  id?: string;
+  Status?: string;
+  status?: string;
+  ReturnValue?: string;
+  return_value?: string;
+}
+
+function runID(r: Run): string {
+  return (r.ID ?? r.id) as string;
+}
+function runStatus(r: Run): string {
+  return (r.Status ?? r.status) as string;
+}
+function runReturnValue(r: Run): string {
+  return (r.ReturnValue ?? r.return_value ?? '') as string;
+}
+
+/**
+ * latestNotifyRunID returns the ID of the most recent e2e-tests/notify-echo
+ * run, or undefined if it has never fired. Used as the "before" marker so a
+ * caller can recognize the run its own pending transition produces.
+ */
+async function latestNotifyRunID(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<string | undefined> {
+  const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=1`);
+  if (!res.ok()) return undefined;
+  // ListRuns (pkg/registry) returns a nil slice for zero rows, which encodes
+  // as JSON null, not [] — the ordinary state before notify-echo has ever
+  // fired in this daemon instance. res.json() then yields null, so runs[0]
+  // must be guarded rather than assumed to be an (possibly empty) array.
+  const runs = await res.json() as Run[] | null;
+  return runs?.[0] ? runID(runs[0]) : undefined;
+}
+
+/**
+ * waitForNewNotifyRun polls e2e-tests/notify-echo's run history for a
+ * completed run whose ID differs from beforeID — approval.notify_task
+ * (wired to this fixture task in dicode-unauth.yaml) fires exactly once per
+ * true pending transition (SetPendingHook's contract), asynchronously in a
+ * goroutine, so the run may not exist yet the instant pending_approval flips.
+ */
+async function waitForNewNotifyRun(
+  request: import('@playwright/test').APIRequestContext,
+  beforeID: string | undefined,
+  timeoutMs = 30_000,
+): Promise<Run> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await request.get(`/api/tasks/${encodeURIComponent(NOTIFY_TASK_ID)}/runs?limit=1`);
+    if (res.ok()) {
+      // null (not []) is what a zero-run task's endpoint returns — see
+      // latestNotifyRunID's comment on ListRuns' nil-slice-to-null encoding.
+      const runs = await res.json() as Run[] | null;
+      // Only the newest run counts. notify-echo is wired suite-wide (it fires
+      // on every true pending transition, not just this test's), so accepting
+      // any run whose ID differs from beforeID — rather than specifically the
+      // newest — could match an older, unrelated run from a different spec's
+      // pending transition, with a stale approve_url for a different task
+      // entirely, instead of waiting for the one this test just caused.
+      const newest = runs?.[0];
+      const done = newest && runID(newest) !== beforeID && runStatus(newest) === 'success'
+        ? newest
+        : undefined;
+      if (done) return done;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`no new ${NOTIFY_TASK_ID} run observed within ${timeoutMs}ms`);
 }
 
 /** Poll GET /api/tasks/{id} until the predicate is satisfied, up to timeoutMs. */
@@ -196,6 +274,52 @@ test.describe('Approval review surface', () => {
         await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
       ).json() as Record<string, unknown>;
       expect(afterHandoff.pending_approval).toBe(true);
+    });
+  });
+
+  // The only end-to-end drive of /approve/{token} itself: the session-less
+  // confirm page a notification link lands on, reached with a real token
+  // minted through the daemon's own notify flow rather than a fabricated one.
+  //
+  // The range needs HEAD to have moved between the approval on record and the
+  // pending content. An empty commit moves it without touching a byte of any
+  // fixture, so no other spec sees different content and the pending entry's
+  // commit — re-resolved on every pend — is already the new HEAD by the time
+  // the task pends.
+  test('/approve/{token} renders the commit range and compare link for the pending change', async ({ request }) => {
+    const repo = tasksDir();
+    const git = (...args: string[]): string =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+    const before = await latestNotifyRunID(request);
+    git('commit', '-q', '--allow-empty', '-m', 'move HEAD for the approve-link range');
+    const head = git('rev-parse', 'HEAD');
+
+    await withPendingChange(request, async () => {
+      const run = await waitForNewNotifyRun(request, before);
+      const payload = JSON.parse(runReturnValue(run)) as { approve_url?: string; task_id?: string };
+      expect(payload.task_id, `notify-echo's received params: ${runReturnValue(run)}`).toBe(MANUAL_TASK_ID);
+      expect(payload.approve_url).toBeTruthy();
+
+      const confirmRes = await request.get(payload.approve_url!);
+      expect(confirmRes.ok(), await confirmRes.text()).toBe(true);
+      const body = await confirmRes.text();
+
+      expect(body).toContain('Approve task?');
+      expect(body).toContain(MANUAL_TASK_ID);
+
+      // The approved-at commit is whatever the preceding tests last recorded,
+      // so it is asserted by shape; the pending side is this test's own HEAD.
+      const range = body.match(/Commit range: <code>([0-9a-f]{12})\.\.\.([0-9a-f]{12})<\/code>/);
+      expect(range, `no commit range in: ${body}`).toBeTruthy();
+      const [, from, to] = range!;
+      expect(to).toBe(head.slice(0, 12));
+      expect(from).not.toBe(to);
+
+      // The link carries full SHAs; only the rendered range is abbreviated.
+      expect(body).toMatch(
+        new RegExp(`href="https://github\\.com/dicode-ayo/e2e-fixture/compare/[0-9a-f]{40}\\.\\.\\.${head}"`),
+      );
     });
   });
 

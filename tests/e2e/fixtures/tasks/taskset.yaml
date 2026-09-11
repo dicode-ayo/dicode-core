@@ -49,6 +49,10 @@ spec:
     login-heading-target:
       ref:
         path: FIXTURES_TASKS_DIR/login-heading-target/task.yaml
+    # approval.notify_task fixture — see notify-echo/task.yaml.
+    notify-echo:
+      ref:
+        path: FIXTURES_TASKS_DIR/notify-echo/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML
