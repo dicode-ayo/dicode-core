@@ -38,7 +38,7 @@ That's it. The task appears in your dashboard within seconds.
 
 Tasks are TypeScript (Deno), Python (uv), Docker containers, or Podman containers. You can write them yourself or have AI generate them. All approaches produce the same artifact: a folder with `task.yaml` + script.
 
-dicode is a single binary. Run `dicode daemon` to start the engine, or use any CLI subcommand — the daemon is auto-started in the background if it isn't already running.
+dicode is a single binary. Run `dicode daemon` to start the engine in the foreground, `dicode daemon --detach` to run it in the background, or just use any CLI subcommand — the daemon is auto-started in the background if it isn't already running.
 
 ---
 
@@ -1486,6 +1486,9 @@ For VPS, homelab, or any machine without a desktop session. Set `server.tray: fa
 ```bash
 # Run the daemon directly
 dicode daemon
+
+# Or in the background, surviving the SSH session that started it
+dicode daemon --detach
 ```
 
 ### Docker
@@ -1579,6 +1582,9 @@ OS service management (`dicode service install/start/stop/status/logs`) is desig
 ```bash
 # Run directly
 dicode daemon
+
+# Background it (prints the pid; stop it with `kill <pid>`)
+dicode daemon --detach
 
 # Or with systemd (create a unit file manually)
 sudo systemctl start dicode

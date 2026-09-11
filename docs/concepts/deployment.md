@@ -13,10 +13,19 @@ curl -sL https://dicode.app/install.sh | sh
 # Run in the foreground with a specific config
 dicode daemon --config /path/to/dicode.yaml --port 8080
 
+# Run it in the background instead and get the terminal back
+dicode daemon --detach --config /path/to/dicode.yaml
+
 # Or just run any CLI command — it auto-starts the daemon in the
 # background (using ./dicode.yaml) if one isn't already running
 dicode list
 ```
+
+### Detaching
+
+`dicode daemon --detach` (`-d`) leaves the daemon running in the background, in a session of its own, and prints its pid. It survives the terminal that started it, which a foreground daemon does not: the daemon treats `SIGHUP` as a shutdown, and closing a terminal sends one to everything still attached to it. Stop a detached daemon with `kill <pid>`.
+
+On Windows there is no session to detach into: `--detach` still backgrounds the daemon, but it keeps the console's process group and dies with the console.
 
 On first run (no `dicode.yaml` in the working directory), the onboarding wizard runs. It picks a surface automatically: a non-TTY session (systemd, Docker, CI) gets a silent default config, a TTY with no display (`$DISPLAY`/`$WAYLAND_DISPLAY` unset) gets the CLI wizard, and a TTY with a display prompts you to choose browser or CLI (default: browser). Set `DICODE_ONBOARDING=silent|cli|browser` to force a surface.
 
@@ -203,6 +212,7 @@ log_level: info   # debug | info | warn | error
 
 ```
 dicode daemon [--config <path>] [--port N]     Run the daemon in the foreground
+dicode daemon --detach (-d)                    Run it in the background
 
 dicode version                                 Print version
 dicode list                                     List all registered tasks
