@@ -43,6 +43,12 @@ spec:
     load-error-target:
       ref:
         path: FIXTURES_TASKS_DIR/load-error-target/task.yaml
+    # Regression fixture for #853: a trigger.auth:true webhook task with a
+    # paragraph-length description, so /login?next=/hooks/login-heading-target
+    # exercises the same overflow the bug report observed against buildin/webui.
+    login-heading-target:
+      ref:
+        path: FIXTURES_TASKS_DIR/login-heading-target/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

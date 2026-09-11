@@ -26,6 +26,11 @@
         document.title = d.title;
         document.getElementById('login-title').textContent = d.title;
       }
+      if (d && d.subtitle) {
+        var sub = document.getElementById('login-subtitle');
+        sub.textContent = d.subtitle;
+        sub.removeAttribute('hidden');
+      }
       // No passphrase actually gates this login (server.auth: false in
       // practice) — the server accepts any value here, so don't make the
       // field look like a real credential check.

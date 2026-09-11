@@ -361,8 +361,10 @@ There is no secondary "secrets unlock" step — one login grants access to all p
 `GET /api/login/context` (unauthenticated, fetched by `pkg/webui/login/login.js`) returns:
 
 ```json
-{"title": "Sign in to dicode", "passphrase_required": true}
+{"title": "Sign in to dicode", "subtitle": "", "passphrase_required": true}
 ```
+
+When `next` points at a specific webhook task, `title` becomes `"Sign in to <task label>"` and `subtitle` carries that task's `description` — bounded to `loginSubtitleMaxLen` (120 characters, cut on a word boundary with a trailing `…`) since a task description is free-form and routinely paragraph-length. `title` never contains any part of the description: it also serves as the page's `<title>` (and, for a windowed task, its `WM_NAME`), so it must stay a short, stable label regardless of what a task's author writes in `description`.
 
 `passphrase_required` is `false` only when `passphraseSource()` reports `passphraseSourceNone` — i.e. `apiSecretsUnlock` will accept **any** password, including empty. In practice that's `server.auth: false`, the common default: `ensurePassphrase` never generates a passphrase when auth is disabled, so `/login` (always publicly reachable, independent of `server.auth`) would otherwise still present what looks like a real credential gate. When auth *is* enabled, `ensurePassphrase` runs synchronously in `Start()` before the HTTP listener accepts any connection, so a passphrase always exists by the time this endpoint is reachable — there is no first-boot window where `passphraseSourceNone` is observable over HTTP with auth on.
 

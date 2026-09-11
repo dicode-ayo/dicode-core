@@ -1,0 +1,17 @@
+apiVersion: dicode/v1
+kind: Task
+name: Login Heading Target
+description: >-
+  A full-featured web dashboard served as a webhook task. Demonstrates the
+  dicode webhook UI pattern: open /hooks/login-heading-target in a browser to
+  see the page; the dicode.js SDK is injected automatically. Auth is enforced
+  at the webhook layer (trigger.auth: true) — unauthenticated browser GETs
+  are redirected to /login?next=/hooks/login-heading-target with a
+  return-to-origin flow. Regression fixture for #853: this paragraph-length
+  description must never be rendered verbatim as the login page's <h1> or
+  <title>.
+runtime: js
+trigger:
+  webhook: /hooks/login-heading-target
+  auth: true
+timeout: 10s

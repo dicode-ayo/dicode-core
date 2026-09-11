@@ -1154,8 +1154,15 @@ func prepareLoginPost(t *testing.T, _ http.Handler, form url.Values) *http.Reque
 }
 
 // TestLoginContext_ShowsTaskNameForWebhookNext verifies that GET /api/login/context
-// returns the task name and description when next points at a known webhook task.
-// The static login page's JS fetches this endpoint to display a contextual title.
+// returns the task name in `title` and its description in a separate
+// `subtitle` field when next points at a known webhook task. The static
+// login page's JS fetches this endpoint to display a contextual heading.
+//
+// Before #853, the description was concatenated straight into `title` —
+// which became both the <h1> and the <title>/WM_NAME — so a paragraph-length
+// description pushed the login form off a narrow viewport. This asserts the
+// two are now separate fields, with `title` staying short regardless of
+// description content.
 func TestLoginContext_ShowsTaskNameForWebhookNext(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	spec := registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
@@ -1175,11 +1182,79 @@ func TestLoginContext_ShowsTaskNameForWebhookNext(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	title, _ := resp["title"].(string)
-	if !contains(title, "AI Assistant") {
-		t.Errorf("expected task name in title, got %q", title)
+	if title != "Sign in to AI Assistant" {
+		t.Errorf("title = %q, want %q", title, "Sign in to AI Assistant")
 	}
-	if !contains(title, "Chat with your tasks") {
-		t.Errorf("expected task description in title, got %q", title)
+	subtitle, _ := resp["subtitle"].(string)
+	if subtitle != "Chat with your tasks" {
+		t.Errorf("subtitle = %q, want %q", subtitle, "Chat with your tasks")
+	}
+}
+
+// TestLoginContext_TruncatesLongSubtitle locks in #853: a paragraph-length
+// description must not reach the login page verbatim — it is cut to
+// loginSubtitleMaxLen on a word boundary with a trailing ellipsis, and
+// `title` never carries any part of it.
+func TestLoginContext_TruncatesLongSubtitle(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	longDesc := "A full-featured web dashboard served as a webhook task. " +
+		"Demonstrates the dicode webhook UI pattern: open /hooks/webui in a " +
+		"browser to see the SPA; the dicode.js SDK is injected automatically. " +
+		"Auth is enforced at the webhook layer (trigger.auth: true) — " +
+		"unauthenticated browser GETs are redirected to /login?next=/hooks/webui " +
+		"with a return-to-origin flow."
+	spec := registerWebhookTask(t, srv.registry, srv, "webui", "/hooks/webui", true)
+	spec.Name = "WebUI Example"
+	spec.Description = longDesc
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context?next=%2Fhooks%2Fwebui", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	title, _ := resp["title"].(string)
+	if title != "Sign in to WebUI Example" {
+		t.Errorf("title = %q, want %q (must never carry the description)", title, "Sign in to WebUI Example")
+	}
+	subtitle, _ := resp["subtitle"].(string)
+	if len(subtitle) > loginSubtitleMaxLen+len("…") {
+		t.Errorf("subtitle length = %d, want <= %d: %q", len(subtitle), loginSubtitleMaxLen+len("…"), subtitle)
+	}
+	if !strings.HasSuffix(subtitle, "…") {
+		t.Errorf("subtitle = %q, want it truncated with a trailing ellipsis", subtitle)
+	}
+	if strings.HasPrefix(subtitle, "A full-featured web dashboard served as a webhook task. Demonstrates the dicode webhook UI pattern: open /hooks/webui in a browser to see the SPA; the dicode.js SDK is injected automatically. Auth") {
+		t.Errorf("subtitle was not truncated: %q", subtitle)
+	}
+}
+
+// TestTruncateLoginSubtitle_ShortDescriptionUnchanged verifies that a
+// description already within bounds passes through untouched (no spurious
+// ellipsis on short, legitimate descriptions).
+func TestTruncateLoginSubtitle_ShortDescriptionUnchanged(t *testing.T) {
+	got := truncateLoginSubtitle("Chat with your tasks")
+	if got != "Chat with your tasks" {
+		t.Errorf("truncateLoginSubtitle = %q, want unchanged input", got)
+	}
+	if got := truncateLoginSubtitle(""); got != "" {
+		t.Errorf("truncateLoginSubtitle(\"\") = %q, want \"\"", got)
+	}
+}
+
+// TestTruncateLoginSubtitle_CollapsesEmbeddedNewlines verifies a multi-line
+// description reads as one line in the subtitle rather than preserving the
+// original line breaks.
+func TestTruncateLoginSubtitle_CollapsesEmbeddedNewlines(t *testing.T) {
+	got := truncateLoginSubtitle("Line one.\nLine two.\n\nLine three.")
+	if strings.Contains(got, "\n") {
+		t.Errorf("truncateLoginSubtitle = %q, want no embedded newlines", got)
+	}
+	if got != "Line one. Line two. Line three." {
+		t.Errorf("truncateLoginSubtitle = %q, want %q", got, "Line one. Line two. Line three.")
 	}
 }
 
