@@ -220,8 +220,8 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
   <p>This will approve task <code>{{.TaskID}}</code> at content hash <code>{{.Hash}}</code> and arm its triggers.</p>
   {{if .CommitTo}}
   <p class="meta">
-    {{if .CommitFrom}}Commit range: <code>{{.CommitFrom}}</code>&hellip;<code>{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
-    {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}" rel="noopener noreferrer">compare</a>{{end}}
+    {{if and .CommitFrom (ne .CommitFrom .CommitTo)}}Commit range: <code>{{.CommitFrom}}...{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
+    {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}">compare</a>{{end}}
   </p>
   {{end}}
   <p class="meta">Only approve if you reviewed this task change. The link is single-use.</p>
@@ -281,8 +281,8 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 	s.renderApprovePage(w, http.StatusOK, approvePageData{
 		TaskID:     info.TaskID,
 		Hash:       shortHash(info.Hash),
-		CommitFrom: shortHash(cr.From),
-		CommitTo:   shortHash(cr.To),
+		CommitFrom: shortCommit(cr.From),
+		CommitTo:   shortCommit(cr.To),
 		CompareURL: cr.CompareURL,
 	})
 }
@@ -318,4 +318,14 @@ func shortHash(h string) string {
 		return h[:12] + "…"
 	}
 	return h
+}
+
+// shortCommit abbreviates a git commit SHA for display. Unlike a content
+// hash it takes no ellipsis: a bare prefix is git's own abbreviation, and the
+// page pairs two of them with the "..." range separator the compare link uses.
+func shortCommit(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

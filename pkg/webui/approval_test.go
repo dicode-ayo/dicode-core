@@ -767,16 +767,45 @@ func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
 	}
 	body := w.Body.String()
 
-	// shortHash trims to 12 chars + an ellipsis; both endpoints must appear
-	// shortened, and the compare link must carry the full URL as an href.
-	if !strings.Contains(body, from[:12]) {
-		t.Errorf("confirm page missing the shortened From commit %q: %s", from[:12], body)
-	}
-	if !strings.Contains(body, to[:12]) {
-		t.Errorf("confirm page missing the shortened To commit %q: %s", to[:12], body)
+	// The whole rendered range, not just its endpoints: a separator that
+	// duplicates shortCommit's abbreviation is invisible to a test that only
+	// looks for the two SHAs.
+	wantRange := "Commit range: <code>" + from[:12] + "..." + to[:12] + "</code>"
+	if !strings.Contains(body, wantRange) {
+		t.Errorf("confirm page missing the rendered range %q: %s", wantRange, body)
 	}
 	if !strings.Contains(body, `href="`+compareURL+`"`) {
 		t.Errorf("confirm page missing the compare link href %q: %s", compareURL, body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne covers a re-pend at
+// the commit already on record: an override changed the resolved hash with no
+// new commit. A range of one implies a diff exists to review when git shows
+// none, so the page states the single commit instead.
+func TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	only := strings.Repeat("a", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: only, To: only})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	wantSingle := "Commit: <code>" + only[:12] + "</code>"
+	if !strings.Contains(body, wantSingle) {
+		t.Errorf("confirm page missing the single-commit render %q: %s", wantSingle, body)
+	}
+	if strings.Contains(body, "Commit range:") {
+		t.Errorf("confirm page rendered a range for an unmoved commit: %s", body)
 	}
 }
 
