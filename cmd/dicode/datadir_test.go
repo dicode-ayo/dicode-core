@@ -29,8 +29,8 @@ func TestCliDataDir_ConfigDataDirWins(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 	want := filepath.Join(wd, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want %q", got, want)
 	}
 }
 
@@ -45,8 +45,8 @@ func TestCliDataDir_ConfigWithoutDataDirDefaultsToHome(t *testing.T) {
 	writeConfigYAML(t, dir, "log_level: info\n")
 
 	want := filepath.Join(home, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want %q", got, want)
 	}
 }
 
@@ -60,8 +60,8 @@ func TestCliDataDir_EnvOutranksConfig(t *testing.T) {
 	t.Chdir(dir)
 	writeConfigYAML(t, dir, "data_dir: \"${CONFIGDIR}/.dicode\"\n")
 
-	if got := cliDataDir(); got != "/data" {
-		t.Errorf("cliDataDir() = %q; want /data", got)
+	if got := cliDataDirFor(defaultConfigPath); got != "/data" {
+		t.Errorf("cliDataDirFor() = %q; want /data", got)
 	}
 }
 
@@ -73,8 +73,8 @@ func TestCliDataDir_NoConfigHonorsEnv(t *testing.T) {
 	t.Setenv("DICODE_DATA_DIR", "/data")
 	t.Chdir(t.TempDir())
 
-	if got := cliDataDir(); got != "/data" {
-		t.Errorf("cliDataDir() = %q; want /data", got)
+	if got := cliDataDirFor(defaultConfigPath); got != "/data" {
+		t.Errorf("cliDataDirFor() = %q; want /data", got)
 	}
 }
 
@@ -85,8 +85,8 @@ func TestCliDataDir_NoConfigFallsBackToHome(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	want := filepath.Join(home, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want %q", got, want)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestCliDataDir_MalformedConfigFallsBack(t *testing.T) {
 	writeConfigYAML(t, dir, "data_dir: [this is not a string\n")
 
 	want := filepath.Join(home, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want %q", got, want)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestCliDataDir_UnknownVariableMatchesDaemon(t *testing.T) {
 	t.Chdir(dir)
 	writeConfigYAML(t, dir, "data_dir: \"${DATADIR}/state\"\n")
 
-	if got := cliDataDir(); got != "${DATADIR}/state" {
-		t.Errorf("cliDataDir() = %q; want the literal the daemon uses", got)
+	if got := cliDataDirFor(defaultConfigPath); got != "${DATADIR}/state" {
+		t.Errorf("cliDataDirFor() = %q; want the literal the daemon uses", got)
 	}
 }
 
@@ -180,8 +180,8 @@ func TestCliDataDir_IgnoresConfigOwnedByAnotherUser(t *testing.T) {
 	}
 
 	want := filepath.Join(home, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want the trusted default %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want the trusted default %q", got, want)
 	}
 }
 
@@ -202,7 +202,7 @@ func TestCliDataDir_SymlinkedConfigIsRefused(t *testing.T) {
 	}
 
 	want := filepath.Join(home, ".dicode")
-	if got := cliDataDir(); got != want {
-		t.Errorf("cliDataDir() = %q; want the trusted default %q", got, want)
+	if got := cliDataDirFor(defaultConfigPath); got != want {
+		t.Errorf("cliDataDirFor() = %q; want the trusted default %q", got, want)
 	}
 }

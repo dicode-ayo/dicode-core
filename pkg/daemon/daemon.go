@@ -945,8 +945,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 // capabilities: API-key minting, the approval-gate test/approve surfaces, AI
 // task authoring, and task deletion (step 9).
 func buildControlServer(cfg *config.Config, dataDir, version string, database db.DB, reg *registry.Registry, rec *registry.Reconciler, eng *trigger.Engine, localSecrets secrets.Manager, srv *webui.Server, sourceMgr *webui.SourceManager, approvalGate *approval.Gate, log *zap.Logger) (*ipc.ControlServer, error) {
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	tokenPath := filepath.Join(dataDir, "daemon.token")
+	sock := ipc.ControlSocketIn(dataDir)
 	mp := ipc.MetricsProvider{
 		ReadDaemon: func() (float64, float64, int, *int64) {
 			dm := metrics.ReadDaemonMetrics()
@@ -958,7 +957,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task, cfg.AI.CreateTask)
+	ctrlSrv, err := ipc.NewControlServer(sock.Path, sock.TokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task, cfg.AI.CreateTask)
 	if err != nil {
 		return nil, fmt.Errorf("build control server: %w", err)
 	}
