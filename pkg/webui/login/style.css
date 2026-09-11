@@ -1,7 +1,12 @@
 body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;min-height:100vh}
 .dc-login{width:100%;max-width:360px;padding:2rem}
 .dc-login h1{font-size:1.25rem;margin:0 0 1.25rem;font-weight:600}
+/* dc-subtitle's -1rem top margin pulls it up under h1's 1.25rem bottom
+   margin so the two sit close together when a subtitle is shown; changing
+   either margin needs the other adjusted to match, or the gap between them
+   drifts. */
 .dc-subtitle{margin:-1rem 0 1.25rem;font-size:0.85rem;color:#9aa1ab;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dc-subtitle[hidden]{display:none}
 .dc-login form{display:flex;flex-direction:column;gap:0.75rem}
 .dc-login label{display:flex;flex-direction:column;gap:0.25rem;font-size:0.85rem;color:#9aa1ab}
 .dc-login input[type=password]{padding:0.6rem 0.7rem;border:1px solid #2a2f38;background:#181b21;color:#e6e8eb;border-radius:4px;font:inherit}

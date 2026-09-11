@@ -1222,8 +1222,11 @@ func TestLoginContext_TruncatesLongSubtitle(t *testing.T) {
 		t.Errorf("title = %q, want %q (must never carry the description)", title, "Sign in to WebUI Example")
 	}
 	subtitle, _ := resp["subtitle"].(string)
-	if len(subtitle) > loginSubtitleMaxLen+len("…") {
-		t.Errorf("subtitle length = %d, want <= %d: %q", len(subtitle), loginSubtitleMaxLen+len("…"), subtitle)
+	// Rune count, not byte length: truncateLoginSubtitle bounds by rune, and
+	// a multi-byte character legitimately makes the byte length exceed
+	// loginSubtitleMaxLen even when the rune count doesn't.
+	if n := utf8.RuneCountInString(subtitle); n > loginSubtitleMaxLen+1 {
+		t.Errorf("subtitle rune count = %d, want <= %d: %q", n, loginSubtitleMaxLen+1, subtitle)
 	}
 	if !strings.HasSuffix(subtitle, "…") {
 		t.Errorf("subtitle = %q, want it truncated with a trailing ellipsis", subtitle)
