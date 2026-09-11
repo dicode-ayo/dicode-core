@@ -33,7 +33,7 @@ type Allowlist struct {
 // been configured: it authorises nothing.
 var emptyAllowlist = &Allowlist{}
 
-// normalizeHost canonicalises a host for comparison: strip IPv6 brackets,
+// normalizeHost canonicalizes a host for comparison: strip IPv6 brackets,
 // lowercase, and drop a trailing FQDN-root dot. The SSRF guard's literal-host
 // check, every allowlist lookup, and ParseRemote all run through this one
 // function so two hosts can only ever compare under a single canonical form —
