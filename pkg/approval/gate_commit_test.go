@@ -374,13 +374,13 @@ func TestPendingApproval_ReflectsPriorApproval(t *testing.T) {
 	}
 }
 
-// TestPendingApproval_UnchangedCommitCollapsesToSingleCommit covers a task
-// re-pending with the SAME commit it was last approved at — e.g. a
+// TestPendingApproval_UnchangedCommitReportsBothEndpoints covers a task
+// re-pending with the SAME commit it was last approved at — a
 // taskset/dicode.yaml override changed the resolved hash with no new git
-// commit. From must collapse to "" rather than repeat To: a
-// "Commit range: abc123…abc123" render would misleadingly imply a diff
-// exists to review when git shows no change at all.
-func TestPendingApproval_UnchangedCommitCollapsesToSingleCommit(t *testing.T) {
+// commit. Both endpoints are reported as observed; whether that renders as a
+// range or as a single commit is the page's decision. No compare link is
+// built, a compare view of a commit against itself being an empty diff.
+func TestPendingApproval_UnchangedCommitReportsBothEndpoints(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	only := fakeCommit("a")
 	approveThenRepend(t, g, lock, only, only, "https://github.com/o/r.git")
@@ -389,8 +389,8 @@ func TestPendingApproval_UnchangedCommitCollapsesToSingleCommit(t *testing.T) {
 	if !ok {
 		t.Fatal("PendingApproval: ok = false, want true")
 	}
-	if cr.From != "" {
-		t.Errorf("From = %q, want \"\" (nothing moved, so no range) not the repeated commit", cr.From)
+	if cr.From != only {
+		t.Errorf("From = %q, want the commit on record %q", cr.From, only)
 	}
 	if cr.To != only {
 		t.Errorf("To = %q, want %q", cr.To, only)

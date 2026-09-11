@@ -28,11 +28,12 @@ type CommitRange struct {
 
 // compareURL returns a link to the git host's compare view for the range
 // from...to on remote, or "" when no such link can be built: either endpoint
-// missing, an unparseable remote, or a host whose compare-view URL shape is
-// not known here. Guessing a shape for an unrecognized host produces a link
-// that is wrong far more often than right, which is worse than no link.
+// missing, the two equal (a compare view of a commit against itself renders
+// an empty diff), an unparseable remote, or a host whose compare-view URL
+// shape is not known here. Guessing a shape for an unrecognized host produces
+// a link that is wrong far more often than right, which is worse than no link.
 func compareURL(remote, from, to string) string {
-	if from == "" || to == "" {
+	if from == "" || to == "" || from == to {
 		return ""
 	}
 	host, path, ok := gitops.ParseRemote(remote)

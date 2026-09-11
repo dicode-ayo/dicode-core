@@ -93,9 +93,9 @@ type Gate struct {
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
-// commit observed alongside it.
+// commit and remote observed alongside it.
 //
-// Both are published in one critical section (see Admit's default case), so a
+// All are published in one critical section (see Admit's default case), so a
 // reader can never observe a hash paired with a commit from a different
 // generation. It does not make the two observations simultaneous: each is read
 // from disk in turn, so a source that syncs mid-Admit can pair a hash with a
@@ -528,13 +528,6 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 		from = rec.Commit
 	}
 	to := ent.commit
-
-	// Nothing moved — the task re-pended from an override change alone, with
-	// no new commit. A range of one implies a diff exists to review when
-	// there is none, so it collapses to the single-commit shape.
-	if from == to {
-		from = ""
-	}
 
 	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
 }
