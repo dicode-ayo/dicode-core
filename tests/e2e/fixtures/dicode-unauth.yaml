@@ -16,10 +16,9 @@ server:
   auth: false
   mcp: true
 approval:
-  # Wired so approval-review.spec.ts can obtain a real single-use
-  # approve-link token through the actual daemon flow (#672 e2e coverage) —
-  # there is no dashboard/API endpoint that mints one directly. Fires once
-  # per true pending transition suite-wide; the fixture task itself is a
+  # The only way approval-review.spec.ts can obtain a real single-use
+  # approve-link token: no dashboard or API endpoint mints one directly.
+  # Fires once per true pending transition suite-wide; the fixture task is a
   # near-instant no-op (see notify-echo/task.yaml), so this adds no
   # meaningful load to unrelated specs that also cause tasks to pend.
   notify_task: e2e-tests/notify-echo

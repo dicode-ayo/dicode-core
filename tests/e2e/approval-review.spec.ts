@@ -17,6 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
@@ -276,24 +277,24 @@ test.describe('Approval review surface', () => {
     });
   });
 
-  // Regression lock for #672's graceful-degradation contract: unlike the
-  // review-panel tests above, this drives the actual /approve/{token}
-  // surface with a real token minted through the daemon's own notify flow
-  // (see waitForNewNotifyRun's doc comment) — the session-less confirm page
-  // that travels through Slack/email/ntfy notifications.
+  // The only end-to-end drive of /approve/{token} itself: the session-less
+  // confirm page a notification link lands on, reached with a real token
+  // minted through the daemon's own notify flow rather than a fabricated one.
   //
-  // e2e cannot exercise the "real commit / real compare link" happy path
-  // here: tests/e2e/helpers/dicode-server.ts's setup() copies the fixture
-  // tasks directory into a plain temp directory with no `git init` anywhere
-  // in it, so internal/gitops.HeadCommit/RemoteURL always error for every
-  // e2e-run task and the commit-range decoration is always in its degraded
-  // "absent" state under this harness. That resolution and rendering logic
-  // is covered by pkg/approval's and pkg/webui's Go unit tests instead; this
-  // test locks in the one thing that IS reachable end-to-end — that the
-  // confirm page still renders correctly, with no commit-range markup and no
-  // error, when the decoration cannot be computed.
-  test('/approve/{token} confirm page renders with no commit-range markup outside a git checkout', async ({ request }) => {
+  // The range needs HEAD to have moved between the approval on record and the
+  // pending content. An empty commit moves it without touching a byte of any
+  // fixture, so no other spec sees different content and the pending entry's
+  // commit — re-resolved on every pend — is already the new HEAD by the time
+  // the task pends.
+  test('/approve/{token} renders the commit range and compare link for the pending change', async ({ request }) => {
+    const repo = tasksDir();
+    const git = (...args: string[]): string =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
     const before = await latestNotifyRunID(request);
+    git('commit', '-q', '--allow-empty', '-m', 'move HEAD for the approve-link range');
+    const head = git('rev-parse', 'HEAD');
+
     await withPendingChange(request, async () => {
       const run = await waitForNewNotifyRun(request, before);
       const payload = JSON.parse(runReturnValue(run)) as { approve_url?: string; task_id?: string };
@@ -306,11 +307,19 @@ test.describe('Approval review surface', () => {
 
       expect(body).toContain('Approve task?');
       expect(body).toContain(MANUAL_TASK_ID);
-      // No commit range, no compare link, no error — the strip is simply
-      // absent (ADR-0001: "less contextual, never blank").
-      for (const missing of ['Commit range:', 'Commit:', 'compare</a>', 'Approval failed']) {
-        expect(body, `unexpected markup in a git-less checkout: ${missing}`).not.toContain(missing);
-      }
+
+      // The approved-at commit is whatever the preceding tests last recorded,
+      // so it is asserted by shape; the pending side is this test's own HEAD.
+      const range = body.match(/Commit range: <code>([0-9a-f]{12})\.\.\.([0-9a-f]{12})<\/code>/);
+      expect(range, `no commit range in: ${body}`).toBeTruthy();
+      const [, from, to] = range!;
+      expect(to).toBe(head.slice(0, 12));
+      expect(from).not.toBe(to);
+
+      // The link carries full SHAs; only the rendered range is abbreviated.
+      expect(body).toMatch(
+        new RegExp(`href="https://github\\.com/dicode-ayo/e2e-fixture/compare/[0-9a-f]{40}\\.\\.\\.${head}"`),
+      );
     });
   });
 

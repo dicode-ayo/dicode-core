@@ -118,9 +118,37 @@ function copyDirSync(src: string, dest: string): void {
  * (FIXTURES_TASKS_DIR and BUILDIN_WEBUI_TASK_YAML placeholders substituted).
  * Returns the path to the written taskset.yaml.
  */
+/**
+ * initFixtureRepo makes dir a git repository with every fixture in its HEAD
+ * tree and an `origin` pointing at a github.com URL.
+ *
+ * internal/gitops.HeadCommit resolves a task's commit only when the task
+ * directory appears in HEAD's tree, so without this the commit-range
+ * decoration on /approve/{token} is unreachable end-to-end and only its
+ * degraded, absent form can be asserted. A dirty tree is fine — later
+ * mutations by a spec keep resolving the commit they were last committed at,
+ * which is exactly what the decoration reports.
+ *
+ * The remote is never fetched from; it exists so the compare link has a host
+ * whose URL shape pkg/approval recognizes.
+ */
+function initFixtureRepo(dir: string): void {
+  const git = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+  };
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'e2e@dicode.test');
+  git('config', 'user.name', 'dicode e2e');
+  git('config', 'commit.gpgsign', 'false');
+  git('remote', 'add', 'origin', 'https://github.com/dicode-ayo/e2e-fixture.git');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'e2e fixture baseline');
+}
+
 function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string } {
   const tasksDir = path.join(tempDir, 'tasks');
   copyDirSync(TASKS_DIR, tasksDir);
+  initFixtureRepo(tasksDir);
 
   const buildinDir = ensureBuildinCheckout(REPO_ROOT);
   const buildinWebuiTaskYaml = path.join(buildinDir, 'webui/task.yaml');
