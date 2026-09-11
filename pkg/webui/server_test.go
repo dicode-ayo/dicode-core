@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
@@ -1255,6 +1256,26 @@ func TestTruncateLoginSubtitle_CollapsesEmbeddedNewlines(t *testing.T) {
 	}
 	if got != "Line one. Line two. Line three." {
 		t.Errorf("truncateLoginSubtitle = %q, want %q", got, "Line one. Line two. Line three.")
+	}
+}
+
+// TestTruncateLoginSubtitle_DoesNotSplitMultiByteRune guards against a
+// byte-offset cut landing mid-character: a naive desc[:loginSubtitleMaxLen]
+// can split a multi-byte UTF-8 rune (an em dash, routine in this repo's own
+// task descriptions — see docs/concepts/security.md), corrupting it into an
+// invalid UTF-8 tail. The result must always be valid UTF-8, regardless of
+// where a multi-byte character falls relative to the cut point.
+func TestTruncateLoginSubtitle_DoesNotSplitMultiByteRune(t *testing.T) {
+	// 119 ASCII runes (1 byte each) + one 3-byte em dash puts the dash's
+	// encoding straddling byte offset 120 — exactly the boundary a
+	// byte-offset slice would cut through.
+	desc := strings.Repeat("x", 119) + "—" + " more words that push this well past the bound"
+	got := truncateLoginSubtitle(desc)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateLoginSubtitle produced invalid UTF-8: %q", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Errorf("truncateLoginSubtitle = %q, want no replacement characters", got)
 	}
 }
 

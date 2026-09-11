@@ -1523,15 +1523,20 @@ func (s *Server) loginTitle(next string) loginHeading {
 // login page subtitle (#853), cutting on a word boundary where possible
 // rather than mid-word. Embedded newlines are collapsed first so a
 // multi-paragraph description reads as a single line before it is measured.
+// Truncation counts and slices by rune, not by byte — a byte-offset cut can
+// land in the middle of a multi-byte UTF-8 character (descriptions routinely
+// contain one, e.g. the em dash in this repo's own task descriptions),
+// which would corrupt it into the Unicode replacement character.
 func truncateLoginSubtitle(description string) string {
 	desc := strings.Join(strings.Fields(description), " ")
 	if desc == "" {
 		return ""
 	}
-	if len(desc) <= loginSubtitleMaxLen {
+	runes := []rune(desc)
+	if len(runes) <= loginSubtitleMaxLen {
 		return desc
 	}
-	cut := desc[:loginSubtitleMaxLen]
+	cut := string(runes[:loginSubtitleMaxLen])
 	if i := strings.LastIndexByte(cut, ' '); i > 0 {
 		cut = cut[:i]
 	}
