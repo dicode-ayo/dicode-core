@@ -47,7 +47,7 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/runtime/python` | Execute Python tasks via a `uv`-provisioned interpreter subprocess; SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py` |
 | `pkg/runtime/docker` | Pull image, run container, stream logs, clean up |
 | `pkg/runtime/podman` | Rootless container execution via podman CLI |
-| `pkg/webui` | chi router, HTMX templates, REST API, WebSocket log streaming; `/mcp` forwards to the buildin/mcp dicode task |
+| `pkg/webui` | chi router, REST API, session/device-cookie auth, WebSocket log streaming; `/mcp` forwards to the buildin/mcp dicode task. Serves no dashboard of its own — `/` and every unmatched GET redirect to `/hooks/webui`, the Lit SPA that lives in dicode-buildin. Go-side pages (login, approve, run result) are self-contained bare HTML strings; there is no layout or template system to reuse |
 | `pkg/mcp/client` | Generic JSON-RPC 2.0 MCP client used by the dicode SDK's `mcp.list_tools` / `mcp.call` to reach external MCP servers |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |
