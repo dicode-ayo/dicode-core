@@ -1,10 +1,6 @@
 package ipc
 
 import (
-	"context"
-	"encoding/json"
-	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,7 +26,7 @@ func TestControl_Detach_ReportsOutgoingPID(t *testing.T) {
 	t.Parallel()
 	cs := &ControlServer{log: zap.NewNop()}
 	cs.SetDetach(func() {})
-	cs.SetDaemonProcess(4242, "/somewhere/dicode.yaml", true)
+	cs.SetDaemonProcess(4242, true)
 
 	res, err := cs.handleDaemonDetach()
 	if err != nil {
@@ -52,7 +48,6 @@ func TestControl_Detach_AcknowledgesBeforeHandoff(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
-	configPath := filepath.Join(dir, "dicode.yaml")
 
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -64,31 +59,22 @@ func TestControl_Detach_AcknowledgesBeforeHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
-	cs.SetDaemonProcess(4242, configPath, true)
+	cs.SetDaemonProcess(4242, true)
 
 	// Stand in for the real handoff, which shuts the daemon down: record that
 	// it ran, which must be after the reply is on the wire.
 	handoff := make(chan struct{})
 	cs.SetDetach(func() { close(handoff) })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	served := make(chan struct{})
-	go func() {
-		defer close(served)
-		_ = cs.Start(ctx)
-	}()
-	defer func() { cancel(); <-served }()
-	waitForSocket(t, socketPath)
-
+	defer serveControl(t, cs, socketPath)()
 	conn := dialControl(t, socketPath, tokenPath)
 	defer conn.Close()
 
 	var status DaemonStatus
 	sendControl(t, conn, Request{ID: "1", Method: "cli.ping"}, &status)
-	if status.PID != 4242 || status.ConfigPath != configPath || !status.Foreground {
-		t.Fatalf("cli.ping reported pid=%d config=%q foreground=%v, want the values SetDaemonProcess was given",
-			status.PID, status.ConfigPath, status.Foreground)
+	if status.PID != 4242 || !status.Foreground {
+		t.Fatalf("cli.ping reported pid=%d foreground=%v, want the values SetDaemonProcess was given",
+			status.PID, status.Foreground)
 	}
 
 	var res DaemonDetachResult
@@ -101,71 +87,5 @@ func TestControl_Detach_AcknowledgesBeforeHandoff(t *testing.T) {
 	case <-handoff:
 	case <-time.After(2 * time.Second):
 		t.Fatal("handoff never ran after the ack")
-	}
-}
-
-func waitForSocket(t *testing.T, socketPath string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("control socket never appeared within 2s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func dialControl(t *testing.T, socketPath, tokenPath string) net.Conn {
-	t.Helper()
-	tok, err := readCLITokenFile(tokenPath)
-	if err != nil {
-		t.Fatalf("read token: %v", err)
-	}
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial control: %v", err)
-	}
-	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
-		conn.Close()
-		t.Fatalf("handshake send: %v", err)
-	}
-	var hs struct {
-		Proto int      `json:"proto"`
-		Error string   `json:"error"`
-		Caps  []string `json:"caps"`
-	}
-	if err := readMsg(conn, &hs); err != nil {
-		conn.Close()
-		t.Fatalf("handshake recv: %v", err)
-	}
-	if hs.Error != "" {
-		conn.Close()
-		t.Fatalf("handshake rejected: %s", hs.Error)
-	}
-	return conn
-}
-
-// sendControl round-trips one request and decodes the result into out.
-func sendControl(t *testing.T, conn net.Conn, req Request, out any) {
-	t.Helper()
-	if err := writeMsg(conn, req); err != nil {
-		t.Fatalf("send %s: %v", req.Method, err)
-	}
-	var resp Response
-	if err := readMsg(conn, &resp); err != nil {
-		t.Fatalf("no reply to %s: %v", req.Method, err)
-	}
-	if resp.Error != "" {
-		t.Fatalf("%s refused: %s", req.Method, resp.Error)
-	}
-	raw, err := json.Marshal(resp.Result)
-	if err != nil {
-		t.Fatalf("re-encode %s result: %v", req.Method, err)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		t.Fatalf("decode %s result: %v", req.Method, err)
 	}
 }

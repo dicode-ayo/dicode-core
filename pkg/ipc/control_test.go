@@ -24,73 +24,16 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	log := zap.NewNop()
-	eng := &mockEngine{}
-
-	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil, "", "")
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, mp, "test", zap.NewNop(), nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = cs.Start(ctx)
-	}()
-
-	// Wait for the socket file to appear (Start is fast but runs in a goroutine).
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("control socket never appeared within 2s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// Read the token the server wrote.
-	tok, err := readCLITokenFile(tokenPath)
-	if err != nil {
-		cancel()
-		t.Fatalf("read token: %v", err)
-	}
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		cancel()
-		t.Fatalf("dial control: %v", err)
-	}
-
-	// Handshake.
-	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
-		conn.Close()
-		cancel()
-		t.Fatalf("handshake send: %v", err)
-	}
-	var hs struct {
-		Proto int      `json:"proto"`
-		Caps  []string `json:"caps"`
-		Error string   `json:"error"`
-	}
-	if err := readMsg(conn, &hs); err != nil {
-		conn.Close()
-		cancel()
-		t.Fatalf("handshake recv: %v", err)
-	}
-	if hs.Error != "" {
-		conn.Close()
-		cancel()
-		t.Fatalf("handshake rejected: %s", hs.Error)
-	}
+	stop := serveControl(t, cs, socketPath)
+	conn := dialControl(t, socketPath, tokenPath)
 
 	cleanup := func() {
 		conn.Close()
-		cancel()
-		<-done
+		stop()
 	}
 	return conn, cleanup
 }

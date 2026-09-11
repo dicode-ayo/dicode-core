@@ -23,8 +23,21 @@ func TestSpawnDetached_UnwritableLogFails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	if _, err := SpawnDetached("", 0, filepath.Join(dir, "sub", "daemon.log")); err == nil {
+	if _, err := SpawnDetached("dicode.yaml", 0, filepath.Join(dir, "sub", "daemon.log")); err == nil {
 		t.Fatal("SpawnDetached must fail when it cannot create the log")
+	}
+}
+
+// TestAbsConfigPath_ResolvesRelative: the config path is handed to a process
+// that may be started from a different directory, so it must not stay
+// relative.
+func TestAbsConfigPath_ResolvesRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	got := absConfigPath("dicode.yaml")
+	if want := filepath.Join(dir, "dicode.yaml"); got != want {
+		t.Errorf("absConfigPath() = %q; want %q", got, want)
 	}
 }
 
@@ -48,15 +61,14 @@ func TestDetachHandoff_RequestCancels(t *testing.T) {
 	<-ctx.Done()
 }
 
-// TestNewDetachHandoff_UnarmedWithoutTerminal: Ctrl-\ only makes sense where
-// someone can press it. A daemon under a service manager keeps Go's default
-// SIGQUIT behaviour — the goroutine dump you want when it stops responding.
-func TestNewDetachHandoff_UnarmedWithoutTerminal(t *testing.T) {
+// TestNewDetachHandoff_UnarmedInBackground: Ctrl-\ only makes sense where
+// someone can press it, and a daemon with no terminal must keep Go's SIGQUIT
+// goroutine dump.
+func TestNewDetachHandoff_UnarmedInBackground(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// go test runs with stdin redirected, so this is the no-terminal case.
-	if d := newDetachHandoff(cancel, zap.NewNop()); d.armed {
-		t.Fatal("handoff armed SIGQUIT without a controlling terminal")
+	if d := newDetachHandoff(cancel, zap.NewNop(), false); d.foreground {
+		t.Fatal("handoff armed SIGQUIT for a daemon with no controlling terminal")
 	}
 }

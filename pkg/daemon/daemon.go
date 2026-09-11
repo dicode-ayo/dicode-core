@@ -101,15 +101,19 @@ func Run(configPath string, portOverride int, version string) {
 
 	logger.Info("dicode daemon starting", zap.String("version", version))
 
-	detach := newDetachHandoff(cancel, logger)
+	detach := newDetachHandoff(cancel, logger, hasControllingTerminal())
 
 	if err := run(ctx, detach, cfg, configPath, version, logBroadcaster, logger); err != nil {
+		if detach.requested.Load() {
+			// Whoever asked for the detach is waiting on a replacement that
+			// is now never coming.
+			logger.Error("detach abandoned: the daemon is shutting down with an error, so no replacement was started")
+		}
 		logger.Fatal("dicode daemon exited with error", zap.Error(err))
 	}
 
-	// A detach is a handoff, not a shutdown: run has returned, so the socket,
-	// the HTTP port and the database are all released and the replacement can
-	// take them straight over.
+	// run has returned, so the socket, the HTTP port and the database are all
+	// released and the replacement can take them straight over.
 	if detach.requested.Load() {
 		respawnDetached(cfg, configPath, portOverride, logger)
 	}
@@ -124,11 +128,10 @@ type detachHandoff struct {
 	requested atomic.Bool
 	cancel    context.CancelFunc
 
-	// armed records that this daemon has a controlling terminal — the same
-	// condition that decides whether Ctrl-\ means detach, and what cli.ping
-	// reports so `dicode daemon --detach` leaves an already-backgrounded
-	// daemon alone instead of restarting it for nothing.
-	armed bool
+	// foreground records that a terminal can take this daemon down. It
+	// decides both whether Ctrl-\ means detach and what cli.ping reports, so
+	// `dicode daemon --detach` leaves an already-backgrounded daemon alone.
+	foreground bool
 }
 
 // request triggers the handoff. Safe to call more than once, and from any
@@ -139,16 +142,16 @@ func (d *detachHandoff) request() {
 }
 
 // newDetachHandoff builds the handoff and arms Ctrl-\ (SIGQUIT) as its
-// keystroke — the only detach a foreground daemon can offer, since Ctrl-C and
-// Ctrl-Z are already spoken for.
+// keystroke, which Ctrl-C and Ctrl-Z being spoken for leaves as the only one
+// available.
 //
-// Armed only when stdin is a terminal. A daemon running under a service
-// manager or already detached has no one to press it and keeps Go's default
-// SIGQUIT behavior instead, which dumps every goroutine's stack — exactly
-// what you want from a daemon that has stopped responding.
-func newDetachHandoff(cancel context.CancelFunc, log *zap.Logger) *detachHandoff {
-	d := &detachHandoff{cancel: cancel, armed: term.IsTerminal(int(os.Stdin.Fd()))}
-	if !d.armed {
+// Armed only when foreground says a terminal can take this daemon down. A
+// daemon under a service manager keeps Go's SIGQUIT behavior, which dumps
+// every goroutine's stack — what you want from a daemon that has stopped
+// responding.
+func newDetachHandoff(cancel context.CancelFunc, log *zap.Logger, foreground bool) *detachHandoff {
+	d := &detachHandoff{cancel: cancel, foreground: foreground}
+	if !d.foreground {
 		return d
 	}
 	ch := make(chan os.Signal, 1)
@@ -164,34 +167,33 @@ func newDetachHandoff(cancel context.CancelFunc, log *zap.Logger) *detachHandoff
 // respawnDetached leaves a background daemon behind and returns the terminal
 // to whoever asked for the detach. Reached only after run has returned, so
 // nothing the replacement needs is still held.
+//
+// It waits for the replacement to answer before reporting success: a daemon
+// that dies on startup would otherwise be announced as detached on a terminal
+// that is about to stop showing its output.
 func respawnDetached(cfg *config.Config, configPath string, port int, log *zap.Logger) {
 	dataDir, err := resolveDataDir(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dicode: detach failed, daemon is now stopped: %v\n", err)
-		os.Exit(1)
+		detachFailed(err)
 	}
 	logPath := filepath.Join(dataDir, LogFileName)
-	pid, err := SpawnDetached(absConfigPath(configPath), port, logPath)
+	if _, err := SpawnDetached(configPath, port, logPath); err != nil {
+		detachFailed(err)
+	}
+	pid, err := WaitDaemonUp(ipc.ControlSocketIn(dataDir))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dicode: detach failed, daemon is now stopped: %v\n", err)
-		os.Exit(1)
+		detachFailed(fmt.Errorf("%w (check %s)", err, logPath))
 	}
 	log.Info("daemon detached", zap.Int("pid", pid), zap.String("log", logPath))
-	fmt.Printf("dicode: daemon detached — pid %d, output → %s\n", pid, logPath)
-	fmt.Printf("dicode: stop it with `kill %d`\n", pid)
+	PrintDetachedNotice(os.Stdout, pid, logPath)
 }
 
-// absConfigPath resolves configPath against the current directory. A detached
-// daemon is handed the path on its command line and may be started from
-// somewhere else entirely, so a relative one would resolve against the wrong
-// tree. An unresolvable path is passed through for the daemon to complain
-// about in its own terms.
-func absConfigPath(configPath string) string {
-	abs, err := filepath.Abs(configPath)
-	if err != nil {
-		return configPath
-	}
-	return abs
+// detachFailed reports a handoff that left no daemon behind and exits. The
+// caller is past the point of shutting down, so there is nothing to fall back
+// to.
+func detachFailed(err error) {
+	fmt.Fprintf(os.Stderr, "dicode: detach failed, daemon is now stopped: %v\n", err)
+	os.Exit(1)
 }
 
 // hasDisplay is a best-effort detector for whether a GUI is reachable.
@@ -413,7 +415,7 @@ func run(ctx context.Context, detach *detachHandoff, cfg *config.Config, configP
 	// CLI follow the handover and reuse the config this process was started
 	// with.
 	ctrlSrv.SetDetach(detach.request)
-	ctrlSrv.SetDaemonProcess(os.Getpid(), absConfigPath(configPath), detach.armed)
+	ctrlSrv.SetDaemonProcess(os.Getpid(), detach.foreground)
 
 	wireCryptoIPC(secretsChain, denoRT, log)
 
@@ -1042,8 +1044,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 // capabilities: API-key minting, the approval-gate test/approve surfaces, AI
 // task authoring, and task deletion (step 9).
 func buildControlServer(cfg *config.Config, dataDir, version string, database db.DB, reg *registry.Registry, rec *registry.Reconciler, eng *trigger.Engine, localSecrets secrets.Manager, srv *webui.Server, sourceMgr *webui.SourceManager, approvalGate *approval.Gate, log *zap.Logger) (*ipc.ControlServer, error) {
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	tokenPath := filepath.Join(dataDir, "daemon.token")
+	sock := ipc.ControlSocketIn(dataDir)
 	mp := ipc.MetricsProvider{
 		ReadDaemon: func() (float64, float64, int, *int64) {
 			dm := metrics.ReadDaemonMetrics()
@@ -1055,7 +1056,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task, cfg.AI.CreateTask)
+	ctrlSrv, err := ipc.NewControlServer(sock.Path, sock.TokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task, cfg.AI.CreateTask)
 	if err != nil {
 		return nil, fmt.Errorf("build control server: %w", err)
 	}

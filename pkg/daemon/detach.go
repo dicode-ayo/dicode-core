@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
+
+	"github.com/dicode/dicode/pkg/ipc"
 )
 
 // LogFileName is the file inside the data directory that a detached daemon
@@ -14,19 +18,23 @@ import (
 // pkg/webui prints once and then keeps only as a bcrypt hash.
 const LogFileName = "daemon.log"
 
+// startTimeout bounds the wait for a freshly spawned daemon to claim the
+// control socket.
+const startTimeout = 15 * time.Second
+
 // SpawnDetached starts a fresh `dicode daemon` in its own session and returns
-// its pid, with output appended to logPath. An empty logPath discards the
-// output — a last resort, since it throws away both the startup diagnostics
-// and a first run's dashboard passphrase.
+// its pid, with output appended to logPath. Pass os.DevNull to discard the
+// output, losing the startup diagnostics and any first-run passphrase with it.
 //
 // The child has no controlling terminal, so closing the terminal that spawned
 // it no longer takes it down — the daemon treats SIGHUP as shutdown, which a
 // child left in the terminal's session would receive. configPath and port are
-// forwarded as the flags `dicode daemon` itself takes; port is omitted when
-// zero, leaving the config's own value in force.
+// forwarded as the flags `dicode daemon` itself takes; a zero port leaves the
+// config's own value in force. configPath is resolved against the current
+// directory, since the child may be started from somewhere else entirely.
 //
-// The caller must not wait on the returned pid: the process is deliberately
-// outliving it and is reparented to init once the caller exits.
+// The caller must not wait on the returned pid: the process outlives it and is
+// reparented to init, which reaps it.
 func SpawnDetached(configPath string, port int, logPath string) (int, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -34,37 +42,70 @@ func SpawnDetached(configPath string, port int, logPath string) (int, error) {
 	}
 	// 0o700/0o600 because of the first-run passphrase in the captured output.
 	// MkdirAll because on a first run nothing has created the data dir yet.
-	var logFile *os.File
-	if logPath != "" {
-		if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-			return 0, fmt.Errorf("create %s: %w", filepath.Dir(logPath), err)
-		}
-		logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return 0, fmt.Errorf("open %s: %w", logPath, err)
-		}
-		defer logFile.Close()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return 0, fmt.Errorf("create %s: %w", filepath.Dir(logPath), err)
 	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", logPath, err)
+	}
+	defer logFile.Close()
 
-	args := []string{"daemon"}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
-	}
+	args := []string{"daemon", "--config", absConfigPath(configPath)}
 	if port != 0 {
 		args = append(args, "--port", strconv.Itoa(port))
 	}
 	cmd := exec.Command(self, args...) // #nosec G204 — self is our own executable, args are typed flags.
 	cmd.Stdin = nil
-	if logFile != nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.SysProcAttr = detachSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start daemon: %w", err)
 	}
 	pid := cmd.Process.Pid
-	// Release, not Wait: nothing here will be alive to reap the child.
 	_ = cmd.Process.Release()
 	return pid, nil
+}
+
+// absConfigPath resolves configPath against the current directory, passing an
+// unresolvable one through for the daemon to complain about in its own terms.
+func absConfigPath(configPath string) string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return configPath
+	}
+	return abs
+}
+
+// PrintDetachedNotice writes what an operator needs after a daemon goes into
+// the background: the pid to stop it by, and the log that now holds the
+// output their terminal would have shown — including a first run's dashboard
+// passphrase, which is printed once and thereafter kept only as a hash.
+//
+// Both the CLI and a daemon handing itself over print this, into different
+// terminals.
+func PrintDetachedNotice(w io.Writer, pid int, logPath string) {
+	fmt.Fprintf(w, "dicode: daemon detached — pid %d\n", pid)
+	fmt.Fprintf(w, "dicode: output → %s\n", logPath)
+	fmt.Fprintf(w, "dicode: stop it with `kill %d`\n", pid)
+}
+
+// PingInterval is how often the control socket is probed while waiting for a
+// daemon to appear or to hand over.
+const PingInterval = 200 * time.Millisecond
+
+// WaitDaemonUp blocks until a daemon answers on the control socket and
+// returns its pid, or gives up once a cold start's worth of time has passed.
+func WaitDaemonUp(sock ipc.ControlSocket) (int, error) {
+	deadline := time.Now().Add(startTimeout)
+	for {
+		if status, err := sock.Ping(); err == nil {
+			return status.PID, nil
+		}
+		if !time.Now().Before(deadline) {
+			return 0, fmt.Errorf("no daemon answered within %s", startTimeout)
+		}
+		time.Sleep(PingInterval)
+	}
 }

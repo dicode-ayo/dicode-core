@@ -45,19 +45,3 @@ func TestCliDataDirFor_EnvStillOutranksConfig(t *testing.T) {
 		t.Errorf("cliDataDirFor() = %q; want /data", got)
 	}
 }
-
-// TestAbsPath_ResolvesRelative: a detached daemon is handed its config path on
-// the command line and may be started from a different directory, so the path
-// must not be left relative.
-func TestAbsPath_ResolvesRelative(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	got := absPath("dicode.yaml")
-	if !filepath.IsAbs(got) {
-		t.Fatalf("absPath(%q) = %q, want an absolute path", "dicode.yaml", got)
-	}
-	if want := filepath.Join(dir, "dicode.yaml"); got != want {
-		t.Errorf("absPath() = %q; want %q", got, want)
-	}
-}

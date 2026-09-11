@@ -45,7 +45,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,7 +135,7 @@ func main() {
 	// It must be handled before ensureDaemon — the daemon IS the daemon.
 	if os.Args[1] == "daemon" {
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-		configPath := fs.String("config", "dicode.yaml", "path to config file")
+		configPath := fs.String("config", defaultConfigPath, "path to config file")
 		port := fs.Int("port", 0, "HTTP port (0 = use default 8080 or whatever the wizard picks)")
 		detach := fs.Bool("detach", false, "run the daemon in the background and return the terminal; hands an already-running daemon over to a background one")
 		fs.BoolVar(detach, "d", false, "shorthand for --detach")
@@ -152,16 +151,14 @@ func main() {
 		return
 	}
 
-	dataDir := cliDataDir()
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	tokenPath := filepath.Join(dataDir, "daemon.token")
+	paths := daemonPathsFor(defaultConfigPath)
 
-	if err := ensureDaemon(socketPath); err != nil {
+	if err := ensureDaemon(paths); err != nil {
 		fmt.Fprintf(os.Stderr, "dicode: could not start daemon: %v\n", err)
 		os.Exit(1)
 	}
 
-	c, err := ipc.Dial(socketPath, tokenPath)
+	c, err := paths.sock.Dial()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dicode: connect to daemon: %v\n", err)
 		os.Exit(1)
@@ -1573,53 +1570,37 @@ func waitDaemonReady(c *ipc.ControlClient, timeout time.Duration) error {
 
 // ensureDaemon starts the daemon in the background if the socket is not reachable.
 // It re-execs the current binary with the "daemon" subcommand.
-func ensureDaemon(socketPath string) error {
-	if isDaemonRunning(socketPath) {
+func ensureDaemon(paths daemonPaths) error {
+	if paths.sock.Reachable() {
 		return nil
 	}
 	// Remove a stale socket file so the new daemon can bind cleanly.
-	_ = os.Remove(socketPath)
+	_ = os.Remove(paths.sock.Path)
 
 	// Capture the background daemon's stdout+stderr to dataDir/daemon.log:
 	// it is the only record of startup failures, and of the first-run
 	// dashboard passphrase, which pkg/webui's ensurePassphrase prints once
 	// and then keeps only as a bcrypt hash.
-	logPath := filepath.Join(filepath.Dir(socketPath), "daemon.log")
-	if _, err := daemon.SpawnDetached("", 0, logPath); err != nil {
+	if _, err := daemon.SpawnDetached(defaultConfigPath, 0, paths.logPath); err != nil {
 		// An unusable log is no reason to leave the user without a daemon,
 		// but it does cost them a first run's passphrase, so say so.
 		fmt.Fprintf(os.Stderr, "dicode: starting the background daemon without capturing "+
 			"its output (%v) — any first-run dashboard passphrase is lost with it; start "+
 			"it with `dicode daemon` in the foreground instead, or recover with "+
 			"`dicode auth reset-passphrase`\n", err)
-		if _, err := daemon.SpawnDetached("", 0, ""); err != nil {
+		if _, err := daemon.SpawnDetached(defaultConfigPath, 0, os.DevNull); err != nil {
 			return err
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "dicode: starting the daemon in the background; its output — "+
 			"including the first-run dashboard passphrase, which is shown only once — "+
-			"is written to %s\n", logPath)
+			"is written to %s\n", paths.logPath)
 	}
 
-	// Poll until the socket is live (up to 8 seconds).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if isDaemonRunning(socketPath) {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
+	if _, err := daemon.WaitDaemonUp(paths.sock); err != nil {
+		return fmt.Errorf("%w (check %s)", err, paths.logPath)
 	}
-	return fmt.Errorf("daemon did not start within 8 seconds (check %s)", logPath)
-}
-
-// isDaemonRunning returns true if the socket exists and accepts connections.
-func isDaemonRunning(socketPath string) bool {
-	conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
+	return nil
 }
 
 // cliDataDir resolves the directory holding the control socket, its token,
@@ -1645,15 +1626,6 @@ func isDaemonRunning(socketPath string) bool {
 // wherever the process happens to be standing, whereas the env var is someone
 // stating which daemon they mean — including callers who run the CLI from an
 // unrelated directory that has a dicode.yaml of its own.
-func cliDataDir() string {
-	// "dicode.yaml" matches `dicode daemon`'s own default.
-	return cliDataDirFor("dicode.yaml")
-}
-
-// cliDataDirFor is cliDataDir against a caller-chosen config path, for the one
-// command that takes `--config` before a daemon exists to ask: the socket
-// `dicode daemon --detach` acts on is the one belonging to the config it was
-// handed, not to whatever dicode.yaml the working directory happens to hold.
 func cliDataDirFor(configPath string) string {
 	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
 		return d

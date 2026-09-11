@@ -11,85 +11,106 @@ import (
 	"github.com/dicode/dicode/pkg/ipc"
 )
 
-// detachHandoffTimeout bounds the wait for a running daemon to hand over to
-// its detached replacement. It covers a full graceful shutdown — in-flight
-// task runs are canceled and their logs flushed first — plus the
-// replacement's startup, so it is far more generous than a cold start alone.
-const detachHandoffTimeout = 45 * time.Second
+// defaultConfigPath is where every dicode command looks for its config when
+// none is named — the daemon's own flag default, which is what makes an
+// auto-started daemon and the CLI that started it agree on one config.
+const defaultConfigPath = "dicode.yaml"
+
+const (
+	// detachHandoverTimeout bounds a whole handover. It covers a graceful
+	// shutdown — in-flight runs are canceled and their logs flushed first —
+	// as well as the replacement's startup.
+	detachHandoverTimeout = 45 * time.Second
+
+	// detachGraceWindow is how long the replacement has to claim the socket
+	// after the outgoing daemon is gone. Past that, nothing is coming and
+	// waiting out detachHandoverTimeout only delays the bad news.
+	detachGraceWindow = 10 * time.Second
+)
+
+// daemonPaths is everything the CLI needs to reach one daemon: its control
+// socket and the log a detached one writes to. Both derive from the data
+// directory the config names, so they are resolved together.
+type daemonPaths struct {
+	sock    ipc.ControlSocket
+	logPath string
+}
+
+func daemonPathsFor(configPath string) daemonPaths {
+	dataDir := cliDataDirFor(configPath)
+	return daemonPaths{
+		sock:    ipc.ControlSocketIn(dataDir),
+		logPath: filepath.Join(dataDir, daemon.LogFileName),
+	}
+}
 
 // cmdDaemonDetach implements `dicode daemon --detach`: leave a daemon running
 // in the background and hand the terminal back.
 //
-// With a daemon already running, the restart is the daemon's own job rather
-// than ours: it is the only process that can release the control socket, the
-// HTTP port and the database before its replacement wants them. We ask for
-// the handoff over the control socket and wait for a different pid to answer.
+// With a daemon already running, the restart is the daemon's own job: it is
+// the only process that can release the control socket, the HTTP port and the
+// database before its replacement wants them. We ask for the handoff over the
+// control socket and wait for a different pid to answer.
 func cmdDaemonDetach(configPath string, port int) error {
-	dataDir := cliDataDirFor(configPath)
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	tokenPath := filepath.Join(dataDir, "daemon.token")
-	logPath := filepath.Join(dataDir, daemon.LogFileName)
+	paths := daemonPathsFor(configPath)
 
-	if !isDaemonRunning(socketPath) {
+	if !paths.sock.Reachable() {
 		// A socket file left behind by a daemon that died hard would stop the
 		// new one binding.
-		_ = os.Remove(socketPath)
-		return startDetached(configPath, port, socketPath, tokenPath, logPath)
+		_ = os.Remove(paths.sock.Path)
+		return startDetached(configPath, port, paths)
 	}
 
-	status, err := daemonPing(socketPath, tokenPath)
+	status, err := paths.sock.Ping()
 	if err != nil {
 		return err
 	}
 	if !status.Foreground {
 		fmt.Printf("dicode: daemon already running in the background (pid %d); nothing to detach\n", status.PID)
-		fmt.Printf("dicode: its output → %s\n", logPath)
+		fmt.Printf("dicode: its output → %s\n", paths.logPath)
 		return nil
 	}
+	if port != 0 {
+		// The replacement inherits the running daemon's configuration whole;
+		// --port only ever seeds a first run's onboarding.
+		fmt.Fprintf(os.Stderr, "dicode: ignoring --port %d — the detached daemon keeps the "+
+			"running daemon's config; change server.port and restart to move it\n", port)
+	}
 
-	oldPID, err := requestDetach(socketPath, tokenPath)
+	outgoing, err := requestDetach(paths.sock)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("dicode: asked the running daemon (pid %d) to hand over; waiting for it to stand down\n", oldPID)
+	fmt.Printf("dicode: asked the running daemon (pid %d) to hand over; waiting for it to stand down\n", outgoing)
 
-	newPID, err := waitDaemonHandoff(socketPath, tokenPath, oldPID, detachHandoffTimeout)
+	pid, err := waitDaemonHandover(paths.sock, outgoing, detachHandoverTimeout)
 	if err != nil {
-		return fmt.Errorf("%w (the daemon may be down — check %s)", err, logPath)
+		return fmt.Errorf("%w (check %s)", err, paths.logPath)
 	}
-	printDetached(newPID, logPath)
+	daemon.PrintDetachedNotice(os.Stdout, pid, paths.logPath)
 	return nil
 }
 
 // startDetached spawns a daemon directly, for the case where none is running.
-// The pid reported is the one that answered on the socket rather than the one
-// we spawned: they are the same process unless the spawn died on startup, and
-// then the answering daemon is the one the user cares about.
-func startDetached(configPath string, port int, socketPath, tokenPath, logPath string) error {
-	if _, err := daemon.SpawnDetached(absPath(configPath), port, logPath); err != nil {
+// The pid reported is the one that answered on the socket: it is the process
+// we spawned unless that one died on startup, and then the answering daemon is
+// the one the user cares about.
+func startDetached(configPath string, port int, paths daemonPaths) error {
+	if _, err := daemon.SpawnDetached(configPath, port, paths.logPath); err != nil {
 		return err
 	}
-	pid, err := waitDaemonHandoff(socketPath, tokenPath, 0, detachHandoffTimeout)
+	pid, err := daemon.WaitDaemonUp(paths.sock)
 	if err != nil {
-		return fmt.Errorf("%w (check %s)", err, logPath)
+		return fmt.Errorf("%w (check %s)", err, paths.logPath)
 	}
-	printDetached(pid, logPath)
+	daemon.PrintDetachedNotice(os.Stdout, pid, paths.logPath)
 	return nil
-}
-
-func printDetached(pid int, logPath string) {
-	fmt.Printf("dicode: daemon detached — pid %d\n", pid)
-	// The log is where a background daemon's startup errors land, and where a
-	// first run prints the dashboard passphrase, which is shown once and then
-	// kept only as a bcrypt hash.
-	fmt.Printf("dicode: output → %s\n", logPath)
-	fmt.Printf("dicode: stop it with `kill %d`\n", pid)
 }
 
 // requestDetach asks the running daemon to restart itself detached, returning
 // the pid it is about to give up.
-func requestDetach(socketPath, tokenPath string) (int, error) {
-	c, err := ipc.Dial(socketPath, tokenPath)
+func requestDetach(sock ipc.ControlSocket) (int, error) {
+	c, err := sock.Dial()
 	if err != nil {
 		return 0, fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -112,57 +133,31 @@ func requestDetach(socketPath, tokenPath string) (int, error) {
 	return r.PID, nil
 }
 
-// waitDaemonHandoff blocks until a daemon whose pid is not oldPID answers on
-// the control socket, and returns that pid. Pass 0 as oldPID to wait for any
-// daemon.
+// waitDaemonHandover blocks until a daemon other than the outgoing one answers
+// on the control socket, and returns its pid.
 //
-// The pid is what makes the wait reliable: the outgoing daemon keeps
-// answering until its listener closes, and the replacement may claim the
-// socket within the same polling interval, so "the socket went away" is a
-// state a caller can easily never observe.
-func waitDaemonHandoff(socketPath, tokenPath string, oldPID int, timeout time.Duration) (int, error) {
+// The pid is what makes the wait reliable: the outgoing daemon keeps answering
+// until its listener closes and the replacement can claim the socket within
+// one polling interval, so an absent socket is a state the caller may never
+// observe. Watching the outgoing process is what separates a slow handover
+// from one that is never completing.
+func waitDaemonHandover(sock ipc.ControlSocket, outgoing int, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
+	var graceDeadline time.Time
 	for {
-		if status, err := daemonPing(socketPath, tokenPath); err == nil && status.PID != oldPID {
+		if status, err := sock.Ping(); err == nil && status.PID != outgoing {
 			return status.PID, nil
+		}
+		switch {
+		case daemon.ProcessAlive(outgoing):
+		case graceDeadline.IsZero():
+			graceDeadline = time.Now().Add(detachGraceWindow)
+		case time.Now().After(graceDeadline):
+			return 0, fmt.Errorf("the daemon (pid %d) exited without leaving a replacement", outgoing)
 		}
 		if !time.Now().Before(deadline) {
 			return 0, fmt.Errorf("no detached daemon answered within %s", timeout)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(daemon.PingInterval)
 	}
-}
-
-// daemonPing reads the running daemon's status off the control socket.
-func daemonPing(socketPath, tokenPath string) (ipc.DaemonStatus, error) {
-	c, err := ipc.Dial(socketPath, tokenPath)
-	if err != nil {
-		return ipc.DaemonStatus{}, fmt.Errorf("connect to daemon: %w", err)
-	}
-	defer c.Close()
-
-	resp, err := c.Send(ipc.Request{Method: "cli.ping"})
-	if err != nil {
-		return ipc.DaemonStatus{}, fmt.Errorf("query daemon: %w", err)
-	}
-	if resp.Error != "" {
-		return ipc.DaemonStatus{}, fmt.Errorf("query daemon: %s", resp.Error)
-	}
-	var status ipc.DaemonStatus
-	if err := remarshal(resp.Result, &status); err != nil {
-		return ipc.DaemonStatus{}, fmt.Errorf("decode daemon status: %w", err)
-	}
-	return status, nil
-}
-
-// absPath resolves a path against the current directory, passing an
-// unresolvable one through for the daemon to complain about in its own terms.
-// A detached daemon is handed its config path on the command line and may be
-// started from somewhere else entirely.
-func absPath(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	return abs
 }
