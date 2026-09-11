@@ -87,6 +87,21 @@ type ControlServer struct {
 	// ready, preserving pre-barrier behaviour.
 	ready <-chan struct{}
 
+	// detach backs cli.daemon.detach: it stands the daemon down and brings it
+	// back in its own session. Wired via SetDetach; nil (tests, or a control
+	// server built outside the daemon) refuses the verb rather than
+	// acknowledging a handoff that will never happen.
+	detach func()
+
+	// pid, configPath and foreground describe the daemon process itself,
+	// wired via SetDaemonProcess. cli.ping reports all three so a detaching
+	// CLI can tell the replacement apart from the process it replaced and
+	// skip the handoff entirely for a daemon already in the background.
+	// configPath is absolute.
+	pid        int
+	configPath string
+	foreground bool
+
 	// sessionEditLocks serializes handleTaskEdit's read(EditTask)-fire-write
 	// (UpdateAgentSessionID) sequence per authoring session, so two
 	// concurrent `dicode task edit` calls against the SAME open session
@@ -295,6 +310,14 @@ func (cs *ControlServer) handleConn(ctx context.Context, conn net.Conn) {
 		if err := writeMsg(conn, resp); err != nil {
 			return
 		}
+		// cli.daemon.detach is acknowledged before it takes effect. The
+		// handoff tears this listener down, so starting it from inside
+		// dispatch would race the reply the caller is blocked on and surface
+		// as a dropped connection rather than an ack.
+		if req.Method == MethodDaemonDetach && resp.Error == "" {
+			cs.detach()
+			return
+		}
 	}
 }
 
@@ -380,6 +403,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.api_keys.revoke_by_name":
 		return nil, cs.handleAPIKeyRevokeByName(ctx, req)
+
+	case MethodDaemonDetach:
+		return cs.handleDaemonDetach()
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
@@ -824,6 +850,19 @@ func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) (any, er
 // without a reconciler) means always ready.
 func (cs *ControlServer) SetReadySignal(ch <-chan struct{}) { cs.ready = ch }
 
+// SetDetach wires the daemon's terminal handoff so cli.daemon.detach can
+// trigger it. Leaving it unset refuses the verb. Must be called before Start.
+func (cs *ControlServer) SetDetach(fn func()) { cs.detach = fn }
+
+// SetDaemonProcess records what cli.ping reports about the daemon process:
+// its pid, the absolute path of the config it was started with, and whether
+// it still holds a controlling terminal. Must be called before Start.
+func (cs *ControlServer) SetDaemonProcess(pid int, configPath string, foreground bool) {
+	cs.pid = pid
+	cs.configPath = configPath
+	cs.foreground = foreground
+}
+
 // isReady is a non-blocking readiness probe.
 func (cs *ControlServer) isReady() bool {
 	if cs.ready == nil {
@@ -868,11 +907,24 @@ func (cs *ControlServer) handleReady(ctx context.Context, req Request) (ReadyRes
 func (cs *ControlServer) handlePing() DaemonStatus {
 	all := cs.reg.All()
 	return DaemonStatus{
-		Version:   cs.version,
-		UptimeSec: int64(time.Since(cs.startedAt).Seconds()),
-		TaskCount: len(all),
-		Ready:     cs.isReady(),
+		Version:    cs.version,
+		UptimeSec:  int64(time.Since(cs.startedAt).Seconds()),
+		TaskCount:  len(all),
+		Ready:      cs.isReady(),
+		PID:        cs.pid,
+		ConfigPath: cs.configPath,
+		Foreground: cs.foreground,
 	}
+}
+
+// handleDaemonDetach acknowledges a detach request; handleConn starts the
+// handoff once the ack is on the wire. The pid identifies the outgoing
+// process so the caller can tell the replacement apart from it.
+func (cs *ControlServer) handleDaemonDetach() (DaemonDetachResult, error) {
+	if cs.detach == nil {
+		return DaemonDetachResult{}, errors.New("this daemon cannot detach itself (no handoff wired)")
+	}
+	return DaemonDetachResult{PID: cs.pid}, nil
 }
 
 func (cs *ControlServer) handleList() ([]TaskSummary, error) {

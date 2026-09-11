@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -100,9 +101,97 @@ func Run(configPath string, portOverride int, version string) {
 
 	logger.Info("dicode daemon starting", zap.String("version", version))
 
-	if err := run(ctx, cancel, cfg, configPath, version, logBroadcaster, logger); err != nil {
+	detach := newDetachHandoff(cancel, logger)
+
+	if err := run(ctx, detach, cfg, configPath, version, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode daemon exited with error", zap.Error(err))
 	}
+
+	// A detach is a handoff, not a shutdown: run has returned, so the socket,
+	// the HTTP port and the database are all released and the replacement can
+	// take them straight over.
+	if detach.requested.Load() {
+		respawnDetached(cfg, configPath, portOverride, logger)
+	}
+}
+
+// detachHandoff carries the "stand down and come back in the background"
+// request that both Ctrl-\ and cli.daemon.detach raise. A process the shell
+// is already waiting on cannot escape it, so detaching means exiting and
+// leaving a replacement behind; the flag is what tells Run which of the two
+// reasons its context was canceled for.
+type detachHandoff struct {
+	requested atomic.Bool
+	cancel    context.CancelFunc
+
+	// armed records that this daemon has a controlling terminal — the same
+	// condition that decides whether Ctrl-\ means detach, and what cli.ping
+	// reports so `dicode daemon --detach` leaves an already-backgrounded
+	// daemon alone instead of restarting it for nothing.
+	armed bool
+}
+
+// request triggers the handoff. Safe to call more than once, and from any
+// goroutine: the second caller finds the daemon already shutting down.
+func (d *detachHandoff) request() {
+	d.requested.Store(true)
+	d.cancel()
+}
+
+// newDetachHandoff builds the handoff and arms Ctrl-\ (SIGQUIT) as its
+// keystroke — the only detach a foreground daemon can offer, since Ctrl-C and
+// Ctrl-Z are already spoken for.
+//
+// Armed only when stdin is a terminal. A daemon running under a service
+// manager or already detached has no one to press it and keeps Go's default
+// SIGQUIT behavior instead, which dumps every goroutine's stack — exactly
+// what you want from a daemon that has stopped responding.
+func newDetachHandoff(cancel context.CancelFunc, log *zap.Logger) *detachHandoff {
+	d := &detachHandoff{cancel: cancel, armed: term.IsTerminal(int(os.Stdin.Fd()))}
+	if !d.armed {
+		return d
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGQUIT)
+	go func() {
+		<-ch
+		log.Info("detaching: shutting down, then restarting in the background")
+		d.request()
+	}()
+	return d
+}
+
+// respawnDetached leaves a background daemon behind and returns the terminal
+// to whoever asked for the detach. Reached only after run has returned, so
+// nothing the replacement needs is still held.
+func respawnDetached(cfg *config.Config, configPath string, port int, log *zap.Logger) {
+	dataDir, err := resolveDataDir(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dicode: detach failed, daemon is now stopped: %v\n", err)
+		os.Exit(1)
+	}
+	logPath := filepath.Join(dataDir, LogFileName)
+	pid, err := SpawnDetached(absConfigPath(configPath), port, logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dicode: detach failed, daemon is now stopped: %v\n", err)
+		os.Exit(1)
+	}
+	log.Info("daemon detached", zap.Int("pid", pid), zap.String("log", logPath))
+	fmt.Printf("dicode: daemon detached — pid %d, output → %s\n", pid, logPath)
+	fmt.Printf("dicode: stop it with `kill %d`\n", pid)
+}
+
+// absConfigPath resolves configPath against the current directory. A detached
+// daemon is handed the path on its command line and may be started from
+// somewhere else entirely, so a relative one would resolve against the wrong
+// tree. An unresolvable path is passed through for the daemon to complain
+// about in its own terms.
+func absConfigPath(configPath string) string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return configPath
+	}
+	return abs
 }
 
 // hasDisplay is a best-effort detector for whether a GUI is reachable.
@@ -242,7 +331,7 @@ func hasDisplay() bool {
 	}
 }
 
-func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+func run(ctx context.Context, detach *detachHandoff, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 0. Install the operator-trusted git-remote allowlist (#537) before any
 	// source is polled, so both SSRF guard layers honour it from the first
 	// clone. Already validated in config.Load; the error path is defensive.
@@ -318,6 +407,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return err
 	}
+	// The terminal handoff: `dicode daemon --detach` against this daemon, and
+	// Ctrl-\ in a foreground one, both stand it down and bring it back
+	// without a controlling terminal. The pid and config path let a detaching
+	// CLI follow the handover and reuse the config this process was started
+	// with.
+	ctrlSrv.SetDetach(detach.request)
+	ctrlSrv.SetDaemonProcess(os.Getpid(), absConfigPath(configPath), detach.armed)
+
 	wireCryptoIPC(secretsChain, denoRT, log)
 
 	// 9.5. Audit-log retention (#45).

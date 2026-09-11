@@ -282,7 +282,30 @@ type DaemonStatus struct {
 	// are meaningful (#464). Point-in-time snapshot; cli.ready is the
 	// blocking wait.
 	Ready bool `json:"ready"`
+	// PID and ConfigPath identify the daemon process and the config it was
+	// started with, which is how `dicode daemon --detach` tells a detached
+	// replacement apart from the process it replaced. Both are omitted by a
+	// daemon predating them; a zero PID means "not reported", not pid 0.
+	PID        int    `json:"pid,omitempty"`
+	ConfigPath string `json:"configPath,omitempty"`
+	// Foreground reports that the daemon still has a controlling terminal, so
+	// it dies with that terminal and is worth detaching. False also covers a
+	// daemon predating the field.
+	Foreground bool `json:"foreground,omitempty"`
 }
+
+// DaemonDetachResult is the cli.daemon.detach response, written before the
+// handoff starts. PID is the outgoing process, so a caller watching the
+// handover waits for a pid other than this one to answer.
+type DaemonDetachResult struct {
+	PID int `json:"pid,omitempty"`
+}
+
+// MethodDaemonDetach asks the daemon to shut down and respawn itself detached
+// from its controlling terminal. Named because both the dispatch switch and
+// the connection loop (which starts the handoff only after the ack is
+// written) match on it.
+const MethodDaemonDetach = "cli.daemon.detach"
 
 // ReadyResult is the cli.ready response. Ready is false when the daemon's
 // first task sync had not completed within the requested wait window.
