@@ -1347,9 +1347,10 @@ func serveLoginFile(name, contentType string) http.HandlerFunc {
 	}
 }
 
-// apiLoginContext returns JSON with the contextual page title and whether a
-// real passphrase gates this login. The static login page fetches this via a
-// short JS snippet to avoid server-side HTML rendering.
+// apiLoginContext returns JSON with the contextual page title, an optional
+// subtitle (the target task's description, length-bounded — #853), and
+// whether a real passphrase gates this login. The static login page fetches
+// this via a short JS snippet to avoid server-side HTML rendering.
 //
 // passphrase_required is false only when passphraseSource() reports "none" —
 // in practice that means server.auth is false, since ensurePassphrase (called
@@ -1367,8 +1368,10 @@ func (s *Server) apiLoginContext(w http.ResponseWriter, r *http.Request) {
 	if next != "" && !isSafeNextPath(next) {
 		next = ""
 	}
+	heading := s.loginTitle(next)
 	jsonOK(w, map[string]any{
-		"title":               s.loginTitle(next),
+		"title":               heading.Title,
+		"subtitle":            heading.Subtitle,
 		"passphrase_required": s.passphraseSource(r.Context()) != passphraseSourceNone,
 	})
 }
@@ -1463,23 +1466,39 @@ func setLoginPageHeaders(w http.ResponseWriter) {
 	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 }
 
-func (s *Server) loginTitle(next string) string {
+// loginSubtitleMaxLen bounds the task description shown as a login-page
+// subtitle. description is free-form and unbounded — buildin tasks routinely
+// carry a paragraph — so without a cap it can push the credential form off a
+// narrow viewport (#853).
+const loginSubtitleMaxLen = 120
+
+// loginHeading is the short heading (used for both <title> and the <h1>) and
+// an optional, length-bounded subtitle for the login page. Keeping the
+// heading short matters beyond the page itself: it also becomes a windowed
+// task's WM_NAME (#852), which a paragraph-length string makes useless in a
+// taskbar or alt-tab list.
+type loginHeading struct {
+	Title    string
+	Subtitle string
+}
+
+func (s *Server) loginTitle(next string) loginHeading {
 	if next == "" {
-		return "Sign in to dicode"
+		return loginHeading{Title: "Sign in to dicode"}
 	}
 	path := next
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
 	if !strings.HasPrefix(path, webhookPathPrefix) {
-		return "Sign in to dicode"
+		return loginHeading{Title: "Sign in to dicode"}
 	}
 	slug := strings.TrimPrefix(path, webhookPathPrefix)
 	if i := strings.Index(slug, "/"); i >= 0 {
 		slug = slug[:i]
 	}
 	if slug == "" {
-		return "Sign in to dicode"
+		return loginHeading{Title: "Sign in to dicode"}
 	}
 	for _, spec := range s.registry.All() {
 		wp := spec.Trigger.Webhook
@@ -1491,13 +1510,37 @@ func (s *Server) loginTitle(next string) string {
 			if label == "" {
 				label = spec.ID
 			}
-			if spec.Description != "" {
-				return "Sign in to " + label + " — " + spec.Description
+			return loginHeading{
+				Title:    "Sign in to " + label,
+				Subtitle: truncateLoginSubtitle(spec.Description),
 			}
-			return "Sign in to " + label
 		}
 	}
-	return "Sign in to dicode"
+	return loginHeading{Title: "Sign in to dicode"}
+}
+
+// truncateLoginSubtitle bounds a task description to one short line for the
+// login page subtitle (#853), cutting on a word boundary where possible
+// rather than mid-word. Embedded newlines are collapsed first so a
+// multi-paragraph description reads as a single line before it is measured.
+// Truncation counts and slices by rune, not by byte — a byte-offset cut can
+// land in the middle of a multi-byte UTF-8 character (descriptions routinely
+// contain one, e.g. the em dash in this repo's own task descriptions),
+// which would corrupt it into the Unicode replacement character.
+func truncateLoginSubtitle(description string) string {
+	desc := strings.Join(strings.Fields(description), " ")
+	if desc == "" {
+		return ""
+	}
+	runes := []rune(desc)
+	if len(runes) <= loginSubtitleMaxLen {
+		return desc
+	}
+	cut := string(runes[:loginSubtitleMaxLen])
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, ".,;:—-") + "…"
 }
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
