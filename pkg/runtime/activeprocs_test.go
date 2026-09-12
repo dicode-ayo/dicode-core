@@ -25,8 +25,8 @@ func TestTrackProcess_RegistersAndReleases(t *testing.T) {
 	}
 }
 
-// TestTrackProcess_ReleaseIsIdempotent: both runtimes release on every exit
-// path of a retry loop, so a double release must not drop a re-registered PID.
+// TestTrackProcess_ReleaseIsIdempotent: both runtimes release inside a retry
+// loop, so the same release can run more than once for one registration.
 func TestTrackProcess_ReleaseIsIdempotent(t *testing.T) {
 	const pid = 987654322
 	release := TrackProcess(pid)

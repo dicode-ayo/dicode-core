@@ -36,7 +36,7 @@ func MergeParams(specParams []task.Param, overrides map[string]string) map[strin
 // its own after posting its return value before it is signalled.
 const BridgeShutdownGrace = 5 * time.Second
 
-// BridgeKillGrace is how long a signalled subprocess gets to honour SIGTERM
+// BridgeKillGrace is how long a signaled subprocess gets to honor SIGTERM
 // before it is killed. Without a bound, a child that ignores the signal holds
 // the stderr drain open until the run context's deadline — which a task with
 // no configured timeout does not have.
@@ -54,12 +54,11 @@ type Stopper interface {
 // value over IPC or when the subprocess exits, whichever happens first.
 //
 //   - Return first: onReturn is invoked synchronously the moment the value
-//     arrives — before the grace wait — so callers snapshot their result
-//     (return value, IPC output) at the same instant the pre-#388 code did.
-//     The process normally exits shortly after posting /return; it gets
-//     grace to do so, then SIGTERM, then killGrace, then SIGKILL. The exit
-//     status on this path is deliberately ignored — the run already produced
-//     its result.
+//     arrives, before the grace wait, so a caller snapshots its result
+//     (return value, IPC output) at the instant the task produced it. The
+//     process normally exits shortly after posting /return; it gets grace to
+//     do so, then SIGTERM, then killGrace, then SIGKILL. The exit status on
+//     this path is ignored — the run already produced its result.
 //   - Exit first: a return value that raced in just before exit is drained
 //     non-blocking into onReturn, and the process exit error (nil for a
 //     clean exit) is returned with exitedFirst=true.

@@ -11,10 +11,9 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 )
 
-// TestExecute_SubprocessIsTracked: PID tracking used to be Deno-only, so a
-// Python task's subprocess was invisible to the per-child resource metrics and
-// to the daemon's shutdown sweep. The run has to appear in the shared set
-// while it is running, and be gone once it returns.
+// TestExecute_SubprocessIsTracked: the per-child resource metrics and the
+// daemon's shutdown sweep both work off the shared PID set, so a Python run
+// has to appear in it while it is running and be gone once it returns.
 func TestExecute_SubprocessIsTracked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")

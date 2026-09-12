@@ -59,9 +59,9 @@ func BuildFromRunOpts(source string, params map[string]string, input any, web *W
 			in.BodyParts = body.BodyParts
 		}
 	} else if input != nil {
-		// Non-webhook trigger (chain, manual, cron, daemon): preserve the prior
-		// behaviour of storing the parsed input as redacted JSON. No Method/
-		// Path/Headers/Query because there is no HTTP context here.
+		// Non-webhook trigger (chain, manual, cron, daemon): the parsed input is
+		// stored as redacted JSON, with no Method/Path/Headers/Query because
+		// there is no HTTP context here.
 		walked := redactParams(input, "input", &redacted)
 		if raw, err := json.Marshal(walked); err == nil {
 			in.Body = raw
@@ -89,7 +89,7 @@ type Persisted struct {
 	Path           string              `json:"path,omitempty"`            // webhook only
 	Headers        map[string][]string `json:"headers,omitempty"`         // webhook; multi-valued for HTTP fidelity; post-redaction
 	Query          map[string][]string `json:"query,omitempty"`           // webhook; same shape; post-redaction
-	Body           json.RawMessage     `json:"body,omitempty"`            // see body policy in inputredact_body.go (Task 7)
+	Body           json.RawMessage     `json:"body,omitempty"`            // see body policy in redact_body.go
 	BodyKind       string              `json:"body_kind,omitempty"`       // "json" | "form" | "multipart" | "binary" | "text" | "omitted"
 	BodyHash       string              `json:"body_hash,omitempty"`       // sha256 hex; present for omitted/binary/multipart
 	BodyParts      []PartMeta          `json:"body_parts,omitempty"`      // multipart only

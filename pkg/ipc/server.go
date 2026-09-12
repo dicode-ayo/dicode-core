@@ -1662,7 +1662,7 @@ func (s *Server) mcpAllowed(name string) bool {
 // explicitly in their task.yaml and are NOT listed here — they are a
 // different namespace from these daemon-private keys.
 var daemonPrivateCryptoContexts = map[string]bool{
-	"dicode/run-inputs/v1":    true, // pkg/registry/inputcrypto.go
+	"dicode/run-inputs/v1":    true, // pkg/runinput/crypto.go
 	"dicode/approval-lock/v1": true, // pkg/approval/lock.go — lock-signing key
 }
 

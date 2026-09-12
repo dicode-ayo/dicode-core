@@ -91,7 +91,7 @@ func TestAwaitBridgeCompletion_ExitFirst_Error(t *testing.T) {
 		proc,
 	)
 	if terminated, killed := proc.state(); terminated || killed {
-		t.Error("the exit-first path signalled a process that had already exited")
+		t.Error("the exit-first path signaled a process that had already exited")
 	}
 
 	if !exitedFirst {
@@ -160,8 +160,8 @@ func (p *stubProc) state() (terminated, killed bool) {
 }
 
 // TestAwaitBridgeCompletion_HangIgnoresSIGTERM: a child that ignores SIGTERM
-// used to hold the stderr drain open until the run-context deadline expired,
-// however far away that was. A second bounded grace, then SIGKILL, caps it.
+// holds the run's stderr drain open, so the second grace and the SIGKILL that
+// follows it are the only bound on how long the run takes to finish.
 func TestAwaitBridgeCompletion_HangIgnoresSIGTERM(t *testing.T) {
 	returnCh := make(chan any, 1)
 	doneCh := make(chan error, 1) // never receives: the child ignores both

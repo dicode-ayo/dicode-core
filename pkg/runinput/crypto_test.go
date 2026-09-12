@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// newTestInputCrypto returns an Crypto seeded with a fixed 32-byte test
+// newTestInputCrypto returns a Crypto seeded with a fixed 32-byte test
 // key. NEVER used in production.
 func newTestInputCrypto(t *testing.T) *Crypto {
 	t.Helper()

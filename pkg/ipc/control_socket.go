@@ -38,8 +38,11 @@ func (s ControlSocket) Dial() (*ControlClient, error) { return Dial(s.Path, s.To
 
 // Reachable reports whether something accepts connections at the socket. It
 // performs no handshake, so it says nothing about which daemon is listening.
-func (s ControlSocket) Reachable() bool {
-	conn, err := net.DialTimeout("unix", s.Path, 200*time.Millisecond)
+func (s ControlSocket) Reachable() bool { return socketReachable(s.Path) }
+
+// socketReachable is Reachable for a caller holding only the path.
+func socketReachable(path string) bool {
+	conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
 	if err != nil {
 		return false
 	}

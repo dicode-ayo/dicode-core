@@ -23,7 +23,7 @@ func TestResolveDataDir(t *testing.T) {
 		{"home var", "", "${HOME}/state", home, home + "/state"},
 		{"config dir var", "", "${CONFIGDIR}/.dicode", home, configDir + "/.dicode"},
 		// DATADIR is not yet bound while data_dir itself is expanded, so an
-		// unrecognised variable survives verbatim rather than emptying.
+		// unrecognized variable survives verbatim rather than emptying.
 		{"self-referential datadir", "", "${DATADIR}/x", home, "${DATADIR}/x"},
 		{"unknown var", "", "${NOPE}/x", home, "${NOPE}/x"},
 		{"home var with home unset", "", "${HOME}/state", "", "/state"},

@@ -50,7 +50,7 @@ type Store struct {
 	storageTask string
 }
 
-// NewStore constructs an Store. The crypto must be initialised
+// NewStore constructs a Store. The crypto must be initialized
 // with a 32-byte sub-key (typically secrets.LocalProvider.DeriveSubKey
 // "dicode/run-inputs/v1").
 func NewStore(crypto *Crypto, runner TaskRunner, storageTask string) *Store {

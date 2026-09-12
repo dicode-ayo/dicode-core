@@ -201,7 +201,7 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
 
 ### Dedup — reuse, do not rebuild
 
-- **Big-state offload (#570) reuses `registry.InputStore`.** Go already has the exact
+- **Big-state offload (#570) reuses `runinput.Store`.** Go already has the exact
   mechanism: marshal → AES-encrypt (`InputCrypto`) → delegate `{op,key,value}` to a
   config-dialed storage task (`run_inputs.storage_task`, default `buildin/local-storage`),
   reference on the runs row, GC by a cleanup buildin. #570 is a threshold-check on

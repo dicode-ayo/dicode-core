@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // DataDirEnvVar names the environment variable that overrides the configured
 // data directory.
@@ -29,7 +32,7 @@ const DefaultDataDirName = ".dicode"
 // `ENV DICODE_DATA_DIR=/data` redirect state into the mounted volume, both
 // before onboarding has written a config and after it has baked a path in.
 //
-// An unrecognised ${VAR} is left standing rather than emptied: ${DATADIR} is
+// An unrecognized ${VAR} is left standing rather than emptied: ${DATADIR} is
 // not yet bound while data_dir is itself being expanded, and substituting or
 // rejecting one here would point the callers at different directories.
 func ResolveDataDir(raw, configDir, home string) string {
@@ -48,7 +51,7 @@ func ResolveDataDir(raw, configDir, home string) string {
 // expandDataDirVars applies the expansion applyDefaults performs on every path
 // field, restricted to the variables bound at the point data_dir is resolved.
 func expandDataDirVars(value, home, configDir string) string {
-	if len(value) >= 2 && value[:2] == "~/" && home != "" {
+	if strings.HasPrefix(value, "~/") && home != "" {
 		value = home + value[1:]
 	}
 	return expandVars(value, map[string]string{"HOME": home, "CONFIGDIR": configDir})

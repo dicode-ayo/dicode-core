@@ -12,7 +12,7 @@ import (
 const Redacted = "[REDACTED]"
 
 // denyExact is the case-insensitive set of param names whose values are
-// always redacted. pkg/registry/inputredact.go keeps a separate list for the
+// always redacted. pkg/runinput/redact.go keeps a separate list for the
 // persisted run input; the two share the credential names but not the header
 // names, and a credential name added to either belongs in both.
 var denyExact = map[string]struct{}{
@@ -78,7 +78,7 @@ func isSecretRef(v string) bool {
 
 // credentialValuePrefixes catches a credential by its value shape, for field
 // names denyExact/denySubstrings haven't been taught yet — see the mirrored
-// copy and full rationale in pkg/registry/inputredact.go (#810). dcap_ is
+// copy and full rationale in pkg/runinput/redact.go (#810). dcap_ is
 // pkg/approval.tokenPrefix (unexported there); the two packages already
 // mirror deny-list names by hand for the same reason (see the comment on
 // denyExact above).

@@ -208,9 +208,9 @@ func NewControlServer(
 // but refuses one a daemon is still serving: unlinking a live socket does not
 // disconnect the daemon behind it, it just lets this process bind the same
 // path, leaving two daemons on one data directory and the CLI reaching
-// whichever bound last. Run blocks until ctx is cancelled.
+// whichever bound last. Run blocks until ctx is canceled.
 func (cs *ControlServer) Start(ctx context.Context) error {
-	if (ControlSocket{Path: cs.socketPath}).Reachable() {
+	if socketReachable(cs.socketPath) {
 		return fmt.Errorf("control: a daemon is already listening on %s", cs.socketPath)
 	}
 	_ = os.Remove(cs.socketPath)

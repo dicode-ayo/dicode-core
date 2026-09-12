@@ -241,8 +241,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 
 	// 2. Data directory. config.Load resolved it — config, DICODE_DATA_DIR or
 	// $HOME/.dicode — and validation rejected a config that could not name
-	// one. Resolving it again here is what put the daemon's socket somewhere
-	// the CLI does not dial.
+	// one. It is not re-resolved here: the CLI locates the control socket from
+	// the same answer, and a second resolution is free to disagree.
 	dataDir := cfg.DataDir
 
 	// 3. Build secrets chain.

@@ -4,6 +4,29 @@ Behaviour changes that a release's `CHANGELOG.md` entry does not make obvious. `
 
 Newest release first.
 
+## Unreleased
+
+### `DICODE_DATA_DIR` now outranks `data_dir` in dicode.yaml
+
+The CLI, the daemon and the first-run wizard each resolved the data directory from their own inputs, and they disagreed whenever both `DICODE_DATA_DIR` and a `data_dir` in `dicode.yaml` were set: the CLI took the environment variable, the daemon took the config. The CLI then dialed a socket no daemon was listening on and started a second daemon, which unlinked the live socket and rebound it — two daemons over one data directory.
+
+One resolver now answers for all three, and the order is the one the CLI and the wizard already used: `DICODE_DATA_DIR`, then `data_dir`, then `$HOME/.dicode`.
+
+**If you set both to different paths, the daemon moves.** It will read and write the directory named by `DICODE_DATA_DIR`, so its SQLite database, sources and run logs appear empty — the old ones are still at the `data_dir` path, untouched. Pick one:
+
+- drop `DICODE_DATA_DIR` from the daemon's environment to keep using `data_dir`, or
+- point both at the same directory.
+
+Setting only one of the two is unaffected, and so is the Docker image, where `ENV DICODE_DATA_DIR=/data` and the generated config already name the same directory.
+
+`${DATADIR}`, `database.path` and the AI scratch directory now follow `DICODE_DATA_DIR` as well; previously only `data_dir` moved them.
+
+### A second daemon no longer takes over a live control socket
+
+Starting a daemon against a data directory that already has one running now fails with `control: a daemon is already listening on <path>` instead of unlinking the socket and rebinding it. Unlinking never disconnected the daemon behind it — it just left two processes serving one directory, with the CLI reaching whichever bound last.
+
+A restart that races its own not-yet-exited predecessor will now fail rather than take over; retry once the old process has gone.
+
 ## 0.4.1
 
 ### Git remotes on internal hosts are refused
