@@ -203,7 +203,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	}
 
 	// Elapsed run time, shared by the crash-loop tracker and the restart
-	// backoff below. run.StartedAt is always set by startRun; run.FinishedAt
+	// backoff below. run.StartedAt is always set when the run opens; run.FinishedAt
 	// may be nil on abnormal exit — treat that as an instant crash so the
 	// pessimistic branch applies in both consumers.
 	var elapsed time.Duration

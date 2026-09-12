@@ -54,6 +54,8 @@ type Stage struct {
 	Overrides *Overrides `yaml:"overrides,omitempty"`
 }
 
+func (p *PipelineTask) ChainTrigger() *ChainTrigger { return p.Trigger.Chain }
+
 func (p *PipelineTask) KindOf() string         { return KindPipelineTask }
 func (p *PipelineTask) TaskID() string         { return p.ID }
 func (p *PipelineTask) SetTaskID(id string)    { p.ID = id }

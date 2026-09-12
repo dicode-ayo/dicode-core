@@ -111,15 +111,12 @@ func TestRunTask_PreflightEnvFailure_ChainDepthPreserved(t *testing.T) {
 		t.Fatalf("register consumer: %v", err)
 	}
 
-	// Drive the parent through fireAsync with Input{_chain_depth: 2}.
-	// fireAsync stores 2 in runChainDepth[parent.RunID] before the run
-	// goroutine starts (engine.go:~2417). When runTask's preflight-env
+	// Drive the parent through fireAsync at chain depth 2, which beginRun
+	// records before the run goroutine starts. When runTask's preflight-env
 	// short-circuit fires FireChain, the synchronous call must see
 	// depth=2 → nextDepth=3 > maxDepth=2 → suppress.
 	runID, err := eng.fireAsync(context.Background(), consumer,
-		pkgruntime.RunOptions{
-			Input: map[string]any{"_chain_depth": 2},
-		}, registry.TriggerManual)
+		pkgruntime.RunOptions{ChainDepth: 2}, registry.TriggerChain)
 	if err != nil {
 		t.Fatalf("fireAsync: %v", err)
 	}

@@ -544,7 +544,7 @@ func TestResumeRun_PreservesChainDepth(t *testing.T) {
 	}
 
 	origID, err := eng.fireAsync(context.Background(), spec,
-		pkgruntime.RunOptions{Input: map[string]any{"_chain_depth": 3}}, registry.TriggerChain)
+		pkgruntime.RunOptions{ChainDepth: 3}, registry.TriggerChain)
 	if err != nil {
 		t.Fatalf("fireAsync: %v", err)
 	}
