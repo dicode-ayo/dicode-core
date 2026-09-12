@@ -7,6 +7,8 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
@@ -34,6 +36,19 @@ func MergeParams(specParams []task.Param, overrides map[string]string) map[strin
 // its own after posting its return value before it is signalled.
 const BridgeShutdownGrace = 5 * time.Second
 
+// BridgeKillGrace is how long a signalled subprocess gets to honour SIGTERM
+// before it is killed. Without a bound, a child that ignores the signal holds
+// the stderr drain open until the run context's deadline — which a task with
+// no configured timeout does not have.
+const BridgeKillGrace = 5 * time.Second
+
+// Stopper is the part of *os.Process the completion protocol drives: ask
+// politely, then insist.
+type Stopper interface {
+	Signal(os.Signal) error
+	Kill() error
+}
+
 // AwaitBridgeCompletion implements the completion protocol shared by the
 // socket-bridge runtimes: a run ends either when the task posts its return
 // value over IPC or when the subprocess exits, whichever happens first.
@@ -42,24 +57,22 @@ const BridgeShutdownGrace = 5 * time.Second
 //     arrives — before the grace wait — so callers snapshot their result
 //     (return value, IPC output) at the same instant the pre-#388 code did.
 //     The process normally exits shortly after posting /return; it gets
-//     grace to do so, then terminate() is called (both runtimes pass a
-//     SIGTERM). The exit status on this path is deliberately ignored — the
-//     run already produced its result. terminate() is fire-and-forget: the
-//     helper does not wait for the process afterwards (the exec.CommandContext
-//     cancel kills it at the latest when the run context ends).
+//     grace to do so, then SIGTERM, then killGrace, then SIGKILL. The exit
+//     status on this path is deliberately ignored — the run already produced
+//     its result.
 //   - Exit first: a return value that raced in just before exit is drained
 //     non-blocking into onReturn, and the process exit error (nil for a
 //     clean exit) is returned with exitedFirst=true.
 //
 // onReturn is called at most once.
-func AwaitBridgeCompletion(returnCh <-chan any, doneCh <-chan error, grace time.Duration, onReturn func(retVal any), terminate func()) (exitErr error, exitedFirst bool) {
+func AwaitBridgeCompletion(returnCh <-chan any, doneCh <-chan error, grace, killGrace time.Duration, onReturn func(retVal any), proc Stopper) (exitErr error, exitedFirst bool) {
 	select {
 	case retVal := <-returnCh:
 		onReturn(retVal)
 		select {
 		case <-doneCh:
 		case <-time.After(grace):
-			terminate()
+			stop(proc, doneCh, killGrace)
 		}
 		return nil, false
 
@@ -70,6 +83,19 @@ func AwaitBridgeCompletion(returnCh <-chan any, doneCh <-chan error, grace time.
 		default:
 		}
 		return err, true
+	}
+}
+
+// stop asks a subprocess to exit and kills it if it will not. A task can catch
+// SIGTERM — the Deno and Python SDKs both let handler code install its own
+// handler — so the polite signal is not a guarantee, and without the kill the
+// process keeps the run's stderr drain open.
+func stop(proc Stopper, doneCh <-chan error, killGrace time.Duration) {
+	_ = proc.Signal(syscall.SIGTERM)
+	select {
+	case <-doneCh:
+	case <-time.After(killGrace):
+		_ = proc.Kill()
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/db"
@@ -28,19 +27,6 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
-
-// activePIDs tracks PIDs of all currently running Deno subprocesses.
-var activePIDs sync.Map // map[int]struct{}
-
-// ActivePIDs returns the PIDs of all currently running Deno subprocesses.
-func ActivePIDs() []int {
-	var pids []int
-	activePIDs.Range(func(k, _ any) bool {
-		pids = append(pids, k.(int))
-		return true
-	})
-	return pids
-}
 
 //go:embed sdk/shim.ts
 var shimContent string
@@ -462,9 +448,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			go rt.StreamRunLog(&wg, pr, runID, "stderr", "error", redactor)
 		}
 
-		// Register PID so metrics can aggregate child process resource usage.
-		pid := cmd.Process.Pid
-		activePIDs.Store(pid, struct{}{})
+		// Register the PID so metrics can aggregate child process resource
+		// usage and the daemon's shutdown sweep can find it.
+		releasePID := pkgruntime.TrackProcess(cmd.Process.Pid)
 
 		doneCh := make(chan error, 1)
 		go func() {
@@ -478,12 +464,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			doneCh <- err
 		}()
 
-		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace, pkgruntime.BridgeKillGrace,
 			func(retVal any) {
 				result.ReturnValue = retVal
 				result.Output = srv.Output()
 			},
-			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+			cmd.Process,
 		)
 		if exitedFirst {
 			result.Output = srv.Output()
@@ -492,7 +478,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			}
 		}
 
-		activePIDs.Delete(pid)
+		releasePID()
 		// Wait for stdout/stderr scanners to flush all log lines before returning.
 		// Without this, callers that fetch logs immediately after Run returns may see
 		// an empty list because the goroutines haven't written to the DB yet.

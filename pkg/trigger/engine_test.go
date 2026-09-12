@@ -56,10 +56,10 @@ func newTestEnv(t *testing.T) *testEnv {
 // daemons auto-started on Register, pipeline parents, and stage runs — and
 // waits up to grace for their Deno subprocesses to exit. It latches the
 // shutdown flag first so a restart:always daemon's kill does not immediately
-// respawn. Returns the count of Deno subprocesses still alive when it returns
+// respawn. Returns the count of task subprocesses still alive when it returns
 // (0 = fully reaped).
 //
-// denoruntime.ActivePIDs is process-global, not scoped to eng, so the drain
+// pkgruntime.ActivePIDs is process-global, not scoped to eng, so the drain
 // condition is only meaningful while pkg/trigger tests run serially — a
 // t.Parallel() test elsewhere in the package would make this block on (or
 // observe) subprocesses eng never spawned.
@@ -73,7 +73,7 @@ func reapEngineRuns(eng *Engine, grace time.Duration) int {
 	})
 	deadline := time.Now().Add(grace)
 	for {
-		n := len(denoruntime.ActivePIDs())
+		n := len(pkgruntime.ActivePIDs())
 		if n == 0 || time.Now().After(deadline) {
 			return n
 		}

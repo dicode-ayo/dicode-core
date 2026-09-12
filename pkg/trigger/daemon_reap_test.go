@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
-	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -18,8 +18,8 @@ import (
 // process exited. newTestEnv's teardown must now reap it.
 //
 // The test drives a real newTestEnv teardown in a subtest (the exact structure
-// of TestPipelineDaemonTerminalStage) and then asserts no Deno subprocess
-// survives. denoruntime.ActivePIDs counts subprocesses this test binary spawned
+// of TestPipelineDaemonTerminalStage) and then asserts no task subprocess
+// survives. pkgruntime.ActivePIDs counts subprocesses this test binary spawned
 // (unaffected by unrelated Deno processes on the host) but is not scoped to a
 // single engine, so the zero-survivor assertion is only valid while pkg/trigger
 // tests run serially — a concurrent t.Parallel() test's subprocess would read
@@ -28,8 +28,8 @@ func TestDaemonSubprocessReapedOnTeardown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
 	}
-	if n := len(denoruntime.ActivePIDs()); n != 0 {
-		t.Skipf("%d Deno subprocess(es) already active from another test; cannot isolate", n)
+	if n := len(pkgruntime.ActivePIDs()); n != 0 {
+		t.Skipf("%d task subprocess(es) already active from another test; cannot isolate", n)
 	}
 
 	t.Run("pipeline-with-daemon-terminal-stage", func(t *testing.T) {
@@ -78,7 +78,7 @@ func TestDaemonSubprocessReapedOnTeardown(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		var n int
 		for {
-			n = len(denoruntime.ActivePIDs())
+			n = len(pkgruntime.ActivePIDs())
 			if n >= 2 || time.Now().After(deadline) {
 				break
 			}
@@ -98,10 +98,10 @@ func TestDaemonSubprocessReapedOnTeardown(t *testing.T) {
 	// The subtest's newTestEnv t.Cleanup runs on return and must have reaped the
 	// orphaned standalone daemon subprocess.
 	deadline := time.Now().Add(10 * time.Second)
-	for len(denoruntime.ActivePIDs()) > 0 && time.Now().Before(deadline) {
+	for len(pkgruntime.ActivePIDs()) > 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if n := len(denoruntime.ActivePIDs()); n != 0 {
+	if n := len(pkgruntime.ActivePIDs()); n != 0 {
 		t.Fatalf("%d Deno subprocess(es) survived testEnv teardown; daemon runs not reaped", n)
 	}
 }

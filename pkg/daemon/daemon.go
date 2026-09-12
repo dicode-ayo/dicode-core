@@ -931,7 +931,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			dm := metrics.ReadDaemonMetrics()
 			return dm.HeapAllocMB, dm.HeapSysMB, dm.Goroutines, dm.CPUMs
 		},
-		ActivePIDs: denoruntime.ActivePIDs,
+		ActivePIDs: pkgruntime.ActivePIDs,
 		ReadChildren: func(pids []int, activeTasks int) (float64, *int64) {
 			cm := metrics.ReadChildMetrics(pids, activeTasks)
 			return cm.ChildRSSMB, cm.ChildCPUMs
