@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/dicode/dicode/pkg/config"
 )
 
 // Required returns true if no config file exists at path and onboarding
@@ -133,19 +135,19 @@ func scaffoldLocalTaskSet(dir string) error {
 // passphrase. port, when non-zero, overrides the default 8080 — so
 // systemd/Docker installs started with --port honor the flag.
 //
-// DataDir defers to the DICODE_DATA_DIR env var when set. This is what
-// makes the Docker image's `ENV DICODE_DATA_DIR=/data` bake `/data` into
-// the generated dicode.yaml on first launch, so SQLite + sources land in
-// the mounted volume instead of the container's writable layer.
+// DataDir comes from config.ResolveDataDir, the same answer the daemon and
+// the CLI reach, so the generated dicode.yaml names the directory they will
+// look in. There is no config to read yet, so only DICODE_DATA_DIR and the
+// home fallback can decide — which is what makes the Docker image's
+// `ENV DICODE_DATA_DIR=/data` bake `/data` in on first launch, so SQLite +
+// sources land in the mounted volume instead of the container's writable
+// layer.
 func defaultResult(home string, port int) Result {
 	enabled := make(map[string]bool, len(TaskSetPresets))
 	for _, p := range TaskSetPresets {
 		enabled[p.Name] = p.DefaultOn
 	}
-	dataDir := home + "/.dicode"
-	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
-		dataDir = d
-	}
+	dataDir := config.ResolveDataDir("", "", home)
 	return Result{
 		TaskSetsEnabled: enabled,
 		LocalTasksDir:   home + "/dicode-tasks",

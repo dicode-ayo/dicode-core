@@ -546,12 +546,11 @@ func applyDefaults(cfg *Config, configDir string) {
 	expand := func(path string) string {
 		return expandVars(expandHome(path), vars)
 	}
-	cfg.DataDir = expand(cfg.DataDir)
-
-	// DataDir must be resolved first so ${DATADIR} is available for other paths.
-	if cfg.DataDir == "" {
-		cfg.DataDir = home + "/.dicode"
-	}
+	// DataDir must be resolved first so ${DATADIR} is available for other
+	// paths. ResolveDataDir is shared with the CLI and onboarding so all three
+	// name one directory; it applies the same expansion as expand() over the
+	// variables bound at this point.
+	cfg.DataDir = ResolveDataDir(cfg.DataDir, configDir, home)
 	vars["DATADIR"] = cfg.DataDir
 
 	cfg.Database.Path = expand(cfg.Database.Path)
@@ -739,6 +738,12 @@ func parseHTTPURL(field, raw string) (*url.URL, error) {
 }
 
 func (cfg *Config) validate() error {
+	// Empty only when data_dir is unset, DICODE_DATA_DIR is unset and the home
+	// directory could not be determined. Everything downstream — the database
+	// path, ${DATADIR}, the control socket — would otherwise be rooted at "/".
+	if cfg.DataDir == "" {
+		return fmt.Errorf("cannot determine the data directory: set data_dir or %s", DataDirEnvVar)
+	}
 	for name, entry := range cfg.Spec.Entries {
 		if entry == nil {
 			return fmt.Errorf("spec.entries[%q]: entry must not be null", name)

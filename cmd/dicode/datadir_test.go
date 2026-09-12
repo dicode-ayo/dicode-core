@@ -106,43 +106,6 @@ func TestCliDataDir_MalformedConfigFallsBack(t *testing.T) {
 	}
 }
 
-func TestExpandConfigDataDir(t *testing.T) {
-	const home = "/home/tester"
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tests := []struct {
-		name  string
-		value string
-		home  string
-		want  string
-	}{
-		{"empty", "", home, ""},
-		{"absolute", "/var/lib/dicode", home, "/var/lib/dicode"},
-		{"tilde", "~/.dicode", home, home + "/.dicode"},
-		{"home var", "${HOME}/state", home, home + "/state"},
-		{"config dir var", "${CONFIGDIR}/.dicode", home, filepath.Join(wd, ".dicode")},
-		// pkg/config binds only HOME and CONFIGDIR while data_dir is
-		// expanded, so anything else survives verbatim into the daemon's data
-		// dir and has to survive here too.
-		{"self-referential datadir", "${DATADIR}/x", home, "${DATADIR}/x"},
-		{"unknown var", "${NOPE}/x", home, "${NOPE}/x"},
-		// applyDefaults discards the UserHomeDir error and expandHome leaves
-		// ~ alone on it, so an unset home empties ${HOME} but not ~.
-		{"home var with home unset", "${HOME}/state", "", "/state"},
-		{"tilde with home unset", "~/x", "", "~/x"},
-		{"absolute with home unset", "/srv/dicode", "", "/srv/dicode"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := expandConfigDataDir(tc.value, tc.home, wd); got != tc.want {
-				t.Errorf("expandConfigDataDir(%q, %q) = %q; want %q", tc.value, tc.home, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestCliDataDir_UnknownVariableMatchesDaemon(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())

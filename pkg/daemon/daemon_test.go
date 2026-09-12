@@ -11,58 +11,20 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// TestResolveDataDir documents the resolution order the Docker image
-// relies on: the `ENV DICODE_DATA_DIR=/data` line in the runtime stage
-// only redirects daemon state into the mounted volume because this
-// helper consults the env var when cfg.DataDir is empty. Regressing
-// this order would silently move SQLite + sources into the container's
-// writable layer again.
-func TestResolveDataDir(t *testing.T) {
-	cases := []struct {
-		name    string
-		cfgDir  string
-		envVal  string // empty means unset
-		homeDir string // overrides HOME for this case
-		want    string
-	}{
-		{
-			name:   "cfg wins over env",
-			cfgDir: "/from-config",
-			envVal: "/from-env",
-			want:   "/from-config",
-		},
-		{
-			name:   "env wins when cfg is empty",
-			cfgDir: "",
-			envVal: "/from-env",
-			want:   "/from-env",
-		},
-		{
-			name:    "home fallback when both empty",
-			cfgDir:  "",
-			envVal:  "",
-			homeDir: "/tmp/fakehome",
-			want:    "/tmp/fakehome/.dicode",
-		},
+// TestRun_UsesConfigDataDir: the daemon takes the data dir config.Load
+// resolved rather than resolving it a second time. A second resolution is
+// what let the daemon and the CLI disagree — the CLI then dials a socket no
+// daemon is listening on and starts one of its own, which unlinks the live
+// socket and rebinds it. config.ResolveDataDir owns the order; its tests
+// cover it.
+func TestRun_UsesConfigDataDir(t *testing.T) {
+	t.Setenv(config.DataDirEnvVar, "")
+	cfg, err := config.LoadBytes([]byte("data_dir: /var/lib/dicode\n"), "/srv/project")
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// t.Setenv auto-restores the prior value on test teardown.
-			// Empty string is treated as unset by os.Getenv (returns "").
-			t.Setenv("DICODE_DATA_DIR", tc.envVal)
-			if tc.homeDir != "" {
-				t.Setenv("HOME", tc.homeDir)
-			}
-
-			got, err := resolveDataDir(&config.Config{DataDir: tc.cfgDir})
-			if err != nil {
-				t.Fatalf("resolveDataDir: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
+	if cfg.DataDir != "/var/lib/dicode" {
+		t.Fatalf("cfg.DataDir = %q; want /var/lib/dicode", cfg.DataDir)
 	}
 }
 

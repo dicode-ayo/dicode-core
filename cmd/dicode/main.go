@@ -53,6 +53,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -1602,16 +1603,10 @@ func ensureDaemon(paths daemonPaths) error {
 	return nil
 }
 
-// cliDataDir resolves the directory holding the control socket, its token,
-// and the background daemon's log. It must land on the same directory the
-// daemon picks: the CLI dials whatever socket sits at that path and sends the
-// subcommand's request over it, so a path the daemon is not listening on is
-// at best a dead command and at worst a stranger's listener.
-//
-// Resolution order: DICODE_DATA_DIR, then an owned ./dicode.yaml, then
-// $HOME/.dicode. Where the config decides, data_dir is expanded exactly as
-// pkg/config's applyDefaults expands it, and an absent data_dir defaults the
-// same way applyDefaults defaults it, so both sides name one directory.
+// cliDataDirFor resolves the directory holding the control socket, its token,
+// and the background daemon's log. config.ResolveDataDir decides; this adds
+// the tolerant, untrusted read of dicode.yaml that the CLI needs and the
+// daemon does not.
 //
 // The config is only honoured when the calling user owns it. dicode.yaml is
 // read from the working directory, which the user does not necessarily
@@ -1620,13 +1615,8 @@ func ensureDaemon(paths daemonPaths) error {
 // carries the first-run passphrase in plaintext), and sends request payloads
 // such as `dicode secrets set`. Ownership is what separates "my project
 // directory" from "somewhere I happened to cd into".
-//
-// DICODE_DATA_DIR outranks the config entirely. The config is discovered from
-// wherever the process happens to be standing, whereas the env var is someone
-// stating which daemon they mean — including callers who run the CLI from an
-// unrelated directory that has a dicode.yaml of its own.
 func cliDataDirFor(configPath string) string {
-	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
+	if d := os.Getenv(config.DataDirEnvVar); d != "" {
 		return d
 	}
 
@@ -1658,38 +1648,27 @@ func cliDataDirFor(configPath string) string {
 	// applyDefaults discards this error rather than failing, so a data_dir
 	// needing no home expansion still resolves when $HOME is unset.
 	home, _ := os.UserHomeDir()
-	if dir := expandConfigDataDir(probe.DataDir, home, configDir); dir != "" {
-		return dir
-	}
-	return home + "/.dicode"
+	return requireDataDir(config.ResolveDataDir(probe.DataDir, configDir, home))
 }
 
-// expandConfigDataDir applies the expansion pkg/config's applyDefaults
-// performs on data_dir: ~ and the ${HOME}/${CONFIGDIR} variables, in a
-// document where ${DATADIR} is not yet bound. An unrecognised variable is
-// left standing, because that is what the daemon does with it — substituting
-// or rejecting one here would point the two sides at different directories.
-func expandConfigDataDir(value, home, configDir string) string {
-	if value == "" {
-		return ""
-	}
-	if strings.HasPrefix(value, "~/") && home != "" {
-		value = home + value[1:]
-	}
-	value = strings.ReplaceAll(value, "${HOME}", home)
-	return strings.ReplaceAll(value, "${CONFIGDIR}", configDir)
-}
-
+// defaultDataDir is the directory to use when the config cannot be trusted or
+// cannot be read — the same answer the daemon reaches for a config that names
+// no data_dir.
 func defaultDataDir() string {
-	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
-		return d
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dicode: cannot determine home directory: %v\n", err)
+	home, _ := os.UserHomeDir()
+	return requireDataDir(config.ResolveDataDir("", "", home))
+}
+
+// requireDataDir turns the one unresolvable case — no data_dir, no
+// DICODE_DATA_DIR and no home directory — into an exit rather than letting
+// the CLI dial a socket rooted at "/". The daemon rejects the same config at
+// validation.
+func requireDataDir(dir string) string {
+	if dir == "" {
+		fmt.Fprintf(os.Stderr, "dicode: cannot determine the data directory: set data_dir or %s\n", config.DataDirEnvVar)
 		os.Exit(1)
 	}
-	return filepath.Join(home, ".dicode")
+	return dir
 }
 
 func remarshal(v any, dst any) error {
