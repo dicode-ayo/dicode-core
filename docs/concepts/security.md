@@ -890,6 +890,14 @@ truncation banner and no "too large to display" state to design.
 - `GET /api/tasks/{id}/pending-state` — same auth group as
   `POST /api/tasks/{id}/approve` (`requireSessionOrNonEphemeralAPIKey`). 404
   unknown task, 409 not pending, 503 gate not wired.
+- `GET /api/tasks/{id}/state` — same render, same auth group, but for *any*
+  task regardless of approval status (#714): 200 whether the task is pending
+  or already armed, so "what can this thing reach?" is answerable outside the
+  brief pend/approve window `pending-state` is scoped to. `pending_hash` is
+  only ever non-empty when the task is genuinely pending — an armed task's
+  render always carries an empty one, so it can never be replayed into
+  `POST /api/tasks/{id}/approve` as though it were a real review. 404 unknown
+  task, 503 gate not wired; never 409.
 - **Task detail** (`dc-task-detail.js`) — the panel opens by default for a
   pending task. Approve is armed only while a successfully fetched panel is on
   screen: collapsing it, a failed fetch, or a still-loading fetch all disarm,

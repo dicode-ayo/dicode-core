@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/dicode/dicode/pkg/approval"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -26,6 +27,7 @@ type ApprovalGate interface {
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
+	CurrentState(id string, k task.Kinded) approval.State
 }
 
 // SetApprovalGate wires the approval gate. Call after New and before Start.
@@ -193,6 +195,46 @@ func (s *Server) apiApprovalPendingState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	jsonOK(w, state)
+}
+
+// apiTaskState handles GET /api/tasks/{id}/state: the resolved review
+// surface for a task regardless of its approval status — what will run if
+// armed, or what is already running if the task is armed. Unlike
+// /pending-state, this never 409s on a task that isn't pending: that is the
+// whole point of it (#714), a task's sandbox surface should stay readable at
+// any time an operator wants to ask "what can this thing reach?", not only
+// during the pend/approve window.
+//
+// For a pending task this renders identically to /pending-state, including
+// PendingHash. For an armed task, PendingHash is always empty — see
+// approval.State.PendingHash's doc comment for why that must never be fed
+// back into ApproveIfHash. Auth mirrors apiApproveTask (same route group).
+//
+// Status codes:
+//   - 200 — the State body.
+//   - 404 — no such task.
+//   - 503 — approval gate not wired.
+func (s *Server) apiTaskState(w http.ResponseWriter, r *http.Request) {
+	id := taskIDParam(r)
+	if s.approvalGate == nil {
+		jsonErr(w, "approval gate not available", http.StatusServiceUnavailable)
+		return
+	}
+	kinded, ok := s.registry.GetKinded(id)
+	if !ok {
+		jsonErr(w, "task not found: "+id, http.StatusNotFound)
+		return
+	}
+	if s.approvalGate.IsPending(id) {
+		if state, err := s.approvalGate.State(id); err == nil {
+			jsonOK(w, state)
+			return
+		}
+		// Pending flipped between the IsPending check and State (a race with
+		// the reconciler or a concurrent approve) — the registry's current
+		// spec is still a truthful answer, so fall through rather than error.
+	}
+	jsonOK(w, s.approvalGate.CurrentState(id, kinded))
 }
 
 // approvePageTmpl renders the token-link confirm / result pages. Bare HTML on

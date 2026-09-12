@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -520,6 +521,96 @@ func TestStateWireFormatMatchesWhatTheRendererReads(t *testing.T) {
 		if _, ok := tr[k]; !ok {
 			t.Errorf("trigger entry missing %q: keys %v", k, keysOf(tr))
 		}
+	}
+}
+
+// ── CurrentState (#714) ──────────────────────────────────────────────────────
+//
+// State is scoped to the pend/approve window: it 409s the moment a task
+// stops being pending, leaving no way to answer "what can this armed task
+// reach?" the rest of the time. CurrentState is the counterpart for that
+// case — these tests pin its contract against State's.
+
+// TestCurrentState_RendersArmedTaskWithEmptyPendingHash is the core
+// regression for #714: an armed (no-longer-pending) task's resolved
+// permissions/triggers must still be readable, and the render must never
+// carry a hash that looks like a usable pending approval.
+func TestCurrentState_RendersArmedTaskWithEmptyPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	spec.Permissions = task.Permissions{Net: []string{"api.github.com"}}
+	spec.Trigger = task.TriggerConfig{Cron: "0 9 * * *"}
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatal(err)
+	}
+	// Once approved the task is no longer pending: State must refuse it —
+	// CurrentState is the only path left for reading its resolved state.
+	if _, err := g.State("repo/deploy"); err == nil {
+		t.Fatal("State must still error once the task is armed")
+	}
+
+	st := g.CurrentState("repo/deploy", spec)
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty — an armed task has no in-flight approval to bind to", st.PendingHash)
+	}
+	if st.TaskID != "repo/deploy" {
+		t.Errorf("TaskID = %q", st.TaskID)
+	}
+	if len(st.Permissions.Net) != 1 || st.Permissions.Net[0] != "api.github.com" {
+		t.Errorf("Permissions.Net = %+v", st.Permissions.Net)
+	}
+	if len(st.Triggers) != 1 || st.Triggers[0].Cron != "0 9 * * *" {
+		t.Errorf("Triggers = %+v", st.Triggers)
+	}
+}
+
+// TestCurrentState_AppliesPreviewFn mirrors TestStateAppliesPreviewFnOverride:
+// an armed buildin task with a daemon-config override (e.g. relay-server's
+// Enabled toggle) must render the overridden value here too, not the
+// as-shipped one — the same reasoning State already applies previewFn for.
+func TestCurrentState_AppliesPreviewFn(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetPreviewFn(func(k task.Kinded) task.Kinded {
+		s, ok := k.(*task.Spec)
+		if !ok || s.ID != "repo/preview-me" {
+			return k
+		}
+		override := *s
+		override.Enabled = false
+		return &override
+	})
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/preview-me", "export default () => {}")
+	spec.Enabled = true
+
+	st := g.CurrentState("repo/preview-me", spec)
+	if st.Enabled {
+		t.Error("CurrentState must render previewFn's transformed value (Enabled: false), not the raw spec's Enabled: true")
+	}
+	if spec.Enabled != true {
+		t.Error("previewFn must not mutate the caller's spec")
+	}
+}
+
+// TestCurrentState_MatchesStateExceptPendingHash pins the contract from
+// #714: for the same underlying spec, CurrentState and State must render
+// identically except for PendingHash, so a client reading either endpoint
+// sees the same "what will run" answer.
+func TestCurrentState_MatchesStateExceptPendingHash(t *testing.T) {
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	spec.Permissions = task.Permissions{Net: []string{"api.github.com"}, Run: []string{"git"}}
+	spec.Params = task.Params{{Name: "env", Required: true}}
+
+	g, pendingState := pendSpec(t, spec)
+	currentState := g.CurrentState("repo/deploy", spec)
+
+	pendingState.PendingHash = ""
+	if !reflect.DeepEqual(pendingState, currentState) {
+		t.Errorf("CurrentState diverges from State (modulo PendingHash):\nState:        %+v\nCurrentState: %+v", pendingState, currentState)
 	}
 }
 

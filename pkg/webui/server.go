@@ -641,6 +641,12 @@ func (s *Server) Handler() http.Handler {
 	// before clicking Approve needs the same trust boundary as approving it.
 	r.With(s.requireSessionOrNonEphemeralAPIKey).Get("/api/tasks/{id}/pending-state", s.apiApprovalPendingState)
 
+	// Effective-permissions/end-state read path for an *armed* task (#714) —
+	// pending-state 409s once a task is no longer pending, leaving no way to
+	// answer "what can this thing reach?" outside the pend/approve window.
+	// Same auth group: same review-surface trust boundary either way.
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Get("/api/tasks/{id}/state", s.apiTaskState)
+
 	// Tokenized approve link (#398) — the single-use token in the URL is the
 	// auth, so these stay outside the session groups. GET renders a confirm
 	// page without consuming the token (link prefetchers must not approve);

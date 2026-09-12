@@ -53,6 +53,10 @@ type State struct {
 	// task. A caller approving what it reviewed must send this back via
 	// ApproveIfHash: the task can re-pend at a newer hash between render and
 	// click, and an unbound approval would arm that unreviewed version.
+	//
+	// Always empty on a State rendered by CurrentState rather than State: a
+	// task that is not pending has no in-flight approval for this value to
+	// bind to, and it must never be mistaken for one (#714).
 	PendingHash string `json:"pending_hash"`
 	Kind        string `json:"kind"`
 	Name        string `json:"name,omitempty"`
@@ -183,7 +187,7 @@ type Stage struct {
 }
 
 // State returns the review surface for a pending task. Returns an error when
-// the task is not currently pending.
+// the task is not currently pending; use CurrentState for an armed task.
 func (g *Gate) State(id string) (State, error) {
 	g.mu.Lock()
 	ent, isPending := g.pending[id]
@@ -201,7 +205,27 @@ func (g *Gate) State(id string) (State, error) {
 	// before, no spec reachable from the pending set was ever also live in
 	// arm's hands, since Admit auto-approved BuiltinSource before the
 	// pending branch ever ran; a pinned buildin can now reach both.
-	kinded := ent.kinded
+	return g.renderState(id, ent.kinded, ent.hash), nil
+}
+
+// CurrentState renders the review surface for k as it currently stands in
+// the registry — the counterpart to State for a task that is *not* pending
+// approval (State returns an error for those). The caller resolves k itself
+// (e.g. via registry.GetKinded), since an armed task has no pending entry
+// for the gate to read it from.
+//
+// PendingHash on the returned State is always empty: there is no in-flight
+// approval this render could bind to, and it must never be usable as one —
+// see State.PendingHash and #714.
+func (g *Gate) CurrentState(id string, k task.Kinded) State {
+	return g.renderState(id, k, "")
+}
+
+// renderState is State and CurrentState's shared body: resolve kinded
+// through previewFn (if set), classify it by kind, and build the file
+// inventory. pendingHash is the hash to stamp on the result — the pending
+// entry's observed hash for State, or "" for CurrentState.
+func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string) State {
 	if g.previewFn != nil {
 		// Renders the end state Approve would actually produce, not the
 		// as-shipped value Admit first observed: the same daemon-config
@@ -213,7 +237,7 @@ func (g *Gate) State(id string) (State, error) {
 
 	st := State{
 		TaskID:      id,
-		PendingHash: ent.hash,
+		PendingHash: pendingHash,
 		Kind:        kinded.KindOf(),
 		Enabled:     kinded.IsEnabled(),
 	}
@@ -235,7 +259,7 @@ func (g *Gate) State(id string) (State, error) {
 		st.FilesError = err.Error()
 	}
 	st.Files = files
-	return st, nil
+	return st
 }
 
 func stateFromSpec(st *State, s *task.Spec) {
