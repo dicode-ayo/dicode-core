@@ -21,6 +21,14 @@ Setting only one of the two is unaffected, and so is the Docker image, where `EN
 
 `${DATADIR}`, `database.path` and the AI scratch directory now follow `DICODE_DATA_DIR` as well; previously only `data_dir` moved them.
 
+### Task subprocesses run in a process group of their own
+
+Deno and Python task subprocesses are now started as process-group leaders, and the graceful stop after a run posts its result signals the whole group. A Python task runs as `uv run python`, so the process the daemon holds is a wrapper: signalling it alone left the interpreter running, and SIGKILL — which no wrapper can forward — orphaned it outright.
+
+The group also means task subprocesses are no longer in the terminal's foreground group, so a Ctrl-C on a foreground `dicode daemon` no longer reaches them directly. Shutdown never relied on that: the run context's cancel kills them.
+
+Per-child resource metrics (`/api/metrics`, `dicode status`) now sum the whole group, so a Python task's memory and CPU are reported instead of `uv`'s. Expect the numbers to rise for Python workloads — that is the task's real footprint, which was previously invisible.
+
 ### A second daemon no longer takes over a live control socket
 
 Starting a daemon against a data directory that already has one running now fails with `control: a daemon is already listening on <path>` instead of unlinking the socket and rebinding it. Unlinking never disconnected the daemon behind it — it just left two processes serving one directory, with the CLI reaching whichever bound last.

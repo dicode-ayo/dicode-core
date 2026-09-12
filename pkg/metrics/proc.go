@@ -86,16 +86,23 @@ func ReadDaemonMetrics() DaemonMetrics {
 	return d
 }
 
-// ReadChildMetrics returns aggregate metrics for the provided set of child PIDs.
+// ReadChildMetrics returns aggregate metrics for the provided set of child
+// PIDs. Each PID leads a process group, and the whole group counts: a Python
+// task's work happens in the interpreter `uv` spawned, not in `uv` itself.
 func ReadChildMetrics(pids []int, activeTasks int) ChildMetrics {
 	c := ChildMetrics{ActiveTasks: activeTasks}
 	var totalRSS float64
 	var totalCPU int64
+	counted := make(map[int]bool, len(pids))
 	for _, pid := range pids {
-		rss := readProcRSSMB(pid)
-		cpu := readProcCPUMs(pid)
-		totalRSS += rss
-		totalCPU += cpu
+		for _, member := range processGroupMembers(pid) {
+			if counted[member] {
+				continue
+			}
+			counted[member] = true
+			totalRSS += readProcRSSMB(member)
+			totalCPU += readProcCPUMs(member)
+		}
 	}
 	if len(pids) > 0 {
 		c.ChildRSSMB = totalRSS

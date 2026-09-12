@@ -407,6 +407,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+		cmd.SysProcAttr = pkgruntime.TaskSysProcAttr()
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		var wg sync.WaitGroup
@@ -469,7 +470,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 				result.ReturnValue = retVal
 				result.Output = srv.Output()
 			},
-			cmd.Process,
+			pkgruntime.ProcessGroup(cmd.Process),
 		)
 		if exitedFirst {
 			result.Output = srv.Output()

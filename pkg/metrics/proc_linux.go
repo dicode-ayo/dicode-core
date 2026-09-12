@@ -98,3 +98,55 @@ func readProcRSSMB(pid int) float64 {
 	}
 	return 0
 }
+
+// processGroupMembers returns every live process in the group led by pid,
+// including pid itself. The runtimes start each task subprocess as its own
+// group leader, so this is the task's whole process tree — for a Python run
+// that is `uv` plus the interpreter it spawned, whose footprint is the one
+// worth reporting.
+//
+// A pid that leads no group yields just itself: matching on the group id
+// alone would otherwise sweep in every process sharing the daemon's group.
+func processGroupMembers(pid int) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return []int{pid}
+	}
+	members := []int{pid}
+	for _, e := range entries {
+		member, err := strconv.Atoi(e.Name())
+		if err != nil || member == pid {
+			continue
+		}
+		if readProcPGID(member) == pid {
+			members = append(members, member)
+		}
+	}
+	return members
+}
+
+// readProcPGID returns a process's group id from /proc/<pid>/stat, or 0 when
+// it cannot be read (the process exited, most often).
+func readProcPGID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// The comm field is parenthesised and may contain spaces, so the fields
+	// after the final ')' are the only ones safe to split: 0 = state,
+	// 1 = ppid, 2 = pgrp.
+	line := string(data)
+	rp := strings.LastIndex(line, ")")
+	if rp < 0 {
+		return 0
+	}
+	fields := strings.Fields(line[rp+1:])
+	if len(fields) < 3 {
+		return 0
+	}
+	pgid, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return 0
+	}
+	return pgid
+}

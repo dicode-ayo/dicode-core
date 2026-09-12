@@ -14,3 +14,7 @@ func readProcCPUMs(_ int) int64 { return 0 }
 
 // readProcRSSMB returns 0 on non-Linux platforms.
 func readProcRSSMB(_ int) float64 { return 0 }
+
+// processGroupMembers returns just pid: there is no portable process-group
+// enumeration here, and the runtimes place no group on non-Linux platforms.
+func processGroupMembers(pid int) []int { return []int{pid} }
