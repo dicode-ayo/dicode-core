@@ -13,14 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -209,7 +207,7 @@ func (e *Engine) resumeContinuationID(ctx context.Context, parentRunID string) (
 // for tasks that opted out of persistence via `run_result.enabled: false` —
 // without this fallback, `dicode.run_task` callers would receive nil for those
 // tasks even though the value is available in process. The cache entry survives
-// for runReturnValueTTL after run completion (see startRun cleanup).
+// for runReturnValueTTL after run completion (see runHandle.release).
 //
 // A task that fails via `output.json(envelope); throw ...` (the terminal-failure
 // pattern shared by every ai-agent preset — see ai-agent-core/chat.ts) never
@@ -267,132 +265,6 @@ func (e *Engine) KillRun(runID string) bool {
 	return true
 }
 
-// startRun creates the DB record, stores the cancel func, fires the started
-// hook, and returns a ready-to-run context. The caller is responsible for
-// calling the returned cleanup func when the run finishes.
-// startRunWithParent is like startRun but accepts an explicit parent context
-// for the run's cancellation context. The run is cancelled when either the
-// parent context expires or KillRun is called. Pass context.Background() to
-// reproduce the original independent-context behaviour.
-func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
-	if err = e.checkFireGuard(spec.ID); err != nil {
-		return nil, nil, err
-	}
-	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
-		return nil, nil, fmt.Errorf("start run record: %w", err)
-	}
-
-	actorID := opts.TriggerActor
-	if actorID == "" {
-		actorID = opts.ParentRunID
-	}
-	e.audit.Emit(context.Background(), audit.Event{
-		EventType:  audit.EventRunTriggered,
-		ActorKind:  string(source),
-		ActorID:    actorID,
-		TargetKind: "task",
-		TargetID:   spec.ID,
-		Params:     audit.SanitizeParams(opts.Params),
-		RunID:      opts.RunID,
-		Allowed:    true,
-	})
-
-	if e.inputStore != nil && e.shouldPersistInput(spec) {
-		var web *registry.WebhookFields
-		if opts.WebhookCtx != nil {
-			bft := false
-			if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil {
-				bft = *spec.RunInputs.BodyFullTextual
-			}
-			web = &registry.WebhookFields{
-				Method:          opts.WebhookCtx.Method,
-				Path:            opts.WebhookCtx.Path,
-				Headers:         opts.WebhookCtx.Headers,
-				Query:           opts.WebhookCtx.Query,
-				RawBody:         opts.WebhookCtx.RawBody,
-				ContentType:     opts.WebhookCtx.ContentType,
-				BodyFullTextual: bft,
-			}
-		}
-		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
-		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
-		if perr != nil {
-			if errors.Is(perr, registry.ErrStorageTaskNotRegistered) {
-				// Startup race (#523): daemon-triggered runs (tray, relay-*,
-				// nginx-start) fire before buildin/local-storage registers, so
-				// the backing store isn't ready yet. Expected and self-healing —
-				// debug, not warn. Genuine persist failures still warn below.
-				e.log.Debug("run-input persist skipped: storage task not yet registered",
-					zap.String("run", opts.RunID),
-					zap.String("task", spec.ID),
-				)
-			} else {
-				e.log.Warn("run-input persist failed",
-					zap.String("run", opts.RunID),
-					zap.String("task", spec.ID),
-					zap.String("error_class", "persist"),
-				)
-			}
-		} else {
-			if opts.WebhookCtx != nil {
-				// Bound RAM exposure: RawBody is no longer needed now that the
-				// blob has been persisted. Nil it out so the slice can be GC'd
-				// rather than held for the full run lifetime.
-				opts.WebhookCtx.RawBody = nil
-			}
-			if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
-				e.log.Warn("run-input set columns failed",
-					zap.String("run", opts.RunID),
-					zap.String("task", spec.ID),
-					zap.Error(serr),
-				)
-			}
-		}
-	}
-
-	if h := e.runStartedHook; h != nil {
-		h(spec.ID, opts.RunID, string(source))
-	}
-	var cancel context.CancelFunc
-	runCtx, cancel = context.WithCancel(parent)
-	e.runCancels.Store(opts.RunID, cancel)
-	e.runTriggerSource.Store(opts.RunID, source)
-
-	doneCh := make(chan struct{})
-	e.runDone.Store(opts.RunID, doneCh)
-
-	cleanup = func() {
-		if opts.ChainParentTask != "" {
-			e.guards.releaseSlot(opts.ChainParentTask)
-		}
-		e.runCancels.Delete(opts.RunID)
-		e.runTriggerSource.Delete(opts.RunID)
-		e.runChainDepth.Delete(opts.RunID)
-		cancel()
-		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
-			close(v.(chan struct{}))
-		}
-		// Defer deletion of the suppressed-persistence return-value cache:
-		// WaitRun goroutines woken by the runDone close above need time to
-		// scan runReturnValue before the entry is removed. The map is only
-		// populated for `run_result.enabled: false` tasks, so this AfterFunc
-		// is a no-op for the common case.
-		runID := opts.RunID
-		time.AfterFunc(runReturnValueTTL, func() {
-			e.runReturnValue.Delete(runID)
-		})
-	}
-	return runCtx, cleanup, nil
-}
-
-// startRun creates a run record and context rooted at context.Background() —
-// the standard path for all trigger types. See startRunWithParent for the
-// variant that wires an explicit parent (used by fireSync so prereq timeouts
-// propagate correctly).
-func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
-	return e.startRunWithParent(context.Background(), spec, opts, source)
-}
-
 // shouldPersistInput returns true when the run's input should be persisted.
 // It enforces two recursion guards and respects the per-task opt-out flag.
 func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
@@ -431,9 +303,9 @@ func preflightParams(spec *task.Spec, params map[string]string) (status, reason 
 	return registry.StatusFailure, "params_invalid: " + strings.Join(missing, ", ") + " are required"
 }
 
-// runTask executes a task synchronously and handles all post-run bookkeeping
-// (logging, notifications, hooks, daemon restart). Returns status and result.
-func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult) {
+// runTask executes a task through to a terminal run row and closes the Run via
+// the handle. Returns the terminal status and the executor's result.
+func (e *Engine) runTask(runCtx context.Context, h *runHandle, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult) {
 	e.log.Info("run started",
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
@@ -454,7 +326,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	// launch (issue #235). When preflight is skipped (no secrets chain /
 	// no env entries) preResolved is nil and the runtime falls back to its
 	// inline-resolver path.
-	var status string
+	var fin runFinish
 	var result *pkgruntime.RunResult
 	var preResolved *envresolve.Resolved
 	preStatus, preReason := preflightParams(spec, opts.Params)
@@ -465,43 +337,19 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		if err := e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason); err != nil {
 			e.log.Warn("FinishRun: preflight failure", zap.String("run", opts.RunID), zap.Error(err))
 		}
-		// Chain-on-failure semantics: dispatch normally fires FireChain;
-		// the preflight short-circuit replicates it so chain triggers
-		// and on_failure_chain still observe the failure.
-		//
-		// Called synchronously so the caller's deferred cleanup() (which
-		// deletes runChainDepth[opts.RunID]) cannot race ahead of FireChain's
-		// depth lookup. An earlier draft used `go FireChain(...)` to mirror a
-		// fire-and-forget shape, but that allowed cleanup to observe a
-		// depth-of-zero and let a chain-fired parent take one hop past the
-		// MaxDepth ceiling (issue #334, sister to #331). Matches the normal
-		// FireChain call site at the end of dispatch, which is also
-		// synchronous.
-		e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil, opts.Params)
-		status = preStatus
+		// Chain-on-failure semantics: the preflight short-circuit is a terminal
+		// outcome the chain edges and on_failure_chain must observe, exactly as
+		// a dispatched failure would be.
+		fin = runFinish{status: preStatus, chain: true}
 		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
 	} else {
 		opts.PreResolvedEnv = preResolved
-		status, result = e.dispatch(runCtx, spec, opts)
-	}
-	elapsed := time.Since(start)
-
-	runFields := []zap.Field{
-		zap.String("task", spec.ID),
-		zap.String("run", opts.RunID),
-		zap.String("status", status),
-		zap.String("trigger", string(source)),
-		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
-	}
-	if status == registry.StatusSuccess {
-		e.log.Debug("run finished", runFields...)
-	} else {
-		e.log.Warn("run finished", runFields...)
+		fin, result = e.dispatch(runCtx, spec, opts)
 	}
 
-	for _, h := range e.runFinishedHooks {
-		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds())
-	}
+	fin.params = opts.Params
+	fin.duration = time.Since(start)
+	h.finish(fin)
 
 	// Drive the standalone-daemon lifecycle (restart-policy decision,
 	// DaemonState transition) only for runs that the engine actually manages as
@@ -520,16 +368,20 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		e.onDaemonRunFinished(spec, opts.RunID)
 	}
 
-	return status, result
+	return fin.status, result
 }
 
 // finalizeCancelled closes out a run that was cancelled before ever executing
 // — e.g. user killed it while queued on the concurrency semaphore, or the
-// daemon is shutting down. It updates the registry row and fires the finished
-// hook so websocket subscribers see a matching started/finished pair.
+// daemon is shutting down. It makes the run row terminal and closes the Run so
+// websocket subscribers see a matching started/finished pair.
+//
+// No chain edges fire: the task never ran, so there is no outcome downstream
+// subscribers were promised.
+//
 // Safe to call even on the hot shutdown path: the DB write is bounded by a
 // short timeout so a stuck SQLite connection cannot block the goroutine.
-func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) {
+func (e *Engine) finalizeCancelled(h *runHandle, spec *task.Spec, opts pkgruntime.RunOptions) {
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer finishCancel()
 	if err := e.registry.FinishRun(finishCtx, opts.RunID, registry.StatusCancelled); err != nil {
@@ -538,10 +390,7 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 			zap.String("task", spec.ID),
 			zap.Error(err))
 	}
-	for _, h := range e.runFinishedHooks {
-		// Duration is 0 — the run never executed.
-		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0)
-	}
+	h.finish(runFinish{status: registry.StatusCancelled})
 }
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
@@ -570,15 +419,6 @@ func (e *Engine) fireKinded(ctx context.Context, k task.Kinded, opts pkgruntime.
 }
 
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
-	// Honor a caller-provided run ID; generate one only when absent. The only
-	// caller that pre-sets opts.RunID is startDaemon (#470): it must reserve
-	// the daemonRuns slot BEFORE the run goroutine can exit, which requires
-	// knowing the run ID before fireAsync launches the body. Every other call
-	// site passes a fresh RunOptions with an empty RunID.
-	if opts.RunID == "" {
-		opts.RunID = uuid.New().String()
-	}
-
 	// Reserve a drain slot before creating any run record. Once shutdown has
 	// begun this is refused so no new run — including one dispatched by a chain
 	// edge from a run finalizing mid-shutdown — starts a DB write after the
@@ -594,32 +434,18 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	runCtx, cleanup, err := e.startRun(spec, &opts, source)
+	runCtx, h, err := e.beginRun(context.Background(), spec, &opts, source)
 	if err != nil {
 		return "", err
 	}
 
-	// If this run carries a _chain_depth in its input (set by FireChain), record
-	// it in runChainDepth so FireChain can read the depth when this run completes.
-	if m, ok := opts.Input.(map[string]any); ok {
-		if d, ok2 := m["_chain_depth"]; ok2 {
-			switch v := d.(type) {
-			case int:
-				e.runChainDepth.Store(opts.RunID, v)
-			case int64:
-				e.runChainDepth.Store(opts.RunID, int(v))
-			case float64:
-				e.runChainDepth.Store(opts.RunID, int(v))
-			}
-		}
-	}
-
 	spawned = true
 	go func() {
-		// First deferred statement → runs last (LIFO), after cleanup and all
-		// finalization, so the drain releases only once the DB writes are done.
+		// First deferred statement → runs last (LIFO), after the handle is
+		// released and all finalization, so the drain releases only once the DB
+		// writes are done.
 		defer e.runWG.Done()
-		defer cleanup()
+		defer h.teardown()
 
 		// Daemon tasks are long-running; they must not consume semaphore slots
 		// or they would permanently starve webhook/cron tasks.
@@ -649,17 +475,17 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 				// freed. Finalize it as cancelled so the websocket finished
 				// event fires and the DB row doesn't stay stuck in `running`.
 				e.taskWaiting.Add(-1)
-				e.finalizeCancelled(spec, opts, source)
+				e.finalizeCancelled(h, spec, opts)
 				return
 			case <-shutDone:
 				// Engine is shutting down; finalize as cancelled and abort.
 				e.taskWaiting.Add(-1)
-				e.finalizeCancelled(spec, opts, source)
+				e.finalizeCancelled(h, spec, opts)
 				return
 			}
 		}
 
-		e.runTask(runCtx, spec, opts, source)
+		e.runTask(runCtx, h, spec, opts, source)
 	}()
 
 	return opts.RunID, nil
@@ -675,15 +501,13 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // propagates to the run. Pass context.Background() to preserve the old
 // independent-context behaviour.
 func (e *Engine) fireSync(callerCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
-	opts.RunID = uuid.New().String()
-
-	runCtx, cleanup, err := e.startRunWithParent(callerCtx, spec, &opts, source)
+	runCtx, h, err := e.beginRun(callerCtx, spec, &opts, source)
 	if err != nil {
 		return "", nil, err
 	}
-	defer cleanup()
+	defer h.teardown()
 
-	status, result := e.runTask(runCtx, spec, opts, source)
+	status, result := e.runTask(runCtx, h, spec, opts, source)
 	if result == nil {
 		result = &pkgruntime.RunResult{}
 	}
@@ -836,8 +660,11 @@ func (e *Engine) copyPrereqLogs(ctx context.Context, prereqRunID, parentRunID, p
 	}
 }
 
-// dispatch routes a run to the appropriate executor and returns the final status and result.
-func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (string, *pkgruntime.RunResult) {
+// dispatch routes a run to the appropriate executor, writes the terminal run
+// row, and reports how the Run should be closed. The caller fills in the
+// per-fire fields runFinish carries that dispatch does not know — the params
+// snapshot and the elapsed time.
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (runFinish, *pkgruntime.RunResult) {
 	e.mu.Lock()
 	exec, ok := e.executors[spec.Runtime]
 	e.mu.Unlock()
@@ -850,7 +677,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		if err := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err != nil {
 			e.log.Warn("FinishRun: no executor", zap.String("run", opts.RunID), zap.Error(err))
 		}
-		return registry.StatusFailure, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
+		return runFinish{status: registry.StatusFailure}, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
 	}
 
 	if err := e.resolveIfMissing(ctx, spec, opts.RunID); err != nil {
@@ -861,7 +688,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		if err2 := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err2 != nil {
 			e.log.Warn("FinishRun: if_missing failure", zap.String("run", opts.RunID), zap.Error(err2))
 		}
-		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
+		return runFinish{status: registry.StatusFailure}, &pkgruntime.RunResult{Error: err}
 	}
 
 	result, err := exec.Execute(ctx, spec, opts)
@@ -874,7 +701,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		if err2 := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err2 != nil {
 			e.log.Warn("FinishRun: executor error", zap.String("run", opts.RunID), zap.Error(err2))
 		}
-		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
+		return runFinish{status: registry.StatusFailure}, &pkgruntime.RunResult{Error: err}
 	}
 
 	// dicode.suspend() paused the task (#95): persist the run as suspended with
@@ -888,7 +715,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			if ferr := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); ferr != nil {
 				e.log.Warn("FinishRun: suspend fallback", zap.String("run", opts.RunID), zap.Error(ferr))
 			}
-			return registry.StatusFailure, &pkgruntime.RunResult{Error: serr}
+			return runFinish{status: registry.StatusFailure}, &pkgruntime.RunResult{Error: serr}
 		}
 		if !suspended {
 			// A concurrent finalize (kill / shutdown drain) moved the run out of
@@ -896,11 +723,11 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			// untouched; report its persisted terminal status rather than
 			// resurrecting it as suspended.
 			if run, gerr := e.registry.GetRun(context.Background(), opts.RunID); gerr == nil {
-				return run.Status, result
+				return runFinish{status: run.Status}, result
 			}
-			return registry.StatusCancelled, result
+			return runFinish{status: registry.StatusCancelled}, result
 		}
-		return registry.StatusSuspended, result
+		return runFinish{status: registry.StatusSuspended}, result
 	}
 
 	// Compute final status from the result.
@@ -923,8 +750,8 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	//
 	// In-memory delivery: regardless of persistence, the marshalled JSON is
 	// stashed in runReturnValue so WaitRun can serve it to synchronous
-	// callers (dicode.run_task -> IPC reply). The entry is cleared by the
-	// startRun cleanup func once the run reaches a terminal state.
+	// callers (dicode.run_task -> IPC reply). The entry is cleared shortly
+	// after the run handle is released.
 	retJSON := ""
 	if result != nil && result.ReturnValue != nil {
 		if b, merr := json.Marshal(result.ReturnValue); merr == nil {
@@ -955,6 +782,5 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		e.log.Warn("FinishRun: finalize run result", zap.String("run", opts.RunID), zap.Error(err))
 	}
 
-	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput, opts.Params)
-	return status, result
+	return runFinish{status: status, chain: true, output: result.ChainInput}, result
 }

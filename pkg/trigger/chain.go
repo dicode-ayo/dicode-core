@@ -7,6 +7,7 @@ package trigger
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -40,17 +41,19 @@ const chainOnAlways = "always"
 // Caller must hold registerMu.
 func (e *Engine) hasSuccessChainCycle(newID, from string) bool {
 	// Build an adjacency list of existing success-chain edges: edge (A→B) means
-	// B fires when A succeeds.
+	// B fires when A succeeds. Both kinds declare them, and a cycle can run
+	// through either.
 	successTargets := make(map[string][]string)
-	for _, spec := range e.registry.All() {
-		if spec.Trigger.Chain == nil {
+	for _, k := range e.registry.AllKinded() {
+		chain := k.ChainTrigger()
+		if chain == nil {
 			continue
 		}
-		on := spec.Trigger.Chain.ChainOn()
+		on := chain.ChainOn()
 		if on != registry.StatusSuccess && on != chainOnAlways {
 			continue
 		}
-		successTargets[spec.Trigger.Chain.From] = append(successTargets[spec.Trigger.Chain.From], spec.ID)
+		successTargets[chain.From] = append(successTargets[chain.From], k.TaskID())
 	}
 	// Add the proposed new edge: from → newID.
 	successTargets[from] = append(successTargets[from], newID)
@@ -104,6 +107,32 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	e.fireSuccessChains(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
 	e.firePipelineChains(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
 	e.fireFailureChain(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
+}
+
+// checkSuccessChainCycle rejects a registration whose trigger.chain edge would
+// close a success-chain cycle. A cycle would loop A→B→A forever; the runtime
+// depth ceiling breaks it, but only after maxSuccessChainDepth wasted hops, so
+// registration is where an operator gets told (#387).
+//
+// Caller must hold registerMu, so a concurrent registration cannot sneak in
+// the second half of a cycle between the check and the commit.
+func (e *Engine) checkSuccessChainCycle(k task.Kinded) error {
+	chain := k.ChainTrigger()
+	if chain == nil {
+		return nil
+	}
+	if on := chain.ChainOn(); on != registry.StatusSuccess && on != chainOnAlways {
+		return nil
+	}
+	if !e.hasSuccessChainCycle(k.TaskID(), chain.From) {
+		return nil
+	}
+	e.log.Error("registration rejected: success-chain cycle detected",
+		zap.String("task", k.TaskID()),
+		zap.String("chains_from", chain.From),
+		zap.String("hint", "A→B→A loops in trigger.chain would run forever; break the cycle"),
+	)
+	return fmt.Errorf("task %q: trigger.chain creates a success-chain cycle via %q", k.TaskID(), chain.From)
 }
 
 // chainEdgeMatches reports whether a declared trigger.chain edge fires for
@@ -182,18 +211,8 @@ func (e *Engine) fireSuccessChains(ctx context.Context, completedTaskID, runID, 
 			continue
 		}
 
-		// Depth tracking for success-chain (Fix 1, #387): mirror the failure-chain
-		// depth cap so any cycle that slips past the registration-time DFS check
-		// (e.g. tasks registered in a different order) cannot loop indefinitely.
-		nextDepth := e.chainDepth(runID) + 1
-		if nextDepth > maxSuccessChainDepth {
-			e.log.Warn("chain trigger suppressed: max_depth exceeded",
-				zap.Int("depth", nextDepth),
-				zap.Int("max_depth", maxSuccessChainDepth),
-				zap.String("from", completedTaskID),
-				zap.String("to", spec.ID),
-				zap.String("run", runID),
-			)
+		nextDepth, withinCeiling := e.nextChainDepth(runID, completedTaskID, spec.ID)
+		if !withinCeiling {
 			continue
 		}
 
@@ -203,25 +222,11 @@ func (e *Engine) fireSuccessChains(ctx context.Context, completedTaskID, runID, 
 			zap.String("on", on),
 			zap.Int("depth", nextDepth),
 		)
-		// Use buildChainPayload (not buildChainInput) to stamp _chain_depth so the
-		// downstream can propagate it. When resolvedParams is empty, build a minimal
-		// map with just engine keys so depth is always present.
-		var chainInput interface{}
-		if len(resolvedParams) == 0 && len(chain.Params) == 0 {
-			// Historical no-params case: downstream expects raw output as input.
-			// We must still propagate depth, so only add the wrapper when depth > 0
-			// (depth 0 = first hop — keep raw output semantics for existing tasks).
-			if nextDepth <= 1 {
-				chainInput = output
-			} else {
-				chainInput = buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
-			}
-		} else {
-			chainInput = buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
-		}
+		chainInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
 		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
 			Input:       chainInput,
+			ChainDepth:  nextDepth,
 		}, "chain")
 	}
 }
@@ -248,27 +253,26 @@ func (e *Engine) firePipelineChains(ctx context.Context, completedTaskID, runID,
 		if !resolved {
 			continue
 		}
-		// Build the trigger payload for stage 0: mirror the kind: Task chain
-		// path (buildChainInput) exactly:
-		//   - Non-empty chain.params → wrap as a labelled map (taskID, runID,
-		//     status, output, params) so stage 0 can access individual fields.
-		//   - Empty/nil chain.params → thread the upstream's raw output directly
-		//     (same as buildChainInput's zero-params branch) so ${input.output}
-		//     on stage 0 resolves to the upstream return value.
-		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output)
+		nextDepth, withinCeiling := e.nextChainDepth(runID, completedTaskID, p.ID)
+		if !withinCeiling {
+			continue
+		}
+		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
 		triggerParams := flatStringMap(resolvedParams)
 		e.log.Info("chain trigger (pipeline)",
-			zap.String("from", completedTaskID), zap.String("to", p.ID), zap.String("on", on))
-		go func(p *task.PipelineTask, in interface{}, params map[string]string) {
+			zap.String("from", completedTaskID), zap.String("to", p.ID),
+			zap.String("on", on), zap.Int("depth", nextDepth))
+		go func(p *task.PipelineTask, in interface{}, params map[string]string, depth int) {
 			if _, err := e.fireKinded(ctx, p, pkgruntime.RunOptions{
 				ParentRunID: runID,
 				Input:       in,
 				Params:      params,
+				ChainDepth:  depth,
 			}, registry.TriggerChain); err != nil {
 				e.log.Warn("chain-triggered pipeline failed to start",
 					zap.String("from", completedTaskID), zap.String("to", p.ID), zap.Error(err))
 			}
-		}(p, triggerInput, triggerParams)
+		}(p, triggerInput, triggerParams, nextDepth)
 	}
 }
 
@@ -399,16 +403,16 @@ func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, r
 					}
 				}
 
-				// Synchronously invoke fireAsync — it returns once startRun
-				// completes, then continues the run on its own goroutine.
-				// Doing this sync (rather than `go fireAsync(...)`) lets us
-				// release the chainGuards slot if startRun fails and avoids
-				// recording cooldown / storm counters for runs that never
-				// executed (false-trip risk under DB flapping).
+				// Synchronous: fireAsync returns once the run is open, then
+				// continues on its own goroutine. The chainGuards slot must be
+				// released when the fire is refused, and cooldown / storm
+				// counters must not record a run that never executed — both
+				// need the outcome before this call returns.
 				if _, err := e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{
 					ParentRunID:     runID,
 					Input:           input,
 					ChainParentTask: completedTaskID,
+					ChainDepth:      nextDepth,
 				}, registry.TriggerChain); err != nil {
 					e.guards.releaseSlot(completedTaskID)
 					e.log.Error("on_failure_chain fireAsync failed; released slot",
@@ -419,9 +423,9 @@ func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, r
 					return
 				}
 
-				// startRun succeeded. Record cooldown timestamp and storm
-				// fire — both delayed until here so a failed startRun cannot
-				// false-trip the storm breaker or extend the cooldown.
+				// The run is open. Record cooldown timestamp and storm fire —
+				// both delayed until here so a refused fire cannot false-trip
+				// the storm breaker or extend the cooldown.
 				e.guards.recordChainFire(completedTaskID, now)
 				e.guards.observeChainFire(scope, chainSpec.Storm.Rate, chainSpec.Storm.Window,
 					chainSpec.Storm.Suppress, now)
@@ -430,8 +434,27 @@ func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, r
 	}
 }
 
-// chainDepth returns the _chain_depth recorded for runID at fire time (see
-// fireAsync), or 0 when none was stored — i.e. the run is a first hop.
+// nextChainDepth returns the hop count a success-chain edge fired off runID
+// would carry, and false when that hop would breach maxSuccessChainDepth — the
+// ceiling that stops a cycle the registration-time check missed from looping
+// forever.
+func (e *Engine) nextChainDepth(runID, from, to string) (int, bool) {
+	next := e.chainDepth(runID) + 1
+	if next > maxSuccessChainDepth {
+		e.log.Warn("chain trigger suppressed: max_depth exceeded",
+			zap.Int("depth", next),
+			zap.Int("max_depth", maxSuccessChainDepth),
+			zap.String("from", from),
+			zap.String("to", to),
+			zap.String("run", runID),
+		)
+		return 0, false
+	}
+	return next, true
+}
+
+// chainDepth returns the hop count recorded for runID at fire time (see
+// beginRun), or 0 when none was stored — i.e. the run started a lap.
 func (e *Engine) chainDepth(runID string) int {
 	if d, ok := e.runChainDepth.Load(runID); ok {
 		depth, _ := d.(int)
@@ -440,32 +463,24 @@ func (e *Engine) chainDepth(runID string) int {
 	return 0
 }
 
-// buildChainInput shapes the `Input` value handed to a downstream task that
-// was fired by a success-path trigger.chain (NOT on_failure_chain — that
-// path runs through fireFailureChain and always wraps).
+// buildChainInput shapes the `Input` value handed to a downstream fired by a
+// success-path trigger.chain edge, for either task kind. Not the
+// on_failure_chain path, which runs through fireFailureChain and always wraps.
 //
-// Contract:
+// With no declared params on the edge the downstream receives the upstream's
+// raw return value unchanged: tasks read `input` as that value directly — a
+// string, a typed object. Otherwise it receives a map merging the edge's params
+// with the engine-reserved keys (taskID, runID, status, output, _chain_depth),
+// which Spec.validate rejects in trigger.chain.params so a user map cannot
+// collide.
 //
-//   - When userParams is empty (the historical case), returns the upstream's
-//     raw output unchanged. This preserves the existing contract for tasks
-//     that consume `input` as the upstream's return value directly. Adding
-//     a wrapping unconditionally would silently break every downstream task
-//     in the wild that reads input as e.g. a string or a typed object.
-//
-//   - When userParams is non-empty, returns a map merging user params with
-//     engine-reserved keys (taskID, runID, status, output, _chain_depth).
-//     Reserved keys cannot collide with user params: Spec.validate rejects
-//     reserved keys in trigger.chain.params at config load.
-//
-// _chain_depth is set to 0 for success chains. Depth tracking only matters
-// on the failure path today (cap loops via OnFailureChainSpec.MaxDepth);
-// success chains are not depth-capped because users build
-// fan-out pipelines (render → start daemon, etc.) where depth > 1 is normal.
-func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any) any {
+// The hop count reaches the downstream on RunOptions.ChainDepth either way, so
+// neither ceiling depends on this shaping.
+func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any, depth int) any {
 	if len(userParams) == 0 {
 		return output
 	}
-	return buildChainPayload(userParams, completedTaskID, runID, status, output, 0)
+	return buildChainPayload(userParams, completedTaskID, runID, status, output, depth)
 }
 
 // buildChainPayload is the shared kernel that produces the input map fed to

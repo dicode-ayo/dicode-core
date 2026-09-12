@@ -11,7 +11,6 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -28,9 +27,9 @@ import (
 type PipelineRunner struct {
 	engine *Engine
 	spec   *task.PipelineTask
-	runID  string             // the pipeline's own parent run ID
-	cancel context.CancelFunc // cancels runCtx; invoked on finish + by KillRun
-	runCtx context.Context    // the pipeline's lifecycle context (cancelled by KillRun/finish)
+	runID  string          // the pipeline's own parent run ID
+	handle *runHandle      // the parent Run's lifecycle; closed exactly once by finish
+	runCtx context.Context // the pipeline's lifecycle context (canceled by KillRun/finish)
 
 	// triggerInput and triggerParams carry the trigger-payload that fired this
 	// pipeline. They seed stage 0's InputContext so ${input.output} /
@@ -60,21 +59,15 @@ type PipelineRunner struct {
 	restartDone chan struct{} // closed by the re-fire when it publishes the new run / aborts
 }
 
-// firePipeline creates the pipeline's parent run row (kind=pipeline) and starts
-// the runner asynchronously, returning the parent run ID immediately (mirrors
-// fireAsync's contract for kind: Task).
+// firePipeline opens the pipeline's parent Run and starts the runner
+// asynchronously, returning the parent run ID immediately (mirrors fireAsync's
+// contract for kind: Task).
 //
-// It re-validates the pipeline against the live registry before creating any
-// run row. Manual and chain fires reach this path via GetKinded without going
+// It re-validates the pipeline against the live registry before opening the
+// Run. Manual and chain fires reach this path via GetKinded without going
 // through engine registration, so a pipeline whose stages were deregistered (or
 // that lost the reconcile-ordering race, see #341) is rejected loudly here
 // rather than dispatched and failed mid-flight.
-//
-// It also consults checkFireGuard itself (#678), so a Pending pipeline can
-// never fire — regardless of whether the caller went through fireKinded
-// first. fireKinded checks the guard too; that check is redundant for callers
-// that reach firePipeline through it, but this one is what protects any
-// caller that doesn't.
 func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	// Reserve a drain slot before creating the parent run row. Refused once
 	// shutdown has begun so a chain-dispatched pipeline can't finalize past the
@@ -90,85 +83,21 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 		}
 	}()
 
-	// Re-check the fire guard here too, not just in fireKinded: firePipeline
-	// must be safe to call directly. fireKinded's own check (run.go) makes this
-	// redundant for callers that already route through it, but a future
-	// pipeline-firing path that calls firePipeline directly (reintroducing the
-	// #678 bypass) is vetoed here regardless. Same shape as
-	// startRunWithParent's checkFireGuard call for kind: Task.
-	if err := e.checkFireGuard(p.ID); err != nil {
-		return "", err
-	}
-
 	if err := e.validatePipelineRefs(p); err != nil {
 		return "", fmt.Errorf("pipeline %q failed validation: %w", p.ID, err)
 	}
-	runID := uuid.New().String()
-	if _, err := e.registry.StartRunWithID(context.Background(), runID, p.ID, opts.ParentRunID, string(source), registry.RunKindPipeline); err != nil {
-		return "", fmt.Errorf("start pipeline run: %w", err)
+
+	// beginRun registers the parent so it behaves like any managed run: WaitRun
+	// blocks on runDone until finish() (so a dicode.run_task targeting a
+	// pipeline gets the real result, not a racy nil), and KillRun(parentRunID)
+	// cancels runCtx — which the runner propagates to the in-flight stage.
+	// Trigger entrypoints pass a background context, so the async pipeline
+	// survives the trigger call returning.
+	runCtx, h, err := e.beginRun(ctx, p, &opts, source)
+	if err != nil {
+		return "", err
 	}
 
-	// Persist the trigger payload on the parent pipeline run row so the UI can
-	// show what fired it — mirrors how startRun persists inputs for kind: Task.
-	// Best-effort: a failure does not block the run.
-	//
-	// Intentional divergence from the kind: Task path: startRun gates on
-	// shouldPersistInput(spec) which enforces (a) a per-task run_inputs.enabled:
-	// false opt-out and (b) recursion guards for the storage/cleanup tasks.
-	// Neither guard applies here: kind: PipelineTask has no RunInputs field and
-	// a pipeline can never be the storage or cleanup task. Checking only
-	// e.inputStore != nil is therefore correct and intentional. Revisit if
-	// kind: PipelineTask ever gains a run_inputs opt-out field.
-	if e.inputStore != nil {
-		var web *registry.WebhookFields
-		if opts.WebhookCtx != nil {
-			web = &registry.WebhookFields{
-				Method:      opts.WebhookCtx.Method,
-				Path:        opts.WebhookCtx.Path,
-				Headers:     opts.WebhookCtx.Headers,
-				Query:       opts.WebhookCtx.Query,
-				RawBody:     opts.WebhookCtx.RawBody,
-				ContentType: opts.WebhookCtx.ContentType,
-			}
-		}
-		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
-		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), runID, in)
-		if perr != nil {
-			// Log only a sanitized error category. The full perr chain may
-			// transit env-resolver internals where CodeQL tracks a
-			// secretKey taint label; emitting it raw causes a false-positive
-			// go/clear-text-logging alert. The category is enough for ops to
-			// triage the best-effort persistence failure; the pipeline run
-			// itself is unaffected and continues normally.
-			e.log.Warn("pipeline run-input persist failed",
-				zap.String("run", runID),
-				zap.String("pipeline", p.ID),
-				zap.String("error_class", "persist"),
-			)
-		} else {
-			if opts.WebhookCtx != nil {
-				opts.WebhookCtx.RawBody = nil
-			}
-			if serr := e.registry.SetRunInput(context.Background(), runID, key, size, storedAt, in.RedactedFields); serr != nil {
-				e.log.Warn("pipeline run-input set columns failed",
-					zap.String("run", runID),
-					zap.String("pipeline", p.ID),
-					zap.Error(serr),
-				)
-			}
-		}
-	}
-
-	// Register the parent in the engine's run-lifecycle maps so it behaves like
-	// any managed run: WaitRun blocks on runDone until finish() (so a
-	// dicode.run_task targeting a pipeline gets the real result, not a racy nil),
-	// and KillRun(parentRunID) cancels runCtx — which the runner propagates to
-	// the in-flight stage. Trigger entrypoints pass a background context, so the
-	// async pipeline survives the trigger call returning.
-	runCtx, cancel := context.WithCancel(ctx)
-	e.runCancels.Store(runID, cancel)
-	e.runTriggerSource.Store(runID, source)
-	e.runDone.Store(runID, make(chan struct{}))
 	// When no structured Input was supplied (manual fire or empty-param chain)
 	// but params ARE present, promote the params map to a map[string]any so
 	// that stage-0 ${input.output} and ${input.output.<name>} resolve to the
@@ -186,8 +115,8 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	r := &PipelineRunner{
 		engine:        e,
 		spec:          p,
-		runID:         runID,
-		cancel:        cancel,
+		runID:         h.runID,
+		handle:        h,
 		runCtx:        runCtx,
 		triggerInput:  triggerInput,
 		triggerParams: opts.Params,
@@ -196,10 +125,14 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	// finalizes the parent run row (r.finish), and the DB must outlive it (#520).
 	spawned = true
 	go func() {
+		// Deferred last-to-first: teardown releases the Run's registrations if
+		// the runner never reaches finish, and the drain slot is released only
+		// once that is done.
 		defer e.runWG.Done()
+		defer h.teardown()
 		r.run(runCtx)
 	}()
-	return runID, nil
+	return h.runID, nil
 }
 
 // run dispatches to the sequential or parallel runner based on subtype.
@@ -716,7 +649,8 @@ func (e *Engine) dispatchStage(ctx context.Context, st task.Stage, upstream task
 
 // finish marks the pipeline's parent run terminal and records the terminal
 // stage's return value as the pipeline's own return (persisted to the run row,
-// so chain consumers and WaitRun observe it — mirrors how runTask persists).
+// so chain consumers and WaitRun observe it — mirrors how runTask persists),
+// then closes the parent Run through its handle.
 func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 	e := r.engine
 	// Mark finished under mu so an in-flight handlePipelineStageRerun that has
@@ -742,22 +676,12 @@ func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 			e.log.Warn("FinishRun: finish", zap.String("run", r.runID), zap.Error(err))
 		}
 	}
-	// Tear down the run-lifecycle registrations now that the DB row is terminal.
-	// Close runDone AFTER the DB write so a WaitRun goroutine woken by the close
-	// reads the finalized row.
-	if v, ok := e.runDone.LoadAndDelete(r.runID); ok {
-		close(v.(chan struct{}))
-	}
-	// Pipeline-as-chain-source: fire downstream subscribers off the pipeline's
-	// overall outcome (fresh background context — finishCtx is about to expire).
-	// Done before dropping runTriggerSource, which FireChain's failure-path
-	// guards consult.
-	e.FireChain(context.Background(), r.spec.ID, r.runID, status, ret, nil)
-	e.runCancels.Delete(r.runID)
-	e.runTriggerSource.Delete(r.runID)
-	if r.cancel != nil {
-		r.cancel()
-	}
+	r.handle.finish(runFinish{
+		status:   status,
+		chain:    true,
+		output:   ret,
+		duration: r.handle.elapsed(),
+	})
 }
 
 // registerLivePipeline records a runner whose terminal daemon stage is up, so

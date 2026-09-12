@@ -173,13 +173,14 @@ func TestAPI_ListTasks_IncludesPipelineKind(t *testing.T) {
 // branch (effectively unreachable in production today).
 type fakeKinded struct{ id string }
 
-func (f *fakeKinded) KindOf() string         { return "FutureKind" }
-func (f *fakeKinded) TaskID() string         { return f.id }
-func (f *fakeKinded) SetTaskID(s string)     { f.id = s }
-func (f *fakeKinded) IsEnabled() bool        { return true }
-func (f *fakeKinded) SetEnabled(bool)        {}
-func (f *fakeKinded) LoadWarnings() []string { return nil }
-func (f *fakeKinded) Validate() error        { return nil }
+func (f *fakeKinded) KindOf() string                   { return "FutureKind" }
+func (f *fakeKinded) TaskID() string                   { return f.id }
+func (f *fakeKinded) SetTaskID(s string)               { f.id = s }
+func (f *fakeKinded) IsEnabled() bool                  { return true }
+func (f *fakeKinded) SetEnabled(bool)                  {}
+func (f *fakeKinded) LoadWarnings() []string           { return nil }
+func (f *fakeKinded) Validate() error                  { return nil }
+func (f *fakeKinded) ChainTrigger() *task.ChainTrigger { return nil }
 
 // TestAPI_ListTasks_UnknownKind verifies that an unrecognized task kind hits
 // apiListTasks's default branch and serializes with a parity "—" trigger

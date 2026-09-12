@@ -155,17 +155,14 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 	}
 	// Restore the original run's fire-time params and chain depth so the
 	// continuation sees the same ctx.params (not spec defaults) and stays under
-	// the chain-depth ceiling. Chain depth rides in Input because fireAsync reads
-	// _chain_depth from there to seed runChainDepth.
+	// the chain-depth ceiling.
 	if len(run.ResumeParams) > 0 {
 		var carry resumeCarry
 		if err := json.Unmarshal(run.ResumeParams, &carry); err != nil {
 			return "", fmt.Errorf("resume: decode carried run params: %w", err)
 		}
 		opts.Params = carry.Params
-		if carry.ChainDepth > 0 {
-			opts.Input = map[string]any{"_chain_depth": carry.ChainDepth}
-		}
+		opts.ChainDepth = carry.ChainDepth
 	}
 
 	// A daemon body's continuation must re-enter the #470 slot accounting: it
