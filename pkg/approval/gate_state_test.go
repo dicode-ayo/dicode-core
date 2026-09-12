@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -520,6 +522,188 @@ func TestStateWireFormatMatchesWhatTheRendererReads(t *testing.T) {
 		if _, ok := tr[k]; !ok {
 			t.Errorf("trigger entry missing %q: keys %v", k, keysOf(tr))
 		}
+	}
+}
+
+// ── CurrentState (#714) ──────────────────────────────────────────────────────
+//
+// State is scoped to the pend/approve window: it 409s the moment a task
+// stops being pending, leaving no way to answer "what can this armed task
+// reach?" the rest of the time. CurrentState is the counterpart for that
+// case — these tests pin its contract against State's.
+
+// TestCurrentState_RendersArmedTaskWithEmptyPendingHash is the core
+// regression for #714: an armed (no-longer-pending) task's resolved
+// permissions/triggers must still be readable, and the render must never
+// carry a hash that looks like a usable pending approval.
+func TestCurrentState_RendersArmedTaskWithEmptyPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	spec.Permissions = task.Permissions{Net: []string{"api.github.com"}}
+	spec.Trigger = task.TriggerConfig{Cron: "0 9 * * *"}
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatal(err)
+	}
+	// Once approved the task is no longer pending: State must refuse it —
+	// CurrentState is the only path left for reading its resolved state.
+	if _, err := g.State("repo/deploy"); err == nil {
+		t.Fatal("State must still error once the task is armed")
+	}
+
+	st := g.CurrentState("repo/deploy", spec)
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty — an armed task has no in-flight approval to bind to", st.PendingHash)
+	}
+	if st.TaskID != "repo/deploy" {
+		t.Errorf("TaskID = %q", st.TaskID)
+	}
+	if len(st.Permissions.Net) != 1 || st.Permissions.Net[0] != "api.github.com" {
+		t.Errorf("Permissions.Net = %+v", st.Permissions.Net)
+	}
+	if len(st.Triggers) != 1 || st.Triggers[0].Cron != "0 9 * * *" {
+		t.Errorf("Triggers = %+v", st.Triggers)
+	}
+}
+
+// TestCurrentState_AppliesPreviewFn mirrors TestStateAppliesPreviewFnOverride:
+// an armed buildin task with a daemon-config override (e.g. relay-server's
+// Enabled toggle) must render the overridden value here too, not the
+// as-shipped one — the same reasoning State already applies previewFn for.
+func TestCurrentState_AppliesPreviewFn(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetPreviewFn(func(k task.Kinded) task.Kinded {
+		s, ok := k.(*task.Spec)
+		if !ok || s.ID != "repo/preview-me" {
+			return k
+		}
+		override := *s
+		override.Enabled = false
+		return &override
+	})
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/preview-me", "export default () => {}")
+	spec.Enabled = true
+
+	st := g.CurrentState("repo/preview-me", spec)
+	if st.Enabled {
+		t.Error("CurrentState must render previewFn's transformed value (Enabled: false), not the raw spec's Enabled: true")
+	}
+	if spec.Enabled != true {
+		t.Error("previewFn must not mutate the caller's spec")
+	}
+}
+
+// TestCurrentState_MatchesStateExceptPendingHash pins the contract from
+// #714: for the same underlying spec, CurrentState and State must render
+// identically except for PendingHash, so a client reading either endpoint
+// sees the same "what will run" answer.
+func TestCurrentState_MatchesStateExceptPendingHash(t *testing.T) {
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	spec.Permissions = task.Permissions{Net: []string{"api.github.com"}, Run: []string{"git"}}
+	spec.Params = task.Params{{Name: "env", Required: true}}
+
+	g, pendingState := pendSpec(t, spec)
+	currentState := g.CurrentState("repo/deploy", spec)
+
+	pendingState.PendingHash = ""
+	if !reflect.DeepEqual(pendingState, currentState) {
+		t.Errorf("CurrentState diverges from State (modulo PendingHash):\nState:        %+v\nCurrentState: %+v", pendingState, currentState)
+	}
+}
+
+// ── StateFor (code-review follow-up on #714's PR) ────────────────────────────
+//
+// apiTaskState originally checked IsPending and then separately called State
+// or CurrentState — two locked reads of the pending map instead of one,
+// leaving a window where a task transitioning from not-pending to pending
+// in between would render CurrentState's empty PendingHash for a task that,
+// by the time the caller acts on the response, genuinely is pending.
+// StateFor closes that by deciding pending-vs-not and reading the entry it
+// renders from together, under one lock acquisition.
+
+// TestStateFor_PendingTaskReturnsPendingHash pins the pending branch: a
+// pending task's StateFor render must carry the real, non-empty hash that
+// ApproveIfHash would check — the same value State(id) would return.
+func TestStateFor_PendingTaskReturnsPendingHash(t *testing.T) {
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	g, pendingState := pendSpec(t, spec)
+
+	st := g.StateFor("repo/deploy", spec)
+	if st.PendingHash == "" {
+		t.Fatal("StateFor: PendingHash empty for a genuinely pending task")
+	}
+	if !reflect.DeepEqual(pendingState, st) {
+		t.Errorf("StateFor diverges from State for a pending task:\nState:    %+v\nStateFor: %+v", pendingState, st)
+	}
+}
+
+// TestStateFor_ArmedTaskReturnsEmptyPendingHash pins the non-pending branch:
+// an armed task's StateFor render must carry an empty PendingHash, exactly
+// like CurrentState.
+func TestStateFor_ArmedTaskReturnsEmptyPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := g.StateFor("repo/deploy", spec)
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty for an armed task", st.PendingHash)
+	}
+}
+
+// TestStateFor_ConcurrentWithAdmit races StateFor against Admit on the same
+// id under the race detector (`go test -race`, as CI runs) — the exact
+// scenario CodeRabbit's review of #858 flagged: a task transitioning from
+// not-pending to pending while a state read is in flight. StateFor's single
+// locked snapshot of the pending map means every observed result is
+// internally consistent (a real hash iff the entry was pending at that
+// snapshot); this test's job is to prove there's no data race in reaching
+// that snapshot, and spot-check the consistency invariant along the way.
+func TestStateFor_ConcurrentWithAdmit(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/race", "export default () => {}")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			st := g.StateFor("repo/race", spec)
+			// Consistency invariant: StateFor never fabricates a hash for an
+			// id it renders as the caller-supplied spec (TaskID always
+			// matches; a non-empty hash only ever comes from a real pending
+			// entry, per renderState's construction).
+			if st.TaskID != "repo/race" {
+				t.Errorf("TaskID = %q, want repo/race", st.TaskID)
+			}
+		}
+	}()
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
+
+	// Once Admit has returned, the task is definitely pending: StateFor must
+	// now consistently report a real hash.
+	if st := g.StateFor("repo/race", spec); st.PendingHash == "" {
+		t.Error("StateFor after Admit: PendingHash empty for a pending task")
 	}
 }
 

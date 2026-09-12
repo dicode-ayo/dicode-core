@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/dicode/dicode/pkg/approval"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -26,6 +27,7 @@ type ApprovalGate interface {
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
+	StateFor(id string, k task.Kinded) approval.State
 }
 
 // SetApprovalGate wires the approval gate. Call after New and before Start.
@@ -193,6 +195,44 @@ func (s *Server) apiApprovalPendingState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	jsonOK(w, state)
+}
+
+// apiTaskState handles GET /api/tasks/{id}/state: the resolved review
+// surface for a task regardless of its approval status — what will run if
+// armed, or what is already running if the task is armed. Unlike
+// /pending-state, this never 409s on a task that isn't pending: that is the
+// whole point of it (#714), a task's sandbox surface should stay readable at
+// any time an operator wants to ask "what can this thing reach?", not only
+// during the pend/approve window.
+//
+// For a pending task this renders identically to /pending-state, including
+// PendingHash. For an armed task, PendingHash is always empty — see
+// approval.State.PendingHash's doc comment for why that must never be fed
+// back into ApproveIfHash. Auth mirrors apiApproveTask (same route group).
+//
+// Uses Gate.StateFor rather than a separate IsPending check followed by
+// State or CurrentState: two separate calls would leave a window where id
+// transitions from not-pending to pending in between, and this handler would
+// then render CurrentState's empty PendingHash for a task that actually is
+// pending by the time the response is read. StateFor decides pending-vs-not
+// and reads the data it renders from together, under one lock.
+//
+// Status codes:
+//   - 200 — the State body.
+//   - 404 — no such task.
+//   - 503 — approval gate not wired.
+func (s *Server) apiTaskState(w http.ResponseWriter, r *http.Request) {
+	id := taskIDParam(r)
+	if s.approvalGate == nil {
+		jsonErr(w, "approval gate not available", http.StatusServiceUnavailable)
+		return
+	}
+	kinded, ok := s.registry.GetKinded(id)
+	if !ok {
+		jsonErr(w, "task not found: "+id, http.StatusNotFound)
+		return
+	}
+	jsonOK(w, s.approvalGate.StateFor(id, kinded))
 }
 
 // approvePageTmpl renders the token-link confirm / result pages. Bare HTML on

@@ -61,6 +61,26 @@ func (g *fakeApprovalGate) State(id string) (approval.State, error) {
 	return approval.State{TaskID: id}, nil
 }
 
+// StateFor mirrors the real Gate.StateFor: the canned state as-is when id is
+// pending (a real, non-empty hash), or with PendingHash forced empty
+// otherwise — a fake that echoed a stashed PendingHash for a non-pending id
+// would hide the exact bug #714's review comment flagged.
+func (g *fakeApprovalGate) StateFor(id string, k task.Kinded) approval.State {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, pending := g.pending[id]
+	if st, ok := g.states[id]; ok {
+		if !pending {
+			st.PendingHash = ""
+		}
+		return st
+	}
+	if pending {
+		return approval.State{TaskID: id, PendingHash: g.pending[id]}
+	}
+	return approval.State{TaskID: id, Kind: k.KindOf(), Enabled: k.IsEnabled()}
+}
+
 func (g *fakeApprovalGate) IsPending(id string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -611,6 +631,106 @@ func TestAPI_ApprovalState_NoGate503(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
+// ── /api/tasks/{id}/state (#714) ─────────────────────────────────────────────
+//
+// Unlike /pending-state, this endpoint must answer for an armed task too —
+// that is the whole point of #714.
+
+func TestAPI_TaskState_ArmedTaskRendersWithEmptyPendingHash(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/armed-task")
+	gate := newFakeGate()
+	gate.setState("repo/armed-task", approval.State{
+		TaskID:      "repo/armed-task",
+		PendingHash: "stale-hash-must-not-leak",
+		Runtime:     "deno",
+		Permissions: approval.Permissions{Net: []string{"api.github.com"}},
+	})
+	srv.SetApprovalGate(gate)
+	// Deliberately not pending — gate.pending has no entry for this id.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Farmed-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var st approval.State
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty for an armed task", st.PendingHash)
+	}
+	if len(st.Permissions.Net) != 1 || st.Permissions.Net[0] != "api.github.com" {
+		t.Errorf("Permissions.Net = %+v", st.Permissions.Net)
+	}
+}
+
+func TestAPI_TaskState_PendingTaskMatchesPendingState(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	gate.setState("repo/pending-task", approval.State{
+		TaskID:      "repo/pending-task",
+		PendingHash: "hash-1",
+		Runtime:     "deno",
+	})
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var st approval.State
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st.PendingHash != "hash-1" {
+		t.Errorf("PendingHash = %q, want hash-1 — a genuinely pending task's hash is real and must still render", st.PendingHash)
+	}
+}
+
+func TestAPI_TaskState_UnknownTask404(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, false)
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/ghost/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_TaskState_NoGate503(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/x")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fx/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_TaskState_RequiresAuth(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, true)
+	registerMinimalTask(t, reg, "repo/armed-task")
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Farmed-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", w.Code, w.Body.String())
 	}
 }
 

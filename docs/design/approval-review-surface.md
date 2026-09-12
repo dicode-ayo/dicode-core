@@ -146,9 +146,18 @@ to display it.
 
 | Surface | Renders |
 |---|---|
-| `GET /api/tasks/{id}/pending-state` | end state, inventory, moved strip |
+| `GET /api/tasks/{id}/pending-state` | end state, inventory, moved strip — 409s once the task is no longer pending |
+| `GET /api/tasks/{id}/state` | the same end state and inventory for *any* task, pending or armed (#714) — `pending_hash` is only ever non-empty for a genuinely pending task |
 | dashboard task detail | all of the above |
 | `/approve/{token}` | task name, commit range, link — nothing else |
+
+`pending-state` stays scoped to the pend/approve window on purpose — it is
+the endpoint `ApproveIfHash` binds to, so its `pending_hash` must only ever
+be a hash a caller can legitimately replay into an approval. `state` answers
+a different, more common question — "what can this task reach right now?" —
+for a task that isn't between pend and approve at all, which is where a task
+spends nearly all of its time. Its `pending_hash` is always empty when the
+task isn't pending, specifically so it can never be mistaken for a live one.
 
 `/approve/{token}` is session-less by design; the URL travels through Slack,
 email, or ntfy, so whatever it renders is visible to everyone in that channel.
