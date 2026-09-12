@@ -272,13 +272,16 @@ input.output        // task-a's return value
 input.taskID        // "task-a"  (engine-reserved)
 input.runID         // upstream run ID
 input.status        // "success"
-input._chain_depth  // 0 on success chains
+input._chain_depth  // hop count: 1 for a directly-fired upstream
 ```
 
 Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`)
 are rejected at config-load if present in `params`. When `params` is
 empty (the default), `input` stays as the upstream's raw value — no
-wrapping — so existing chains keep working unchanged.
+wrapping — so existing chains keep working unchanged. The engine
+tracks the hop count separately from this payload, so the depth
+ceiling applies to a bare edge too even though `_chain_depth` is not
+visible to the task there.
 
 String values in `params` may reference the upstream's runtime state
 via the dispatch-time interpolation grammar — `${input.output}`,

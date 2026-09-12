@@ -46,7 +46,7 @@ type Event struct {
 	EventType  string    `json:"event_type"`
 	ActorKind  string    `json:"actor_kind"`       // "task" | "ip" | trigger source ("cron", "webhook", …)
 	ActorID    string    `json:"actor_id"`         // task id, client IP, parent run id, …
-	TargetKind string    `json:"target_kind"`      // "task" | "mcp" | "endpoint"
+	TargetKind string    `json:"target_kind"`      // "task" | "pipeline" | "mcp" | "endpoint"
 	TargetID   string    `json:"target_id"`        // task id, mcp name/tool, HTTP "METHOD /path"
 	Params     string    `json:"params,omitempty"` // sanitized JSON (see SanitizeParams) — never raw secrets
 	RunID      string    `json:"run_id,omitempty"` // associated run, when known

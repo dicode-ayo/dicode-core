@@ -18,6 +18,7 @@ const (
 type Kinded interface {
 	KindOf() string
 	TaskID() string
+	ChainTrigger() *ChainTrigger
 	SetTaskID(id string)
 	IsEnabled() bool
 	SetEnabled(b bool)
@@ -29,6 +30,8 @@ type Kinded interface {
 var _ Kinded = (*Spec)(nil)
 
 // --- *Spec implements Kinded ---
+
+func (s *Spec) ChainTrigger() *ChainTrigger { return s.Trigger.Chain }
 
 func (s *Spec) KindOf() string         { return KindTask }
 func (s *Spec) TaskID() string         { return s.ID }
