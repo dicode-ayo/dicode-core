@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -611,6 +612,98 @@ func TestCurrentState_MatchesStateExceptPendingHash(t *testing.T) {
 	pendingState.PendingHash = ""
 	if !reflect.DeepEqual(pendingState, currentState) {
 		t.Errorf("CurrentState diverges from State (modulo PendingHash):\nState:        %+v\nCurrentState: %+v", pendingState, currentState)
+	}
+}
+
+// ── StateFor (code-review follow-up on #714's PR) ────────────────────────────
+//
+// apiTaskState originally checked IsPending and then separately called State
+// or CurrentState — two locked reads of the pending map instead of one,
+// leaving a window where a task transitioning from not-pending to pending
+// in between would render CurrentState's empty PendingHash for a task that,
+// by the time the caller acts on the response, genuinely is pending.
+// StateFor closes that by deciding pending-vs-not and reading the entry it
+// renders from together, under one lock acquisition.
+
+// TestStateFor_PendingTaskReturnsPendingHash pins the pending branch: a
+// pending task's StateFor render must carry the real, non-empty hash that
+// ApproveIfHash would check — the same value State(id) would return.
+func TestStateFor_PendingTaskReturnsPendingHash(t *testing.T) {
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	g, pendingState := pendSpec(t, spec)
+
+	st := g.StateFor("repo/deploy", spec)
+	if st.PendingHash == "" {
+		t.Fatal("StateFor: PendingHash empty for a genuinely pending task")
+	}
+	if !reflect.DeepEqual(pendingState, st) {
+		t.Errorf("StateFor diverges from State for a pending task:\nState:    %+v\nStateFor: %+v", pendingState, st)
+	}
+}
+
+// TestStateFor_ArmedTaskReturnsEmptyPendingHash pins the non-pending branch:
+// an armed task's StateFor render must carry an empty PendingHash, exactly
+// like CurrentState.
+func TestStateFor_ArmedTaskReturnsEmptyPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := g.StateFor("repo/deploy", spec)
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty for an armed task", st.PendingHash)
+	}
+}
+
+// TestStateFor_ConcurrentWithAdmit races StateFor against Admit on the same
+// id under the race detector (`go test -race`, as CI runs) — the exact
+// scenario CodeRabbit's review of #858 flagged: a task transitioning from
+// not-pending to pending while a state read is in flight. StateFor's single
+// locked snapshot of the pending map means every observed result is
+// internally consistent (a real hash iff the entry was pending at that
+// snapshot); this test's job is to prove there's no data race in reaching
+// that snapshot, and spot-check the consistency invariant along the way.
+func TestStateFor_ConcurrentWithAdmit(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/race", "export default () => {}")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			st := g.StateFor("repo/race", spec)
+			// Consistency invariant: StateFor never fabricates a hash for an
+			// id it renders as the caller-supplied spec (TaskID always
+			// matches; a non-empty hash only ever comes from a real pending
+			// entry, per renderState's construction).
+			if st.TaskID != "repo/race" {
+				t.Errorf("TaskID = %q, want repo/race", st.TaskID)
+			}
+		}
+	}()
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
+
+	// Once Admit has returned, the task is definitely pending: StateFor must
+	// now consistently report a real hash.
+	if st := g.StateFor("repo/race", spec); st.PendingHash == "" {
+		t.Error("StateFor after Admit: PendingHash empty for a pending task")
 	}
 }
 

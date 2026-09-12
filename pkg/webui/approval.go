@@ -27,7 +27,7 @@ type ApprovalGate interface {
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
-	CurrentState(id string, k task.Kinded) approval.State
+	StateFor(id string, k task.Kinded) approval.State
 }
 
 // SetApprovalGate wires the approval gate. Call after New and before Start.
@@ -210,6 +210,13 @@ func (s *Server) apiApprovalPendingState(w http.ResponseWriter, r *http.Request)
 // approval.State.PendingHash's doc comment for why that must never be fed
 // back into ApproveIfHash. Auth mirrors apiApproveTask (same route group).
 //
+// Uses Gate.StateFor rather than a separate IsPending check followed by
+// State or CurrentState: two separate calls would leave a window where id
+// transitions from not-pending to pending in between, and this handler would
+// then render CurrentState's empty PendingHash for a task that actually is
+// pending by the time the response is read. StateFor decides pending-vs-not
+// and reads the data it renders from together, under one lock.
+//
 // Status codes:
 //   - 200 — the State body.
 //   - 404 — no such task.
@@ -225,16 +232,7 @@ func (s *Server) apiTaskState(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found: "+id, http.StatusNotFound)
 		return
 	}
-	if s.approvalGate.IsPending(id) {
-		if state, err := s.approvalGate.State(id); err == nil {
-			jsonOK(w, state)
-			return
-		}
-		// Pending flipped between the IsPending check and State (a race with
-		// the reconciler or a concurrent approve) — the registry's current
-		// spec is still a truthful answer, so fall through rather than error.
-	}
-	jsonOK(w, s.approvalGate.CurrentState(id, kinded))
+	jsonOK(w, s.approvalGate.StateFor(id, kinded))
 }
 
 // approvePageTmpl renders the token-link confirm / result pages. Bare HTML on

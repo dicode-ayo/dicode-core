@@ -217,8 +217,37 @@ func (g *Gate) State(id string) (State, error) {
 // PendingHash on the returned State is always empty: there is no in-flight
 // approval this render could bind to, and it must never be usable as one —
 // see State.PendingHash and #714.
+//
+// Callers that don't already know id's pending status should use StateFor
+// instead — calling IsPending and then CurrentState separately reopens the
+// exact race StateFor closes (see its doc comment).
 func (g *Gate) CurrentState(id string, k task.Kinded) State {
 	return g.renderState(id, k, "")
+}
+
+// StateFor resolves the review surface for id in one atomic step: the
+// pending snapshot if id is pending at the instant of the pending-map read,
+// or CurrentState(id, k) otherwise. k is only used in the latter case — a
+// pending id renders from its own pending entry instead, exactly as State
+// would.
+//
+// This exists because checking IsPending and then separately calling State
+// or CurrentState — as callers naturally do — leaves a window open: id can
+// transition from not-pending to pending (via Admit, on another goroutine)
+// between the two calls, and the caller would then render CurrentState's
+// empty PendingHash for a task that is, by the time the caller acts on the
+// response, genuinely pending. StateFor's pending-vs-not decision and the
+// entry it renders from are read together under one lock acquisition, so
+// there is no gap between deciding which branch applies and which data
+// backs it.
+func (g *Gate) StateFor(id string, k task.Kinded) State {
+	g.mu.Lock()
+	ent, isPending := g.pending[id]
+	g.mu.Unlock()
+	if isPending {
+		return g.renderState(id, ent.kinded, ent.hash)
+	}
+	return g.CurrentState(id, k)
 }
 
 // renderState is State and CurrentState's shared body: resolve kinded

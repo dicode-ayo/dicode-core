@@ -61,16 +61,22 @@ func (g *fakeApprovalGate) State(id string) (approval.State, error) {
 	return approval.State{TaskID: id}, nil
 }
 
-// CurrentState mirrors the real Gate.CurrentState: same canned states map as
-// State, but never errors and always reports an empty PendingHash — a
-// fake that echoed a stashed PendingHash here would hide the exact bug
-// #714 exists to prevent.
-func (g *fakeApprovalGate) CurrentState(id string, k task.Kinded) approval.State {
+// StateFor mirrors the real Gate.StateFor: the canned state as-is when id is
+// pending (a real, non-empty hash), or with PendingHash forced empty
+// otherwise — a fake that echoed a stashed PendingHash for a non-pending id
+// would hide the exact bug #714's review comment flagged.
+func (g *fakeApprovalGate) StateFor(id string, k task.Kinded) approval.State {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	_, pending := g.pending[id]
 	if st, ok := g.states[id]; ok {
-		st.PendingHash = ""
+		if !pending {
+			st.PendingHash = ""
+		}
 		return st
+	}
+	if pending {
+		return approval.State{TaskID: id, PendingHash: g.pending[id]}
 	}
 	return approval.State{TaskID: id, Kind: k.KindOf(), Enabled: k.IsEnabled()}
 }
