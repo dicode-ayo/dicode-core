@@ -14,6 +14,7 @@ import (
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -218,7 +219,7 @@ type Engine struct {
 	// inputStore persists run inputs at run-start (Task 10). nil = disabled.
 	// Set via SetInputStore after the daemon has initialised secrets so the
 	// derived sub-key is available.
-	inputStore *registry.InputStore
+	inputStore *runinput.Store
 
 	guards *chainGuards
 }
@@ -268,7 +269,7 @@ func (e *Engine) SetSecrets(s secrets.Chain) {
 // SetInputStore wires the InputStore so every run's input is persisted at
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
-func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
+func (e *Engine) SetInputStore(s *runinput.Store) { e.inputStore = s }
 
 // SetFireGuard installs a veto consulted before any run starts (see the
 // fireGuard field doc). A nil guard removes the veto.

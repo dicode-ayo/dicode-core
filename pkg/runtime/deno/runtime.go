@@ -21,6 +21,7 @@ import (
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -142,12 +143,12 @@ func (rt *Runtime) live() *pkgruntime.BridgeDeps {
 // instance. When this Runtime is a per-version executor (parent != nil) it
 // reads from the parent so that a daemon-level SetInputStore call that runs
 // after NewExecutor is still visible here.
-func (rt *Runtime) effectiveInputStore() *registry.InputStore { return rt.live().InputStore }
+func (rt *Runtime) effectiveInputStore() *runinput.Store { return rt.live().InputStore }
 
 // effectiveReplayer returns the live Replayer, reading from parent when this
 // is a per-version executor so that a late SetReplayer call on the manager
 // propagates without extra bookkeeping.
-func (rt *Runtime) effectiveReplayer() *registry.Replayer { return rt.live().Replayer }
+func (rt *Runtime) effectiveReplayer() *runinput.Replayer { return rt.live().Replayer }
 
 // effectiveSourceMgr returns the live SourceController, reading from parent
 // when this is a per-version executor.

@@ -17,6 +17,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
@@ -50,7 +51,7 @@ type blockingFetcher struct {
 	calls int
 }
 
-func (f *blockingFetcher) Fetch(ctx context.Context, runID, key string, storedAt int64) (registry.PersistedInput, error) {
+func (f *blockingFetcher) Fetch(ctx context.Context, runID, key string, storedAt int64) (runinput.Persisted, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -60,7 +61,7 @@ func (f *blockingFetcher) Fetch(ctx context.Context, runID, key string, storedAt
 	if f.release != nil {
 		<-f.release
 	}
-	return registry.PersistedInput{}, nil
+	return runinput.Persisted{}, nil
 }
 
 func (f *blockingFetcher) count() int {
@@ -97,7 +98,7 @@ func newReplayDrainEnv(t *testing.T, fetcher *blockingFetcher) (*Server, *trigge
 		t.Fatalf("SetRunInput: %v", err)
 	}
 
-	srv := &Server{engine: eng, replayer: registry.NewReplayer(reg, fetcher, stubReplayRunner{})}
+	srv := &Server{engine: eng, replayer: runinput.NewReplayer(reg, fetcher, stubReplayRunner{})}
 	return srv, eng, runID
 }
 

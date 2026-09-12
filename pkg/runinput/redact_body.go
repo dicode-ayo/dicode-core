@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"crypto/sha256"
@@ -12,7 +12,7 @@ import (
 )
 
 // redactBody applies content-type-aware redaction to an HTTP body. Returns
-// a partially-populated PersistedInput with the BodyKind/Body/BodyHash/
+// a partially-populated Persisted with the BodyKind/Body/BodyHash/
 // BodyParts fields set; the caller fills in the rest of the struct.
 //
 // Behavior by media type:
@@ -29,8 +29,8 @@ import (
 //
 // BodyHash is always sha256(raw) for forensic comparison even when the body
 // is also persisted (json/form).
-func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *[]string) PersistedInput {
-	out := PersistedInput{}
+func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *[]string) Persisted {
+	out := Persisted{}
 	sum := sha256.Sum256(raw)
 	hash := hex.EncodeToString(sum[:])
 

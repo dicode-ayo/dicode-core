@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 // WebhookFields is the subset of HTTP context the redaction layer needs.
 // Mirrors pkgruntime.WebhookContext to avoid a runtime → registry import edge.
 // The trigger engine maps its WebhookContext into this struct before calling
-// BuildPersistedInputFromRunOpts.
+// BuildFromRunOpts.
 type WebhookFields struct {
 	Method          string
 	Path            string
@@ -20,16 +20,16 @@ type WebhookFields struct {
 	BodyFullTextual bool
 }
 
-// BuildPersistedInputFromRunOpts is the public helper trigger.Engine uses to
-// build a PersistedInput from a run's source + params + input. Marshalling +
+// BuildFromRunOpts is the public helper trigger.Engine uses to
+// build a Persisted from a run's source + params + input. Marshalling +
 // redaction happen here so callers don't need direct access to redactParams.
 //
 // web must be non-nil for webhook-triggered runs; it carries the raw HTTP
 // context so content-type-aware body redaction (Task 7) and header/query
 // redaction (Task 6) are actually invoked. For non-webhook sources (cron,
 // chain, manual, daemon) pass nil and the prior parsed-input fallback applies.
-func BuildPersistedInputFromRunOpts(source string, params map[string]string, input any, web *WebhookFields) PersistedInput {
-	in := PersistedInput{Source: source}
+func BuildFromRunOpts(source string, params map[string]string, input any, web *WebhookFields) Persisted {
+	in := Persisted{Source: source}
 	redacted := []string{}
 
 	// params is map[string]string — wrap into a redactable map.
@@ -73,7 +73,7 @@ func BuildPersistedInputFromRunOpts(source string, params map[string]string, inp
 	return in
 }
 
-// PersistedInput is the structured shape of a run input as it lives encrypted
+// Persisted is the structured shape of a run input as it lives encrypted
 // at rest. Fields cover the union of webhook (HTTP), manual (params), cron
 // (none), chain (params + parent context), replay (carries persisted input
 // forward), and daemon trigger sources.
@@ -83,7 +83,7 @@ func BuildPersistedInputFromRunOpts(source string, params map[string]string, inp
 // redactPlaceholder. RedactedFields lists the dotted paths that were
 // redacted, surfaced to the auto-fix agent prompt so it can reason about
 // what's missing without seeing secret values.
-type PersistedInput struct {
+type Persisted struct {
 	Source         string              `json:"source"`                    // webhook | cron | manual | chain | daemon | replay
 	Method         string              `json:"method,omitempty"`          // webhook only
 	Path           string              `json:"path,omitempty"`            // webhook only

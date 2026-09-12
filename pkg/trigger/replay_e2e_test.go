@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 )
 
 // TestReplay_FullPipeline exercises the complete v0.2.0 replay surface:
 //  1. Persist input via the trigger engine (engine + deno runtime both wired).
-//  2. Replay via registry.NewReplayer + trigger.NewReplayRunner(engine).
+//  2. Replay via runinput.NewReplayer + trigger.NewReplayRunner(engine).
 //  3. Assert the new run carries TriggerSource = "replay" and ParentRunID = original.
 //  4. Assert the new run completes with StatusSuccess.
 func TestReplay_FullPipeline(t *testing.T) {
@@ -46,7 +47,7 @@ func TestReplay_FullPipeline(t *testing.T) {
 	}
 
 	// Replay via the Replayer + adapter.
-	replayer := registry.NewReplayer(e.reg, is, NewReplayRunner(e.engine))
+	replayer := runinput.NewReplayer(e.reg, is, NewReplayRunner(e.engine))
 	newRunID, err := replayer.Replay(context.Background(), originalRunID, "", "", "")
 	if err != nil {
 		t.Fatalf("Replay: %v", err)

@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"context"
@@ -43,10 +43,10 @@ func TestInputStore_RoundTrip(t *testing.T) {
 
 	mr := &mockRunner{store: map[string]string{}}
 	c := newTestInputCrypto(t)
-	s := NewInputStore(c, mr, "buildin/local-storage")
+	s := NewStore(c, mr, "buildin/local-storage")
 
 	runID := uuid.New().String()
-	in := PersistedInput{Source: "webhook", Method: "POST", Path: "/hooks/x"}
+	in := Persisted{Source: "webhook", Method: "POST", Path: "/hooks/x"}
 
 	key, size, storedAt, err := s.Persist(context.Background(), runID, in)
 	if err != nil {
@@ -75,23 +75,23 @@ func TestInputStore_RoundTrip(t *testing.T) {
 		t.Errorf("got = %#v", got)
 	}
 
-	// Delete + fetch returns ErrInputUnavailable.
+	// Delete + fetch returns ErrUnavailable.
 	if err := s.Delete(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Fetch(context.Background(), runID, key, storedAt); !errors.Is(err, ErrInputUnavailable) {
-		t.Errorf("expected ErrInputUnavailable after delete; got %v", err)
+	if _, err := s.Fetch(context.Background(), runID, key, storedAt); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("expected ErrUnavailable after delete; got %v", err)
 	}
 }
 
 func TestInputStore_StoredBlobIsCiphertext(t *testing.T) {
 	mr := &mockRunner{store: map[string]string{}}
 	c := newTestInputCrypto(t)
-	s := NewInputStore(c, mr, "any-storage")
+	s := NewStore(c, mr, "any-storage")
 
 	runID := uuid.New().String()
 	plaintextMarker := "VERY_SENSITIVE_MARKER"
-	in := PersistedInput{Source: "webhook", Path: plaintextMarker}
+	in := Persisted{Source: "webhook", Path: plaintextMarker}
 
 	key, _, _, err := s.Persist(context.Background(), runID, in)
 	if err != nil {
@@ -113,23 +113,23 @@ func TestInputStore_StoredBlobIsCiphertext(t *testing.T) {
 func TestInputStore_FetchUnknownKeyReturnsErrInputUnavailable(t *testing.T) {
 	mr := &mockRunner{store: map[string]string{}}
 	c := newTestInputCrypto(t)
-	s := NewInputStore(c, mr, "any-storage")
+	s := NewStore(c, mr, "any-storage")
 
 	runID := uuid.New().String()
 	_, err := s.Fetch(context.Background(), runID, "missing-key", time.Now().Unix())
-	if !errors.Is(err, ErrInputUnavailable) {
-		t.Errorf("expected ErrInputUnavailable; got %v", err)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Errorf("expected ErrUnavailable; got %v", err)
 	}
 }
 
 func TestInputStore_FetchWithWrongRunIDFails(t *testing.T) {
 	mr := &mockRunner{store: map[string]string{}}
 	c := newTestInputCrypto(t)
-	s := NewInputStore(c, mr, "any-storage")
+	s := NewStore(c, mr, "any-storage")
 
 	runA := uuid.New().String()
 	runB := uuid.New().String()
-	in := PersistedInput{Source: "webhook"}
+	in := Persisted{Source: "webhook"}
 
 	key, _, storedAt, err := s.Persist(context.Background(), runA, in)
 	if err != nil {
@@ -148,9 +148,9 @@ func (r *errRunner) RunTaskSync(ctx context.Context, taskID string, params map[s
 
 func TestInputStore_PersistPropagatesRunnerError(t *testing.T) {
 	c := newTestInputCrypto(t)
-	s := NewInputStore(c, &errRunner{err: errors.New("storage backend down")}, "any-storage")
+	s := NewStore(c, &errRunner{err: errors.New("storage backend down")}, "any-storage")
 	runID := uuid.New().String()
-	if _, _, _, err := s.Persist(context.Background(), runID, PersistedInput{}); err == nil {
+	if _, _, _, err := s.Persist(context.Background(), runID, Persisted{}); err == nil {
 		t.Error("expected error from runner to propagate")
 	}
 }

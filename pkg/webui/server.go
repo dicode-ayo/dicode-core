@@ -30,6 +30,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -161,7 +162,7 @@ type Server struct {
 	// replayer fires new runs from persisted inputs. Nil when input persistence
 	// is disabled (SetReplayer not called); the /api/runs/{runID}/replay
 	// endpoint returns 503 in that case.
-	replayer *registry.Replayer
+	replayer *runinput.Replayer
 
 	// resumer spawns the continuation run for a suspended run (SetResumer).
 	// Nil when not wired; the /api/runs/{runID}/resume endpoint returns 503.
@@ -186,7 +187,7 @@ type Server struct {
 
 // SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
 // endpoint. Pass nil to disable (the endpoint will return 503).
-func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
+func (s *Server) SetReplayer(r *runinput.Replayer) { s.replayer = r }
 
 // SetTestGuard installs the approval gate's veto for POST /api/tasks/{id}/test.
 // A non-nil error from the guard refuses the test run with 409. nil allows
@@ -2889,9 +2890,9 @@ func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var taskNotFound *trigger.TaskNotFoundError
 		switch {
-		case errors.Is(err, registry.ErrRunNotReplayable):
+		case errors.Is(err, runinput.ErrRunNotReplayable):
 			jsonErr(w, "run is suspended; resume it instead of replaying: "+runID, http.StatusConflict)
-		case errors.Is(err, registry.ErrInputUnavailable):
+		case errors.Is(err, runinput.ErrUnavailable):
 			jsonErr(w, "no persisted input for run: "+runID, http.StatusBadRequest)
 		case errors.Is(err, registry.ErrRunNotFound):
 			jsonErr(w, "run not found: "+runID, http.StatusNotFound)

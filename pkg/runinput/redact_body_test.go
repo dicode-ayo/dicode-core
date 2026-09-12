@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"crypto/sha256"

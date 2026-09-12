@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"bytes"
@@ -8,15 +8,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// newTestInputCrypto returns an InputCrypto seeded with a fixed 32-byte test
+// newTestInputCrypto returns an Crypto seeded with a fixed 32-byte test
 // key. NEVER used in production.
-func newTestInputCrypto(t *testing.T) *InputCrypto {
+func newTestInputCrypto(t *testing.T) *Crypto {
 	t.Helper()
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
 	}
-	return NewInputCrypto(key)
+	return NewCrypto(key)
 }
 
 func TestInputCrypto_RoundTrip(t *testing.T) {

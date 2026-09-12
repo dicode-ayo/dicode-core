@@ -28,6 +28,7 @@ import (
 	"github.com/dicode/dicode/pkg/metrics"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
@@ -354,7 +355,7 @@ func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *regist
 // the InputStore so dicode.runs.replay finds a populated store — or nil when
 // persistence is disabled or unavailable. srv.SetReplayer is called by run()
 // after webui is built.
-func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg *registry.Registry, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) *registry.Replayer {
+func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg *registry.Registry, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) *runinput.Replayer {
 	if !cfg.Defaults.RunInputs.IsEnabled() {
 		log.Info("run-input persistence disabled by config")
 		return nil
@@ -381,13 +382,13 @@ func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg
 		return nil
 	}
 	runner := trigger.NewInputStoreTaskRunner(eng)
-	is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
+	is := runinput.NewStore(runinput.NewCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
 	eng.SetInputStore(is)
 	denoRT.SetInputStore(is)
 	pythonRT.SetInputStore(is)
 	// Replayer composes InputStore.Fetch + the engine's fireAsync.
 	// Wired after InputStore so dicode.runs.replay finds a populated store.
-	replayer := registry.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
+	replayer := runinput.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
 	denoRT.SetReplayer(replayer)
 	pythonRT.SetReplayer(replayer)
 	log.Info("run-input persistence enabled",
@@ -738,7 +739,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 
 // buildWebUI exports the relay-related env vars and builds the web UI server
 // with its approval / replay wiring (steps 8 + 8.5).
-func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
+func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *runinput.Replayer, log *zap.Logger) (*webui.Server, error) {
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080

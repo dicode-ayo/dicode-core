@@ -16,6 +16,7 @@ import (
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -298,13 +299,13 @@ func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opt
 	})
 
 	if e.inputStore != nil && e.shouldPersistInput(spec) {
-		var web *registry.WebhookFields
+		var web *runinput.WebhookFields
 		if opts.WebhookCtx != nil {
 			bft := false
 			if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil {
 				bft = *spec.RunInputs.BodyFullTextual
 			}
-			web = &registry.WebhookFields{
+			web = &runinput.WebhookFields{
 				Method:          opts.WebhookCtx.Method,
 				Path:            opts.WebhookCtx.Path,
 				Headers:         opts.WebhookCtx.Headers,
@@ -314,10 +315,10 @@ func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opt
 				BodyFullTextual: bft,
 			}
 		}
-		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
+		in := runinput.BuildFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
-			if errors.Is(perr, registry.ErrStorageTaskNotRegistered) {
+			if errors.Is(perr, runinput.ErrStorageTaskNotRegistered) {
 				// Startup race (#523): daemon-triggered runs (tray, relay-*,
 				// nginx-start) fire before buildin/local-storage registers, so
 				// the backing store isn't ready yet. Expected and self-healing —

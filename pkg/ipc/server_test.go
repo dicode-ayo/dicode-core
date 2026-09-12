@@ -19,6 +19,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -1845,8 +1846,8 @@ func (f *fakeInputBlobStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (f *fakeInputBlobStore) Fetch(_ context.Context, _, _ string, _ int64) (registry.PersistedInput, error) {
-	return registry.PersistedInput{}, errors.New("fakeInputBlobStore: Fetch not implemented")
+func (f *fakeInputBlobStore) Fetch(_ context.Context, _, _ string, _ int64) (runinput.Persisted, error) {
+	return runinput.Persisted{}, errors.New("fakeInputBlobStore: Fetch not implemented")
 }
 
 // TestIPC_DeleteInputs_LeavesFailedBlobDeletesUncleared is the regression

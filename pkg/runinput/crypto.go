@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"crypto/rand"
@@ -9,7 +9,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// InputCrypto encrypts run-input blobs with XChaCha20-Poly1305 and a
+// Crypto encrypts run-input blobs with XChaCha20-Poly1305 and a
 // fixed-width binary AAD that binds each ciphertext to the runID and
 // stored_at timestamp of its row in the runs table.
 //
@@ -19,15 +19,15 @@ import (
 // Cross-row splicing fails decryption: a copy-paste of one row's blob into
 // another row's storage handle yields a different AAD, which AEAD-Open
 // rejects.
-type InputCrypto struct {
+type Crypto struct {
 	key []byte // 32-byte sub-key from secrets.LocalProvider.DeriveSubKey("dicode/run-inputs/v1")
 }
 
-// NewInputCrypto wraps a 32-byte key. The caller is responsible for
+// NewCrypto wraps a 32-byte key. The caller is responsible for
 // obtaining the key from a SubKeyDeriver — typically
 // secrets.LocalProvider.DeriveSubKey("dicode/run-inputs/v1").
-func NewInputCrypto(key []byte) *InputCrypto {
-	return &InputCrypto{key: key}
+func NewCrypto(key []byte) *Crypto {
+	return &Crypto{key: key}
 }
 
 // makeAAD returns the 24-byte fixed-width AAD that binds a blob to its row.
@@ -45,7 +45,7 @@ func makeAAD(runID string, storedAt int64) ([]byte, error) {
 }
 
 // Encrypt seals plaintext with the run's row identity in the AAD.
-func (c *InputCrypto) Encrypt(plaintext []byte, runID string, storedAt int64) ([]byte, error) {
+func (c *Crypto) Encrypt(plaintext []byte, runID string, storedAt int64) ([]byte, error) {
 	aead, err := chacha20poly1305.NewX(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("aead: %w", err)
@@ -73,7 +73,7 @@ func (c *InputCrypto) Encrypt(plaintext []byte, runID string, storedAt int64) ([
 }
 
 // Decrypt opens a blob produced by Encrypt for the same runID + storedAt.
-func (c *InputCrypto) Decrypt(blob []byte, runID string, storedAt int64) ([]byte, error) {
+func (c *Crypto) Decrypt(blob []byte, runID string, storedAt int64) ([]byte, error) {
 	aead, err := chacha20poly1305.NewX(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("aead: %w", err)

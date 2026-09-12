@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import "testing"
 
@@ -283,7 +283,7 @@ func TestBuildPersistedInputFromRunOpts_RedactsApproveURL(t *testing.T) {
 		"hash":        "abc123",
 		"approve_url": "https://host/approve/tok-secret-xyz",
 	}
-	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+	in := BuildFromRunOpts("manual", params, nil, nil)
 
 	if got := in.Params["approve_url"]; got != redactPlaceholder {
 		t.Errorf("params.approve_url = %v, want redacted placeholder", got)
@@ -314,7 +314,7 @@ func TestBuildPersistedInputFromRunOpts_KeepsResumeURL(t *testing.T) {
 		"run_id":     "run-9",
 		"resume_url": "https://host/?run=run-9",
 	}
-	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+	in := BuildFromRunOpts("manual", params, nil, nil)
 
 	if got := in.Params["resume_url"]; got != "https://host/?run=run-9" {
 		t.Errorf("params.resume_url = %v, want unredacted", got)
@@ -458,14 +458,14 @@ func TestRedactQuery_ValueShapeCredential_UnlistedName(t *testing.T) {
 }
 
 // End-to-end regression for #810 through the same entry point the approval
-// hook's notify_task fire uses (BuildPersistedInputFromRunOpts), but with the
+// hook's notify_task fire uses (BuildFromRunOpts), but with the
 // token under a field name the deny-list has never heard of.
 func TestBuildPersistedInputFromRunOpts_RedactsCredentialUnderAnyFieldName(t *testing.T) {
 	params := map[string]string{
 		"task_id": "repo/pending-task",
 		"link":    "https://host/approve/dcap_deadbeef",
 	}
-	in := BuildPersistedInputFromRunOpts("manual", params, nil, nil)
+	in := BuildFromRunOpts("manual", params, nil, nil)
 
 	if got := in.Params["link"]; got != redactPlaceholder {
 		t.Errorf("params.link = %v, want redacted placeholder", got)

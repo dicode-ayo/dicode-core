@@ -1,4 +1,4 @@
-package registry
+package runinput
 
 import (
 	"context"
@@ -41,13 +41,13 @@ func TestReplay_FetchesInputAndFires(t *testing.T) {
 	// Persist an input via the round-trip helpers from #233.
 	mr := &mockRunner{store: map[string]string{}}
 	c := newTestInputCrypto(t)
-	is := NewInputStore(c, mr, "fake-storage")
+	is := NewStore(c, mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
 	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
-	in := PersistedInput{Source: "webhook", Method: "POST"}
+	in := Persisted{Source: "webhook", Method: "POST"}
 	key, size, storedAt, err := is.Persist(ctx, originalRunID, in)
 	if err != nil {
 		t.Fatal(err)
@@ -76,9 +76,9 @@ func TestReplay_FetchesInputAndFires(t *testing.T) {
 	if call.parentRunID != originalRunID {
 		t.Errorf("parentRunID = %q, want %q", call.parentRunID, originalRunID)
 	}
-	got, ok := call.input.(PersistedInput)
+	got, ok := call.input.(Persisted)
 	if !ok {
-		t.Fatalf("input type = %T, want PersistedInput", call.input)
+		t.Fatalf("input type = %T, want Persisted", call.input)
 	}
 	if got.Source != "webhook" || got.Method != "POST" {
 		t.Errorf("input = %#v", got)
@@ -90,13 +90,13 @@ func TestReplay_TaskNameOverride(t *testing.T) {
 	ctx := context.Background()
 
 	mr := &mockRunner{store: map[string]string{}}
-	is := NewInputStore(newTestInputCrypto(t), mr, "fake-storage")
+	is := NewStore(newTestInputCrypto(t), mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
 	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
-	key, size, storedAt, err := is.Persist(ctx, originalRunID, PersistedInput{Source: "webhook"})
+	key, size, storedAt, err := is.Persist(ctx, originalRunID, Persisted{Source: "webhook"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestReplay_NoStoredInput_ReturnsErrInputUnavailable(t *testing.T) {
 	ctx := context.Background()
 
 	mr := &mockRunner{store: map[string]string{}}
-	is := NewInputStore(newTestInputCrypto(t), mr, "fake-storage")
+	is := NewStore(newTestInputCrypto(t), mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
 	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
@@ -132,8 +132,8 @@ func TestReplay_NoStoredInput_ReturnsErrInputUnavailable(t *testing.T) {
 	replayer := NewReplayer(r, is, runner)
 
 	_, err := replayer.Replay(ctx, originalRunID, "", "", "")
-	if !errors.Is(err, ErrInputUnavailable) {
-		t.Errorf("got %v, want ErrInputUnavailable", err)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Errorf("got %v, want ErrUnavailable", err)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestReplay_RunNotFound(t *testing.T) {
 	r := newTestRegistry(t)
 	ctx := context.Background()
 
-	is := NewInputStore(newTestInputCrypto(t), &mockRunner{store: map[string]string{}}, "fake-storage")
+	is := NewStore(newTestInputCrypto(t), &mockRunner{store: map[string]string{}}, "fake-storage")
 	runner := &fakeReplayRunner{}
 	replayer := NewReplayer(r, is, runner)
 
@@ -158,13 +158,13 @@ func TestReplay_SuspendedRunRejected(t *testing.T) {
 	r := newTestRegistry(t)
 	ctx := context.Background()
 
-	is := NewInputStore(newTestInputCrypto(t), &mockRunner{store: map[string]string{}}, "fake-storage")
+	is := NewStore(newTestInputCrypto(t), &mockRunner{store: map[string]string{}}, "fake-storage")
 
 	runID := uuid.New().String()
 	if _, err := r.StartRunWithID(ctx, runID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
-	key, size, storedAt, err := is.Persist(ctx, runID, PersistedInput{Source: "webhook"})
+	key, size, storedAt, err := is.Persist(ctx, runID, Persisted{Source: "webhook"})
 	if err != nil {
 		t.Fatal(err)
 	}

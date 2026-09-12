@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -120,9 +121,9 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	// e.inputStore != nil is therefore correct and intentional. Revisit if
 	// kind: PipelineTask ever gains a run_inputs opt-out field.
 	if e.inputStore != nil {
-		var web *registry.WebhookFields
+		var web *runinput.WebhookFields
 		if opts.WebhookCtx != nil {
-			web = &registry.WebhookFields{
+			web = &runinput.WebhookFields{
 				Method:      opts.WebhookCtx.Method,
 				Path:        opts.WebhookCtx.Path,
 				Headers:     opts.WebhookCtx.Headers,
@@ -131,7 +132,7 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 				ContentType: opts.WebhookCtx.ContentType,
 			}
 		}
-		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
+		in := runinput.BuildFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), runID, in)
 		if perr != nil {
 			// Log only a sanitized error category. The full perr chain may
