@@ -23,8 +23,8 @@ const DefaultDataDirName = ".dicode"
 // writes the first config. They must agree, because the CLI dials whatever
 // socket sits at the path it computes and sends the subcommand's request over
 // it — a path the daemon is not listening on is at best a dead command, and at
-// worst gets a second daemon started, which unlinks the live socket and
-// rebinds it (ControlServer.Start removes a stale socket before binding).
+// worst gets a second daemon started against a directory that already has
+// one.
 //
 // DICODE_DATA_DIR outranks the config. The config is discovered from wherever
 // the process happens to be standing; the env var is someone stating which

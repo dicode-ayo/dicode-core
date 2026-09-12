@@ -43,15 +43,44 @@ func TestReadChildMetrics_CountsTheWholeGroup(t *testing.T) {
 		got.ChildRSSMB, leaderRSS)
 }
 
-// TestProcessGroupMembers_LeaderOnly: a process in no group of its own must
-// not drag in every other process sharing the parent's group.
+// TestProcessGroupMembers_LeaderOnly: this process shares its group with the
+// rest of the test binary's session, so matching on group id alone would
+// gather every one of them. Only a PID that actually leads a group has
+// members, and this one does not.
 func TestProcessGroupMembers_LeaderOnly(t *testing.T) {
 	self := os.Getpid()
-	members := processGroupMembers(self)
-	for _, pid := range members {
-		if pid == self {
+	got := processGroupMembers([]int{self})
+	if len(got[self]) != 1 || got[self][0] != self {
+		t.Errorf("processGroupMembers([%d]) = %v; want just the pid itself", self, got[self])
+	}
+}
+
+// TestProcessGroupMembers_GathersOneScanPerCall: every tracked PID's group has
+// to come out of the single /proc walk, not just the first.
+func TestProcessGroupMembers_GathersEveryGroup(t *testing.T) {
+	var leaders []int
+	for i := 0; i < 2; i++ {
+		cmd := exec.Command("/bin/sh", "-c", `sh -c 'while :; do sleep 0.05; done' & wait`)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		pid := cmd.Process.Pid
+		defer func() {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}()
+		leaders = append(leaders, pid)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got := processGroupMembers(leaders)
+		if len(got[leaders[0]]) > 1 && len(got[leaders[1]]) > 1 {
 			return
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("processGroupMembers(%d) = %v; want it to contain the pid itself", self, members)
+	got := processGroupMembers(leaders)
+	t.Errorf("processGroupMembers(%v) = %v; want both groups to carry their child", leaders, got)
 }

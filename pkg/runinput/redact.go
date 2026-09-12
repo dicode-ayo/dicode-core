@@ -7,7 +7,8 @@ import (
 )
 
 // WebhookFields is the subset of HTTP context the redaction layer needs.
-// Mirrors pkgruntime.WebhookContext to avoid a runtime → registry import edge.
+// Mirrors pkgruntime.WebhookContext, which this package must not import: the
+// runtimes depend on it, not the other way round.
 // The trigger engine maps its WebhookContext into this struct before calling
 // BuildFromRunOpts.
 type WebhookFields struct {

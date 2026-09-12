@@ -99,30 +99,40 @@ func readProcRSSMB(pid int) float64 {
 	return 0
 }
 
-// processGroupMembers returns every live process in the group led by pid,
-// including pid itself. The runtimes start each task subprocess as its own
-// group leader, so this is the task's whole process tree — for a Python run
+// processGroupMembers maps each of pids to every live process in the group it
+// leads, including itself. The runtimes start each task subprocess as its own
+// group leader, so a group is one task's whole process tree — for a Python run
 // that is `uv` plus the interpreter it spawned, whose footprint is the one
 // worth reporting.
 //
-// A pid that leads no group yields just itself: matching on the group id
-// alone would otherwise sweep in every process sharing the daemon's group.
-func processGroupMembers(pid int) []int {
+// /proc is walked once for the whole set rather than once per PID: a host
+// running twenty tasks among two thousand processes would otherwise cost forty
+// thousand file reads per metrics read, and the dashboard polls.
+//
+// A PID leading no group yields just itself. Matching on group id alone would
+// sweep in every process sharing the daemon's own group.
+func processGroupMembers(pids []int) map[int][]int {
+	groups := make(map[int][]int, len(pids))
+	tracked := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		groups[pid] = []int{pid}
+		tracked[pid] = true
+	}
+
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return []int{pid}
+		return groups
 	}
-	members := []int{pid}
 	for _, e := range entries {
 		member, err := strconv.Atoi(e.Name())
-		if err != nil || member == pid {
+		if err != nil || tracked[member] {
 			continue
 		}
-		if readProcPGID(member) == pid {
-			members = append(members, member)
+		if leader := readProcPGID(member); tracked[leader] {
+			groups[leader] = append(groups[leader], member)
 		}
 	}
-	return members
+	return groups
 }
 
 // readProcPGID returns a process's group id from /proc/<pid>/stat, or 0 when
@@ -132,7 +142,7 @@ func readProcPGID(pid int) int {
 	if err != nil {
 		return 0
 	}
-	// The comm field is parenthesised and may contain spaces, so the fields
+	// The comm field is parenthesized and may contain spaces, so the fields
 	// after the final ')' are the only ones safe to split: 0 = state,
 	// 1 = ppid, 2 = pgrp.
 	line := string(data)

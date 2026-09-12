@@ -3,6 +3,8 @@
 package runtime
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,18 +29,7 @@ func startGroupLeader(t *testing.T) (*exec.Cmd, int) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 1 {
-			var pid int
-			if _, err := fmtSscan(string(b), &pid); err == nil && pid > 0 {
-				return cmd, pid
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("grandchild never reported its PID")
-	return nil, 0
+	return cmd, waitForPIDFile(t, pidFile)
 }
 
 // TestProcessGroup_KillReachesTheGrandchild: a Python task runs under `uv`, so
@@ -98,5 +89,68 @@ func processAlive(pid int) bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
-// fmtSscan wraps fmt.Sscan so the import stays local to its one use.
-func fmtSscan(s string, a ...any) (int, error) { return fmt.Sscan(s, a...) }
+// TestConfigureTaskProcess_CancelKillsTheGroup: the run context's cancel is
+// what enforces a task's timeout and what shutdown relies on, and
+// exec.CommandContext's default cancel kills only the leader. For a Python
+// task that leader is `uv`; the interpreter below it would survive, holding
+// the stderr pipe open so cmd.Wait never returns.
+func TestConfigureTaskProcess_CancelKillsTheGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pidFile := t.TempDir() + "/child.pid"
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`sh -c 'trap "" TERM; echo $$ > "$0"; while :; do sleep 0.05; done' "$1" & wait`, pidFile, pidFile)
+	ConfigureTaskProcess(cmd)
+
+	// A writer (not StdoutPipe) makes Wait block on the copier until every
+	// writer closes — the grandchild holds one, which is the hang being bounded.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	grandchild := waitForPIDFile(t, pidFile)
+	if !processAlive(grandchild) {
+		t.Fatal("grandchild not running")
+	}
+
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(BridgeKillGrace + 10*time.Second):
+		t.Fatal("cmd.Wait never returned after the context was canceled")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(grandchild) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("grandchild %d survived the context cancel", grandchild)
+}
+
+// waitForPIDFile blocks until the grandchild has written its PID.
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 1 {
+			var pid int
+			if _, err := fmt.Sscan(string(b), &pid); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("grandchild never reported its PID")
+	return 0
+}

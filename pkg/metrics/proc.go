@@ -94,8 +94,8 @@ func ReadChildMetrics(pids []int, activeTasks int) ChildMetrics {
 	var totalRSS float64
 	var totalCPU int64
 	counted := make(map[int]bool, len(pids))
-	for _, pid := range pids {
-		for _, member := range processGroupMembers(pid) {
+	for _, members := range processGroupMembers(pids) {
+		for _, member := range members {
 			if counted[member] {
 				continue
 			}

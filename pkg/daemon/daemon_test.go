@@ -2,11 +2,15 @@ package daemon
 
 import (
 	"fmt"
+	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 )
@@ -14,9 +18,9 @@ import (
 // TestRun_UsesConfigDataDir: the daemon takes the data dir config.Load
 // resolved rather than resolving it a second time. A second resolution is
 // what let the daemon and the CLI disagree — the CLI then dials a socket no
-// daemon is listening on and starts one of its own, which unlinks the live
-// socket and rebinds it. config.ResolveDataDir owns the order; its tests
-// cover it.
+// daemon is listening on and starts one of its own against a data directory
+// that already has one. config.ResolveDataDir owns the order; its tests cover
+// it.
 func TestRun_UsesConfigDataDir(t *testing.T) {
 	t.Setenv(config.DataDirEnvVar, "")
 	cfg, err := config.LoadBytes([]byte("data_dir: /var/lib/dicode\n"), "/srv/project")
@@ -401,5 +405,39 @@ func TestIsPathUnderDir(t *testing.T) {
 				t.Errorf("isPathUnderDir(%q, %q) = %v, want %v", tc.path, tc.dir, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRun_RefusesADataDirAlreadyServed: run() reaches its startup cleanup —
+// orphaned containers stopped, running rows cancelled, the CLI token rotated —
+// before the control server ever tries to bind. A second daemon aimed at a
+// live directory has to be turned away before any of that touches state the
+// running daemon owns.
+func TestRun_RefusesADataDirAlreadyServed(t *testing.T) {
+	dir := t.TempDir()
+	sock := ipc.ControlSocketIn(dir)
+
+	ln, err := net.Listen("unix", sock.Path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	if err := refuseIfDataDirServed(dir); err == nil {
+		t.Fatal("a live control socket was accepted")
+	} else if !strings.Contains(err.Error(), "already") {
+		t.Errorf("error = %v; want it to name the running daemon", err)
+	}
+}
+
+// TestRun_AcceptsAStaleSocket: a socket file left by a daemon that died hard
+// must not keep the next one out.
+func TestRun_AcceptsAStaleSocket(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(ipc.ControlSocketIn(dir).Path, nil, 0o600); err != nil {
+		t.Fatalf("plant stale socket: %v", err)
+	}
+	if err := refuseIfDataDirServed(dir); err != nil {
+		t.Errorf("stale socket refused: %v", err)
 	}
 }

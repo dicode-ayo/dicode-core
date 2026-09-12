@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"runtime"
 	"time"
+
+	"github.com/dicode/dicode/pkg/config"
 )
 
 //go:embed wizard_assets
@@ -123,7 +125,7 @@ func buildWizardHandler(home string, gate *pinGate, defaultPortOverride int, app
 			Passphrase:      GeneratePassphrase(),
 		}
 		if res.DataDir == "" {
-			res.DataDir = home + "/.dicode"
+			res.DataDir = config.ResolveDataDir("", "", home)
 		}
 
 		// Apply (persist) BEFORE returning the passphrase so the client

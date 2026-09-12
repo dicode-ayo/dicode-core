@@ -232,6 +232,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	gitops.SetInternalHostAllowlist(allowlist)
 
+	// 0a. Refuse a data directory another daemon is already serving, before
+	// anything below touches it. Startup cleanup stops orphaned containers,
+	// cancels every run still marked running, and rotates the CLI token —
+	// all of which belong to the daemon that is already there.
+	if err := refuseIfDataDirServed(cfg.DataDir); err != nil {
+		return err
+	}
+
 	// 1. Open database.
 	database, err := openDatabase(cfg)
 	if err != nil {
@@ -322,6 +330,17 @@ func openDatabase(cfg *config.Config) (db.DB, error) {
 
 // setupRegistry cleans up container/run state left over from a previous
 // session and builds the task registry (step 4).
+// refuseIfDataDirServed reports an error when a daemon is already listening on
+// dataDir's control socket. A socket file with nothing behind it is stale and
+// does not count — ControlServer.Start unlinks it before binding.
+func refuseIfDataDirServed(dataDir string) error {
+	sock := ipc.ControlSocketIn(dataDir)
+	if sock.Reachable() {
+		return fmt.Errorf("a daemon is already running on %s (socket %s)", dataDir, sock.Path)
+	}
+	return nil
+}
+
 func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *registry.Registry {
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
 	podmanruntime.CleanupOrphanedContainers(ctx, log)

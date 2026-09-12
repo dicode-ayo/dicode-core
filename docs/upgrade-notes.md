@@ -23,17 +23,23 @@ Setting only one of the two is unaffected, and so is the Docker image, where `EN
 
 ### Task subprocesses run in a process group of their own
 
-Deno and Python task subprocesses are now started as process-group leaders, and the graceful stop after a run posts its result signals the whole group. A Python task runs as `uv run python`, so the process the daemon holds is a wrapper: signalling it alone left the interpreter running, and SIGKILL — which no wrapper can forward — orphaned it outright.
+Deno and Python task subprocesses are now started as process-group leaders, and the graceful stop after a run posts its result signals the whole group. A Python task runs as `uv run python`, so the process the daemon holds is a wrapper: signaling it alone left the interpreter running, and SIGKILL — which no wrapper can forward — orphaned it outright.
 
-The group also means task subprocesses are no longer in the terminal's foreground group, so a Ctrl-C on a foreground `dicode daemon` no longer reaches them directly. Shutdown never relied on that: the run context's cancel kills them.
+The group also means task subprocesses are no longer in the terminal's foreground group, so a Ctrl-C on a foreground `dicode daemon` no longer reaches them directly. The run context's cancel now stops the whole group instead of the leader alone, which covers both that and a task's own timeout — before, a `uv`-wrapped interpreter outlived its cancel and held the run's stderr open.
 
 Per-child resource metrics (`/api/metrics`, `dicode status`) now sum the whole group, so a Python task's memory and CPU are reported instead of `uv`'s. Expect the numbers to rise for Python workloads — that is the task's real footprint, which was previously invisible.
 
-### A second daemon no longer takes over a live control socket
+### A second daemon no longer takes over a live data directory
 
-Starting a daemon against a data directory that already has one running now fails with `control: a daemon is already listening on <path>` instead of unlinking the socket and rebinding it. Unlinking never disconnected the daemon behind it — it just left two processes serving one directory, with the CLI reaching whichever bound last.
+Starting a daemon against a data directory that already has one running now fails immediately with `a daemon is already running on <dir>`. Previously it ran its whole startup sequence first — stopping every container labelled with a run id, marking every `running` row cancelled, and rotating the CLI token — and only then unlinked the live control socket and rebound it. Every one of those belonged to the daemon already there.
+
+The check happens before anything touches the directory, and `ControlServer.Start` refuses a live socket as a second line.
 
 A restart that races its own not-yet-exited predecessor will now fail rather than take over; retry once the old process has gone.
+
+### A config that can name no data directory is refused
+
+`data_dir` unset, `DICODE_DATA_DIR` unset and no home directory now fails at load with `cannot determine the data directory: set data_dir or DICODE_DATA_DIR`. It previously resolved to `/.dicode` and ran from there. A systemd unit with no `User=` (and therefore no `$HOME`) is the way to hit this: set `data_dir` in the config, or `Environment=DICODE_DATA_DIR=...` on the unit.
 
 ## 0.4.1
 

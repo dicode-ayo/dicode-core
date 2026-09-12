@@ -407,7 +407,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
-		cmd.SysProcAttr = pkgruntime.TaskSysProcAttr()
+		pkgruntime.ConfigureTaskProcess(cmd)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		var wg sync.WaitGroup

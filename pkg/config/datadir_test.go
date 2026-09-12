@@ -44,8 +44,8 @@ func TestResolveDataDir(t *testing.T) {
 // TestLoadBytes_EnvOutranksConfiguredDataDir pins the daemon to the same
 // precedence the CLI uses when it picks the control socket. The two resolve
 // the data dir from different inputs, and a disagreement puts the daemon's
-// socket somewhere the CLI never dials — so the CLI starts a second daemon,
-// which unlinks the live socket and rebinds it.
+// socket somewhere the CLI never dials — so the CLI starts a second daemon
+// against a data directory that already has one.
 func TestLoadBytes_EnvOutranksConfiguredDataDir(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv(DataDirEnvVar, dataDir)

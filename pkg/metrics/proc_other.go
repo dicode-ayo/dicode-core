@@ -15,6 +15,13 @@ func readProcCPUMs(_ int) int64 { return 0 }
 // readProcRSSMB returns 0 on non-Linux platforms.
 func readProcRSSMB(_ int) float64 { return 0 }
 
-// processGroupMembers returns just pid: there is no portable process-group
-// enumeration here, and the runtimes place no group on non-Linux platforms.
-func processGroupMembers(pid int) []int { return []int{pid} }
+// processGroupMembers maps each PID to itself: there is no portable
+// process-group enumeration here. The group is still placed on other unix
+// platforms, so their metrics undercount a task whose work happens in a child.
+func processGroupMembers(pids []int) map[int][]int {
+	groups := make(map[int][]int, len(pids))
+	for _, pid := range pids {
+		groups[pid] = []int{pid}
+	}
+	return groups
+}

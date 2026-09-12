@@ -313,7 +313,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 		cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
-		cmd.SysProcAttr = pkgruntime.TaskSysProcAttr()
+		pkgruntime.ConfigureTaskProcess(cmd)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		// Route stderr through cmd.Stderr (a writer), not StderrPipe: this makes
