@@ -108,8 +108,12 @@ jobs:
         with:
           python-version: '3.14'
 
+      # Scoped to the endpoint and the grants derived from it. The wider
+      # arg-building suites stay out: their fixtures hardcode POSIX paths, which
+      # filepath reads as relative on Windows — a test-portability job of its
+      # own, not this endpoint's behaviour.
       - name: Test the IPC endpoint and the sandbox grants derived from it
-        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestBuildDenoArgs|TestModuleURL|TestBuildGuardPolicy|TestPythonSDK' -timeout 300s
+        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestPythonSDK' -timeout 300s
 
       # A task run end to end is the thing that has never worked on Windows, so
       # assert it directly. The grep is the point: both suites skip themselves
