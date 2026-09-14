@@ -859,7 +859,15 @@ pending task's parsed spec:
 - **Files** — a per-file inventory: path, size, and a SHA-256 over exactly the
   bytes the content hash folds in for that file (`task.Inventory`). This is the
   one code-shaped fact the spec cannot carry, so a new or edited file is visible
-  without any content being rendered.
+  without any content being rendered. On a pending task's own review
+  (`Gate.State`, not `CurrentState`) each entry may also carry an optional
+  `status` of `new` or `changed` — a per-file "what moved" marker (#670)
+  computed by comparing git blob hashes between the previously-approved commit
+  and the one the pending content was observed at (the same pair
+  `Gate.PendingApproval`'s commit-range decoration uses), with no blob content
+  ever read. `status` is simply absent — never a false claim — when there is no
+  prior approval, no git history, or the git lookup itself fails; that omission
+  decorates the listing, it never withholds or invalidates it.
 
 Because it derives from the checkout rather than a baseline, a task with no git
 history, no prior approval and no cached snapshot still gets a complete surface.

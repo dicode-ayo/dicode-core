@@ -52,25 +52,50 @@ func Inventory(dir string, includes ...string) ([]FileMeta, error) {
 	if err != nil {
 		return nil, err
 	}
+	metas, _, err := inventoryFrom(entries)
+	return metas, err
+}
 
+// InventoryAbs is Inventory, additionally returning the absolute filesystem
+// path backing each returned FileMeta, aligned by index. It exists for a
+// caller that needs to cross-reference an inventory entry against another
+// path-keyed data source (e.g. pkg/approval's git-tree lookup for the
+// per-file "what moved" markers, #670) without re-deriving Inventory's own
+// hash_include path-resolution rules. The abs paths are never meant to
+// reach a rendered surface — only the FileMeta half of the pair does that.
+func InventoryAbs(dir string, includes ...string) ([]FileMeta, []string, error) {
+	entries, err := collectEntries(dir, includes...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return inventoryFrom(entries)
+}
+
+// inventoryFrom is the shared walk-result-to-FileMeta conversion behind both
+// Inventory and InventoryAbs, so the two can never disagree about which
+// files are reported or in what order.
+func inventoryFrom(entries []hashEntry) ([]FileMeta, []string, error) {
 	out := make([]FileMeta, 0, len(entries))
+	abs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		switch {
 		case e.isLink:
 			out = append(out, FileMeta{Path: e.label, Kind: FileKindSymlink, Target: e.target})
+			abs = append(abs, e.abs)
 		case e.missing:
 			out = append(out, FileMeta{Path: e.label, Kind: FileKindMissing})
+			abs = append(abs, e.abs)
 		default:
 			info, err := e.stat()
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue // vanished mid-walk, same race walkTree tolerates
 				}
-				return nil, fmt.Errorf("inventory %s: %w", e.abs, err)
+				return nil, nil, fmt.Errorf("inventory %s: %w", e.abs, err)
 			}
 			digest, err := entryDigest(e.abs, info)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, FileMeta{
 				Path: e.label,
@@ -78,9 +103,10 @@ func Inventory(dir string, includes ...string) ([]FileMeta, error) {
 				Size: info.Size(),
 				Hash: digest,
 			})
+			abs = append(abs, e.abs)
 		}
 	}
-	return out, nil
+	return out, abs, nil
 }
 
 // entryDigest hashes exactly the bytes Hash folds in for a regular file.

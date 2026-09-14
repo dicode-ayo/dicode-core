@@ -103,7 +103,12 @@ func walkTree(root, labelPrefix string) ([]hashEntry, error) {
 			if err != nil {
 				return fmt.Errorf("readlink %s: %w", path, err)
 			}
-			entries = append(entries, hashEntry{label: label, isLink: true, target: target})
+			// abs is set even though Hash's isLink branch never reads it (the
+			// link's target string, not its own path, is what's folded into
+			// the digest) — InventoryAbs (pkg/task/inventory.go) needs every
+			// entry's backing path, symlinks included, to cross-reference
+			// against a git tree for #670's per-file "what moved" markers.
+			entries = append(entries, hashEntry{label: label, abs: path, isLink: true, target: target})
 		case info.Mode().IsRegular():
 			entries = append(entries, hashEntry{label: label, abs: path})
 		}
@@ -343,7 +348,10 @@ func collectEntries(dir string, includes ...string) ([]hashEntry, error) {
 			info, err := os.Lstat(incAbs)
 			if err != nil {
 				if os.IsNotExist(err) {
-					entries = append(entries, hashEntry{label: label, missing: true})
+					// abs is still recorded (the path a missing include
+					// would live at) even though Hash's missing branch never
+					// reads it — see the walkTree symlink case above for why.
+					entries = append(entries, hashEntry{label: label, abs: incAbs, missing: true})
 					continue
 				}
 				return nil, fmt.Errorf("hash include %s: %w", inc, err)
@@ -354,7 +362,7 @@ func collectEntries(dir string, includes ...string) ([]hashEntry, error) {
 				if err != nil {
 					return nil, fmt.Errorf("hash include %s: readlink: %w", inc, err)
 				}
-				entries = append(entries, hashEntry{label: label, isLink: true, target: target})
+				entries = append(entries, hashEntry{label: label, abs: incAbs, isLink: true, target: target})
 			case info.IsDir():
 				sub, err := walkTree(incAbs, label+"/")
 				if err != nil {

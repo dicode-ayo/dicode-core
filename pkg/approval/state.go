@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -26,6 +27,27 @@ const (
 	EnvFromTask   = "task"
 	EnvLiteral    = "literal"
 )
+
+// File statuses computed by the "what moved" per-file diff (#670). Absent
+// (the JSON field is omitted) means either "unchanged" or "could not be
+// determined" — both read identically to a reviewer and neither is ever
+// asserted when it isn't true, per ADR-0001 (the strip degrades to less
+// information, never a false claim).
+const (
+	FileStatusNew     = "new"
+	FileStatusChanged = "changed"
+)
+
+// InventoryFile is one task.FileMeta decorated with its status relative to
+// the pending task's previously approved commit — the per-file half of the
+// "what moved" strip (#670's commit-range/compare-link half already shipped
+// in #846). Embedding keeps the JSON shape additive: every existing field
+// task.FileMeta serializes stays exactly where it was, with `status`
+// appended only when it could be determined.
+type InventoryFile struct {
+	task.FileMeta
+	Status string `json:"status,omitempty"`
+}
 
 // State is the review surface for a pending task: the resolved task as it will
 // run if the operator arms it. It is derived entirely from the parsed spec and
@@ -73,7 +95,7 @@ type State struct {
 	Params      []ParamDecl     `json:"params,omitempty"`
 	Container   *Container      `json:"container,omitempty"`
 	Stages      []Stage         `json:"stages,omitempty"`
-	Files       []task.FileMeta `json:"files,omitempty"`
+	Files       []InventoryFile `json:"files,omitempty"`
 	// FilesError explains why Files is absent when the inventory could not be
 	// built. A dir-less task legitimately has no files, so an empty list alone
 	// cannot distinguish "nothing to list" from "the listing failed" — and a
@@ -205,7 +227,24 @@ func (g *Gate) State(id string) (State, error) {
 	// before, no spec reachable from the pending set was ever also live in
 	// arm's hands, since Admit auto-approved BuiltinSource before the
 	// pending branch ever ran; a pinned buildin can now reach both.
-	return g.renderState(id, ent.kinded, ent.hash), nil
+	from, to := fileStatusRangeOf(g, id, ent)
+	return g.renderState(id, ent.kinded, ent.hash, from, to), nil
+}
+
+// fileStatusRangeOf resolves the same From/To pair PendingApproval builds
+// for the commit-range decoration (#846), for the per-file "what moved"
+// markers (#670) to compare against: From is the commit the last approval
+// recorded (empty for a task that has never been approved before), To is
+// the commit ent's content was observed at. ent must already have been read
+// from g.pending under g.mu — this reads only g.lock, which guards itself,
+// so no second lock on g.pending/g.mu is taken here (see State's and
+// StateFor's doc comments on avoiding a second locked read of the same
+// generation PendingApproval warns about).
+func fileStatusRangeOf(g *Gate, id string, ent pendingEntry) (from, to string) {
+	if rec, ok := g.lock.Get(id); ok {
+		from = rec.Commit
+	}
+	return from, ent.commit
 }
 
 // CurrentState renders the review surface for k as it currently stands in
@@ -222,7 +261,7 @@ func (g *Gate) State(id string) (State, error) {
 // instead — calling IsPending and then CurrentState separately reopens the
 // exact race StateFor closes (see its doc comment).
 func (g *Gate) CurrentState(id string, k task.Kinded) State {
-	return g.renderState(id, k, "")
+	return g.renderState(id, k, "", "", "")
 }
 
 // StateFor resolves the review surface for id in one atomic step: the
@@ -245,7 +284,8 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 	ent, isPending := g.pending[id]
 	g.mu.Unlock()
 	if isPending {
-		return g.renderState(id, ent.kinded, ent.hash)
+		from, to := fileStatusRangeOf(g, id, ent)
+		return g.renderState(id, ent.kinded, ent.hash, from, to)
 	}
 	return g.CurrentState(id, k)
 }
@@ -253,8 +293,11 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 // renderState is State and CurrentState's shared body: resolve kinded
 // through previewFn (if set), classify it by kind, and build the file
 // inventory. pendingHash is the hash to stamp on the result — the pending
-// entry's observed hash for State, or "" for CurrentState.
-func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string) State {
+// entry's observed hash for State, or "" for CurrentState. from/to are the
+// commit range the per-file "what moved" markers (#670) are computed
+// against — both empty disables markers entirely (CurrentState's case: an
+// armed task's current-state render has no pending review to decorate).
+func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string, from, to string) State {
 	if g.previewFn != nil {
 		// Renders the end state Approve would actually produce, not the
 		// as-shipped value Admit first observed: the same daemon-config
@@ -278,7 +321,7 @@ func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string) St
 		stateFromPipeline(&st, s)
 	}
 
-	files, err := inventoryOf(kinded)
+	files, err := g.inventoryOf(kinded, from, to)
 	if err != nil {
 		// The spec-derived body is still a complete and accurate answer to
 		// "what will run", so degrade rather than deny the operator a review
@@ -488,9 +531,17 @@ func containerOf(d *task.DockerConfig) *Container {
 	return c
 }
 
-// inventoryOf lists the files constituting k, or nothing for a dir-less
-// (inline taskset) task, which has no directory to inventory.
-func inventoryOf(k task.Kinded) ([]task.FileMeta, error) {
+// inventoryOf lists the files constituting k, decorated with each file's
+// new/changed status (#670) when from and to are both non-empty commit IDs.
+// Returns nothing for a dir-less (inline taskset) task, which has no
+// directory to inventory.
+//
+// from/to empty (no prior approval to diff against, or a non-git source —
+// see fileStatusRangeOf) skips all git work and returns the inventory with
+// no status set on any entry: this is the CurrentState / first-ever-pend
+// path and must stay as cheap and side-effect-free as inventoryOf always
+// was before #670.
+func (g *Gate) inventoryOf(k task.Kinded, from, to string) ([]InventoryFile, error) {
 	var dir string
 	var includes []string
 	switch s := k.(type) {
@@ -502,5 +553,67 @@ func inventoryOf(k task.Kinded) ([]task.FileMeta, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	return task.Inventory(dir, includes...)
+
+	metas, absPaths, err := task.InventoryAbs(dir, includes...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InventoryFile, len(metas))
+	for i, m := range metas {
+		out[i] = InventoryFile{FileMeta: m}
+	}
+
+	if from == "" || to == "" {
+		return out, nil
+	}
+
+	// A whole-repo/commit resolution failure here means there is no
+	// baseline of any shape to diff against — decoration only, so it
+	// degrades to "no markers" rather than failing the file listing that
+	// renderState has already built successfully.
+	fromHashes, ferr := gitops.TreeBlobHashesForPaths(dir, from, absPaths)
+	toHashes, terr := gitops.TreeBlobHashesForPaths(dir, to, absPaths)
+	if ferr != nil || terr != nil {
+		g.log.Warn("approval: per-file status markers unavailable",
+			zap.String("task", k.TaskID()), zap.String("from", from), zap.String("to", to),
+			zap.Errors("errors", nonNilErrors(ferr, terr)))
+		return out, nil
+	}
+
+	for i := range out {
+		if out[i].Kind == task.FileKindMissing {
+			// A hash_include target that no longer exists on disk has no
+			// meaningful new/changed distinction.
+			continue
+		}
+		abs := absPaths[i]
+		toHash, inTo := toHashes[abs]
+		if !inTo {
+			// The working tree has moved past the commit that was pended —
+			// an accepted, already-documented inconsistency window
+			// elsewhere on this surface (see State's doc comment), not an
+			// error.
+			continue
+		}
+		fromHash, inFrom := fromHashes[abs]
+		switch {
+		case !inFrom:
+			out[i].Status = FileStatusNew
+		case fromHash != toHash:
+			out[i].Status = FileStatusChanged
+		}
+	}
+	return out, nil
+}
+
+// nonNilErrors returns errs with every nil entry dropped, for logging only
+// the failures that actually occurred among the from/to lookups.
+func nonNilErrors(errs ...error) []error {
+	out := make([]error, 0, len(errs))
+	for _, e := range errs {
+		if e != nil {
+			out = append(out, e)
+		}
+	}
+	return out
 }

@@ -53,6 +53,10 @@ spec:
     notify-echo:
       ref:
         path: FIXTURES_TASKS_DIR/notify-echo/task.yaml
+    # #670 fixture — see file-status-probe/task.yaml and file-status.spec.ts.
+    file-status-probe:
+      ref:
+        path: FIXTURES_TASKS_DIR/file-status-probe/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML
