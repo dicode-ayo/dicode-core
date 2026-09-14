@@ -7,10 +7,12 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,26 +26,60 @@ func TestPlatformName(t *testing.T) {
 	}
 }
 
-func TestVerifyChecksum_Valid(t *testing.T) {
+func TestVerifyChecksum(t *testing.T) {
+	type outcome int
+	const (
+		accepted outcome = iota
+		mismatch
+		unreadable
+	)
+
 	data := []byte("hello installer")
 	h := sha256.Sum256(data)
-	line := hex.EncodeToString(h[:]) + "  archive.zip"
-	if err := VerifyChecksum(data, line); err != nil {
-		t.Errorf("expected valid checksum, got: %v", err)
-	}
-}
+	digest := hex.EncodeToString(h[:])
 
-func TestVerifyChecksum_Invalid(t *testing.T) {
-	data := []byte("hello installer")
-	line := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  archive.zip"
-	if err := VerifyChecksum(data, line); err == nil {
-		t.Error("expected checksum mismatch error")
-	}
-}
+	tests := []struct {
+		name    string
+		content string
+		want    outcome
+	}{
+		// The three layouts Deno and uv actually publish.
+		{"sha256sum", digest + "  deno-x86_64-unknown-linux-gnu.zip\n", accepted},
+		{"sha256sum binary marker", digest + " *uv-x86_64-pc-windows-msvc.zip\n", accepted},
+		{
+			"get-filehash",
+			"Algorithm : SHA256\r\nHash      : " + strings.ToUpper(digest) +
+				"\r\nPath      : C:\\a\\deno\\deno\\target\\release\\deno.zip\r\n",
+			accepted,
+		},
 
-func TestVerifyChecksum_Empty(t *testing.T) {
-	if err := VerifyChecksum([]byte("data"), ""); err == nil {
-		t.Error("expected error for empty checksum line")
+		{"wrong digest", strings.Repeat("de", sha256HexLen/2) + "  archive.zip", mismatch},
+
+		{"get-filehash without hash line", "Algorithm : SHA256\r\nPath      : C:\\a\\deno.zip\r\n", unreadable},
+		{"digest too short", "deadbeef  archive.zip", unreadable},
+		{"digest not hex", strings.Repeat("z", sha256HexLen) + "  archive.zip", unreadable},
+		{"error page body", "<html><body>404 Not Found</body></html>", unreadable},
+		{"empty", "", unreadable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := VerifyChecksum(data, tt.content)
+			switch tt.want {
+			case accepted:
+				if err != nil {
+					t.Errorf("expected valid checksum, got: %v", err)
+				}
+			case mismatch:
+				if err == nil || errors.Is(err, errNoDigest) {
+					t.Errorf("expected digest mismatch, got: %v", err)
+				}
+			case unreadable:
+				if !errors.Is(err, errNoDigest) {
+					t.Errorf("expected errNoDigest, got: %v", err)
+				}
+			}
+		})
 	}
 }
 
