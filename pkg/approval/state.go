@@ -227,24 +227,8 @@ func (g *Gate) State(id string) (State, error) {
 	// before, no spec reachable from the pending set was ever also live in
 	// arm's hands, since Admit auto-approved BuiltinSource before the
 	// pending branch ever ran; a pinned buildin can now reach both.
-	from, to := fileStatusRangeOf(g, id, ent)
+	from, to := g.approvalRange(ent)
 	return g.renderState(id, ent.kinded, ent.hash, from, to), nil
-}
-
-// fileStatusRangeOf resolves the same From/To pair PendingApproval builds
-// for the commit-range decoration (#846), for the per-file "what moved"
-// markers (#670) to compare against: From is the commit the last approval
-// recorded (empty for a task that has never been approved before), To is
-// the commit ent's content was observed at. ent must already have been read
-// from g.pending under g.mu — this reads only g.lock, which guards itself,
-// so no second lock on g.pending/g.mu is taken here (see State's and
-// StateFor's doc comments on avoiding a second locked read of the same
-// generation PendingApproval warns about).
-func fileStatusRangeOf(g *Gate, id string, ent pendingEntry) (from, to string) {
-	if rec, ok := g.lock.Get(id); ok {
-		from = rec.Commit
-	}
-	return from, ent.commit
 }
 
 // CurrentState renders the review surface for k as it currently stands in
@@ -284,7 +268,7 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 	ent, isPending := g.pending[id]
 	g.mu.Unlock()
 	if isPending {
-		from, to := fileStatusRangeOf(g, id, ent)
+		from, to := g.approvalRange(ent)
 		return g.renderState(id, ent.kinded, ent.hash, from, to)
 	}
 	return g.CurrentState(id, k)
@@ -537,10 +521,10 @@ func containerOf(d *task.DockerConfig) *Container {
 // directory to inventory.
 //
 // from/to empty (no prior approval to diff against, or a non-git source —
-// see fileStatusRangeOf) skips all git work and returns the inventory with
-// no status set on any entry: this is the CurrentState / first-ever-pend
-// path and must stay as cheap and side-effect-free as inventoryOf always
-// was before #670.
+// see approvalRange) skips all git work and returns the inventory with no
+// status set on any entry: this is the CurrentState / first-ever-pend path
+// and must stay as cheap and side-effect-free as inventoryOf always was
+// before #670.
 func (g *Gate) inventoryOf(k task.Kinded, from, to string) ([]InventoryFile, error) {
 	var dir string
 	var includes []string
@@ -570,13 +554,14 @@ func (g *Gate) inventoryOf(k task.Kinded, from, to string) ([]InventoryFile, err
 	// A whole-repo/commit resolution failure here means there is no
 	// baseline of any shape to diff against — decoration only, so it
 	// degrades to "no markers" rather than failing the file listing that
-	// renderState has already built successfully.
-	fromHashes, ferr := gitops.TreeBlobHashesForPaths(dir, from, absPaths)
-	toHashes, terr := gitops.TreeBlobHashesForPaths(dir, to, absPaths)
-	if ferr != nil || terr != nil {
+	// renderState has already built successfully. One call resolves both
+	// trees against a single repository open (see
+	// TreeBlobHashesForPathsAtTwoCommits's doc comment).
+	fromHashes, toHashes, err := gitops.TreeBlobHashesForPathsAtTwoCommits(dir, from, to, absPaths)
+	if err != nil {
 		g.log.Warn("approval: per-file status markers unavailable",
 			zap.String("task", k.TaskID()), zap.String("from", from), zap.String("to", to),
-			zap.Errors("errors", nonNilErrors(ferr, terr)))
+			zap.Error(err))
 		return out, nil
 	}
 
@@ -604,16 +589,4 @@ func (g *Gate) inventoryOf(k task.Kinded, from, to string) ([]InventoryFile, err
 		}
 	}
 	return out, nil
-}
-
-// nonNilErrors returns errs with every nil entry dropped, for logging only
-// the failures that actually occurred among the from/to lookups.
-func nonNilErrors(errs ...error) []error {
-	out := make([]error, 0, len(errs))
-	for _, e := range errs {
-		if e != nil {
-			out = append(out, e)
-		}
-	}
-	return out
 }

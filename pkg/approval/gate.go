@@ -523,13 +523,28 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 		return "", CommitRange{}, false
 	}
 
-	var from string
-	if rec, ok := g.lock.Get(id); ok {
-		from = rec.Commit
-	}
-	to := ent.commit
+	from, to := g.approvalRange(ent)
 
 	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
+}
+
+// approvalRange resolves the From/To commit pair for a pending entry: From
+// is the commit the last approval recorded for id (empty when the task has
+// never been approved before), To is the commit ent's content was observed
+// at. Shared by PendingApproval (the commit-range decoration, #846) and
+// State/StateFor (the per-file "what moved" markers, #670) so the rule is
+// defined exactly once.
+//
+// ent must already have been read from g.pending under g.mu by the caller —
+// this reads only g.lock, which guards itself per Lock's own comments, so no
+// second lock on g.pending/g.mu is taken here (see State's and StateFor's
+// doc comments on avoiding a second locked read of the same generation
+// PendingApproval warns about).
+func (g *Gate) approvalRange(ent pendingEntry) (from, to string) {
+	if rec, ok := g.lock.Get(ent.kinded.TaskID()); ok {
+		from = rec.Commit
+	}
+	return from, ent.commit
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not
