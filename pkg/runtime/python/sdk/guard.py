@@ -17,6 +17,9 @@
 #     be correlated back to the hostname).
 #   - C extensions that touch files or sockets without going through os/io
 #     (e.g. sqlite3's own file I/O) do not emit audit events.
+#   - on Windows, loopback connects are never denied: asyncio builds the event
+#     loop's self-pipe out of one, so enforcing there would block every async
+#     task rather than any network the task reached for.
 def _dicode_install_guard():
     import ipaddress as _ipaddress
     import json as _json
@@ -59,6 +62,14 @@ def _dicode_install_guard():
 
     sep = _os.sep
     af_unix = getattr(_socket, "AF_UNIX", None)
+    # Windows has no AF_UNIX socketpair, so asyncio emulates the event loop's
+    # self-pipe with a loopback TCP pair — every `async def main()` opens one —
+    # and the dicode IPC endpoint is a loopback port there for the same reason.
+    # Neither is network reach the task asked for, and neither is separable from
+    # a deliberate loopback connect at this hook, so loopback is exempt there
+    # exactly as AF_UNIX is everywhere else.
+    _loopback_always_allowed = _sys.platform == "win32"
+    _loopback_hosts = ("127.0.0.1", "::1", "localhost")
     write_flags = (
         _os.O_WRONLY | _os.O_RDWR | _os.O_APPEND | _os.O_CREAT | _os.O_TRUNC
     )
@@ -167,6 +178,8 @@ def _dicode_install_guard():
                 return  # unix path address
             host = addr[0] if isinstance(addr, tuple) and len(addr) > 0 else None
             port = addr[1] if isinstance(addr, tuple) and len(addr) > 1 else None
+            if _loopback_always_allowed and host in _loopback_hosts:
+                return
             if net_mode == "deny" or not _host_allowed(host, port):
                 _deny_net(host, port)
         elif event == "socket.getaddrinfo":
@@ -175,6 +188,8 @@ def _dicode_install_guard():
             host, port = args[0], args[1]
             if host is None:
                 return  # local binds resolve with host=None
+            if _loopback_always_allowed and host in _loopback_hosts:
+                return
             if net_mode == "deny" or not _host_allowed(
                 host, port if isinstance(port, int) else None
             ):
