@@ -85,11 +85,6 @@ func treeBlobHashesForPaths(repo *gogit.Repository, root, sha string, absPaths [
 
 	out := make(map[string]string, len(absPaths))
 	for _, abs := range absPaths {
-		if abs == "" {
-			// hashEntry.abs is unset for some entry shapes (see
-			// task.hashEntry's doc comment) — nothing to look up.
-			continue
-		}
 		rel, err := filepath.Rel(root, abs)
 		if err != nil {
 			// Cannot be related to the repository root at all — degrade
