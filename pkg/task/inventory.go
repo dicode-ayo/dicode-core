@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // File kinds reported by Inventory.
@@ -63,8 +64,23 @@ func Inventory(dir string, includes ...string) ([]FileMeta, error) {
 // per-file "what moved" markers, #670) without re-deriving Inventory's own
 // hash_include path-resolution rules. The abs paths are never meant to
 // reach a rendered surface — only the FileMeta half of the pair does that.
+//
+// dir is resolved to an absolute path before the walk: collectEntries
+// already makes every hash_include target absolute internally (it needs an
+// absolute boundary to bound them against), but an in-dir regular/symlink
+// entry's abs is built by walkTree directly from whatever dir was passed —
+// relative in, relative out. A relative dir would then hand back a slice
+// mixing relative in-dir paths with absolute include paths, breaking this
+// function's own "absolute filesystem path" contract for every ordinary
+// file. Inventory doesn't need this: it never exposes abs, so a relative
+// dir there is harmless (os.Stat/os.Open both resolve a relative path
+// against cwd correctly either way).
 func InventoryAbs(dir string, includes ...string) ([]FileMeta, []string, error) {
-	entries, err := collectEntries(dir, includes...)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	entries, err := collectEntries(absDir, includes...)
 	if err != nil {
 		return nil, nil, err
 	}

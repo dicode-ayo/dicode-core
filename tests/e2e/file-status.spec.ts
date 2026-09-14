@@ -142,13 +142,13 @@ test.describe('Per-file "what moved" markers (#670)', () => {
     // run gets more chances to observe the window finally closed.
     const backoffMs = [15_000, 20_000, 30_000, 30_000];
     let result: PendingAttempt | undefined;
-    for (let attempt = 1; attempt <= backoffMs.length; attempt++) {
-      await new Promise((r) => setTimeout(r, backoffMs[attempt - 1]));
-      result = await attemptPendingChange(request, git, probeDir, taskJsPath, attempt, 20_000);
-      if (result.ok) break;
-    }
-
     try {
+      for (let attempt = 1; attempt <= backoffMs.length; attempt++) {
+        await new Promise((r) => setTimeout(r, backoffMs[attempt - 1]));
+        result = await attemptPendingChange(request, git, probeDir, taskJsPath, attempt, 20_000);
+        if (result.ok) break;
+      }
+
       expect(
         result?.ok,
         `${TASK_ID} never reported pending_approval=true across ${backoffMs.length} attempts — ` +
