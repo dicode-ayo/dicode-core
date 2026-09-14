@@ -572,7 +572,7 @@ func TestAPI_ApprovalState_HappyPath(t *testing.T) {
 		Runtime:     "deno",
 		Triggers:    []approval.Trigger{{Kind: approval.TriggerCron, Cron: "0 9 * * *"}},
 		Permissions: approval.Permissions{Net: []string{"api.github.com"}},
-		Files:       []task.FileMeta{{Path: "task.js", Kind: task.FileKindRegular, Size: 12, Hash: "abc"}},
+		Files:       []approval.InventoryFile{{FileMeta: task.FileMeta{Path: "task.js", Kind: task.FileKindRegular, Size: 12, Hash: "abc"}}},
 	})
 	srv.SetApprovalGate(gate)
 
@@ -829,7 +829,7 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 		TaskID:      "repo/pending-task",
 		PendingHash: "hash-1",
 		Permissions: approval.Permissions{Net: []string{"exfil.example.com"}},
-		Files:       []task.FileMeta{{Path: "task.yaml", Kind: task.FileKindRegular}},
+		Files:       []approval.InventoryFile{{FileMeta: task.FileMeta{Path: "task.yaml", Kind: task.FileKindRegular}}},
 	})
 	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
 	if err != nil {

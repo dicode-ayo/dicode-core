@@ -27,6 +27,27 @@ const (
 	EnvLiteral    = "literal"
 )
 
+// File statuses computed by the "what moved" per-file diff (#670). Absent
+// (the JSON field is omitted) means either "unchanged" or "could not be
+// determined" — both read identically to a reviewer and neither is ever
+// asserted when it isn't true, per ADR-0001 (the strip degrades to less
+// information, never a false claim).
+const (
+	FileStatusNew     = "new"
+	FileStatusChanged = "changed"
+)
+
+// InventoryFile is one task.FileMeta decorated with its status relative to
+// the pending task's previously approved commit — the per-file half of the
+// "what moved" strip (#670's commit-range/compare-link half already shipped
+// in #846). Embedding keeps the JSON shape additive: every existing field
+// task.FileMeta serializes stays exactly where it was, with `status`
+// appended only when it could be determined.
+type InventoryFile struct {
+	task.FileMeta
+	Status string `json:"status,omitempty"`
+}
+
 // State is the review surface for a pending task: the resolved task as it will
 // run if the operator arms it. It is derived entirely from the parsed spec and
 // the task directory, so it needs no baseline — a task with no git history, no
@@ -73,7 +94,7 @@ type State struct {
 	Params      []ParamDecl     `json:"params,omitempty"`
 	Container   *Container      `json:"container,omitempty"`
 	Stages      []Stage         `json:"stages,omitempty"`
-	Files       []task.FileMeta `json:"files,omitempty"`
+	Files       []InventoryFile `json:"files,omitempty"`
 	// FilesError explains why Files is absent when the inventory could not be
 	// built. A dir-less task legitimately has no files, so an empty list alone
 	// cannot distinguish "nothing to list" from "the listing failed" — and a
@@ -205,7 +226,8 @@ func (g *Gate) State(id string) (State, error) {
 	// before, no spec reachable from the pending set was ever also live in
 	// arm's hands, since Admit auto-approved BuiltinSource before the
 	// pending branch ever ran; a pinned buildin can now reach both.
-	return g.renderState(id, ent.kinded, ent.hash), nil
+	from, to := g.approvalRange(id, ent)
+	return g.renderState(id, ent.kinded, ent.hash, from, to, ent.status), nil
 }
 
 // CurrentState renders the review surface for k as it currently stands in
@@ -222,7 +244,7 @@ func (g *Gate) State(id string) (State, error) {
 // instead — calling IsPending and then CurrentState separately reopens the
 // exact race StateFor closes (see its doc comment).
 func (g *Gate) CurrentState(id string, k task.Kinded) State {
-	return g.renderState(id, k, "")
+	return g.renderState(id, k, "", "", "", nil)
 }
 
 // StateFor resolves the review surface for id in one atomic step: the
@@ -245,7 +267,8 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 	ent, isPending := g.pending[id]
 	g.mu.Unlock()
 	if isPending {
-		return g.renderState(id, ent.kinded, ent.hash)
+		from, to := g.approvalRange(id, ent)
+		return g.renderState(id, ent.kinded, ent.hash, from, to, ent.status)
 	}
 	return g.CurrentState(id, k)
 }
@@ -253,8 +276,15 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 // renderState is State and CurrentState's shared body: resolve kinded
 // through previewFn (if set), classify it by kind, and build the file
 // inventory. pendingHash is the hash to stamp on the result — the pending
-// entry's observed hash for State, or "" for CurrentState.
-func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string) State {
+// entry's observed hash for State, or "" for CurrentState. from/to are the
+// commit range the per-file "what moved" markers (#670) are computed
+// against — both empty disables markers entirely (CurrentState's case: an
+// armed task's current-state render has no pending review to decorate).
+// cache is the pending entry's fileStatusCache to populate/reuse for the git
+// tree-diff half of the inventory — nil for CurrentState, which has no
+// pending generation to attach a cache to and always recomputes (cheaply:
+// its from/to are always empty, so inventoryOf skips the git work anyway).
+func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string, from, to string, cache *fileStatusCache) State {
 	if g.previewFn != nil {
 		// Renders the end state Approve would actually produce, not the
 		// as-shipped value Admit first observed: the same daemon-config
@@ -278,7 +308,7 @@ func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string) St
 		stateFromPipeline(&st, s)
 	}
 
-	files, err := inventoryOf(kinded)
+	files, err := g.inventoryOf(id, kinded, from, to, cache)
 	if err != nil {
 		// The spec-derived body is still a complete and accurate answer to
 		// "what will run", so degrade rather than deny the operator a review
@@ -488,9 +518,30 @@ func containerOf(d *task.DockerConfig) *Container {
 	return c
 }
 
-// inventoryOf lists the files constituting k, or nothing for a dir-less
-// (inline taskset) task, which has no directory to inventory.
-func inventoryOf(k task.Kinded) ([]task.FileMeta, error) {
+// inventoryOf lists the files constituting k, decorated with each file's
+// new/changed status (#670) when from and to are both non-empty commit IDs.
+// Returns nothing for a dir-less (inline taskset) task, which has no
+// directory to inventory.
+//
+// from/to empty (no prior approval to diff against, or a non-git source —
+// see approvalRange) skips all git work and returns the inventory with no
+// status set on any entry: this is the CurrentState / first-ever-pend path
+// and must stay as cheap and side-effect-free as inventoryOf always was
+// before #670.
+//
+// The file listing itself (task.InventoryAbs) always re-reads the live
+// directory — only the git tree-diff half, resolved via fileStatusesOf, is
+// cached on cache (nil for CurrentState, which never has git work to cache;
+// see fileStatusCache's doc comment for why this is safe and how it stays
+// current across a re-pend).
+//
+// id is the caller's own g.pending map key, threaded through for the
+// diagnostic log label on a failed tree-diff — taken explicitly rather than
+// derived from k.TaskID(), the same reasoning approvalRange documents for
+// its own id parameter: the two agree today only by convention, and taking
+// id explicitly removes the dependency on that convention for this log
+// label too.
+func (g *Gate) inventoryOf(id string, k task.Kinded, from, to string, cache *fileStatusCache) ([]InventoryFile, error) {
 	var dir string
 	var includes []string
 	switch s := k.(type) {
@@ -502,5 +553,105 @@ func inventoryOf(k task.Kinded) ([]task.FileMeta, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	return task.Inventory(dir, includes...)
+
+	metas, absPaths, err := task.InventoryAbs(dir, includes...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InventoryFile, len(metas))
+	for i, m := range metas {
+		out[i] = InventoryFile{FileMeta: m}
+	}
+
+	if from == "" || to == "" {
+		return out, nil
+	}
+
+	// A hash_include target that no longer exists on disk (FileKindMissing)
+	// has no meaningful new/changed distinction, so its path is excluded
+	// from the diff query entirely — not just from the result — sparing a
+	// tree.FindEntry lookup in both commits for an answer that would only
+	// ever be discarded below.
+	diffPaths := make([]string, 0, len(absPaths))
+	for i := range out {
+		if out[i].Kind != task.FileKindMissing {
+			diffPaths = append(diffPaths, absPaths[i])
+		}
+	}
+	statuses := g.fileStatusesOf(id, dir, from, to, diffPaths, cache)
+	for i := range out {
+		if out[i].Kind == task.FileKindMissing {
+			continue
+		}
+		if status, ok := statuses[absPaths[i]]; ok {
+			out[i].Status = status
+		}
+	}
+	return out, nil
+}
+
+// fileStatusesOf returns the per-abs-path git tree-diff status ("new" or
+// "changed"; a path simply absent from the result is unchanged or
+// undeterminable — see TreeBlobHashesForPathsAtTwoCommits's doc comment) for
+// dir between from and to, computed by g.treeDiffFn.
+//
+// When cache is non-nil, the computation runs at most once for its backing
+// *fileStatusCache no matter how many callers race into cache.once.Do:
+// every copy of the pendingEntry this cache belongs to (read out of
+// g.pending under g.mu by concurrent State/StateFor calls, all describing
+// the identical from/to generation — see pendingEntry.status's doc comment)
+// shares the same pointer, so the loser(s) of the race simply block on
+// sync.Once and then read the same byPath the winner computed, with no
+// second g.mu acquisition anywhere in this path. cache is nil only for
+// CurrentState, whose from/to are always empty — inventoryOf returns before
+// this is ever called in that case — so the nil branch here is unreachable
+// in practice today; it is kept only so a future caller passing cache=nil
+// degrades to "always recompute" rather than panicking.
+func (g *Gate) fileStatusesOf(taskID, dir, from, to string, absPaths []string, cache *fileStatusCache) map[string]string {
+	compute := func() map[string]string {
+		// A whole-repo/commit resolution failure here means there is no
+		// baseline of any shape to diff against — decoration only, so it
+		// degrades to "no markers" rather than failing the file listing
+		// that renderState has already built successfully. One call
+		// resolves both trees against a single repository open (see
+		// TreeBlobHashesForPathsAtTwoCommits's doc comment). A failure is
+		// cached too, same as a success: retrying a failing tree walk on
+		// every render of an already-failed generation would defeat the
+		// point of caching at all, and the next genuine generation (a new
+		// Admit) gets its own fresh cache and so its own fresh attempt.
+		fromHashes, toHashes, err := g.treeDiffFn(dir, from, to, absPaths)
+		if err != nil {
+			g.log.Warn("approval: per-file status markers unavailable",
+				zap.String("task", taskID), zap.String("from", from), zap.String("to", to),
+				zap.Error(err))
+			return nil
+		}
+		byPath := make(map[string]string, len(absPaths))
+		for _, abs := range absPaths {
+			toHash, inTo := toHashes[abs]
+			if !inTo {
+				// The working tree has moved past the commit that was
+				// pended — an accepted, already-documented inconsistency
+				// window elsewhere on this surface (see State's doc
+				// comment), not an error.
+				continue
+			}
+			fromHash, inFrom := fromHashes[abs]
+			switch {
+			case !inFrom:
+				byPath[abs] = FileStatusNew
+			case fromHash != toHash:
+				byPath[abs] = FileStatusChanged
+			}
+		}
+		return byPath
+	}
+
+	if cache == nil {
+		return compute()
+	}
+	cache.once.Do(func() {
+		cache.byPath = compute()
+	})
+	return cache.byPath
 }
