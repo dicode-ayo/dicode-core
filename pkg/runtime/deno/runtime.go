@@ -1,6 +1,6 @@
 // Package deno executes task scripts using a Deno subprocess.
 // Each call to Run spawns a fresh Deno process connected to a per-run
-// Unix socket server that bridges globals (log, kv, params, env, input, output).
+// IPC server that bridges globals (log, kv, params, env, input, output).
 package deno
 
 import (
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,9 +284,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	// Inject a resumed run's prior state + user input (#95); nil on first run.
 	srv.SetResume(opts.Resumed, opts.ResumeState, opts.ResumeInput)
-	socketPath, token, err := srv.Start(srvCtx)
+	ipcAddr, token, err := srv.Start(srvCtx)
 	if err != nil {
-		result.Error = fmt.Errorf("start socket server: %w", err)
+		result.Error = fmt.Errorf("start IPC server: %w", err)
 		return result, nil
 	}
 	defer srv.Stop()
@@ -327,10 +328,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ } from \"" + shimPath + "\";\n" +
+	runner := "import { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ } from \"" + moduleURL(shimPath) + "\";\n" +
 		"let __mod__;\n" +
 		"try {\n" +
-		"  __mod__ = await import(\"" + taskPath + "\");\n" +
+		"  __mod__ = await import(\"" + moduleURL(taskPath) + "\");\n" +
 		"} catch (__importErr__) {\n" +
 		"  console.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
 		"  await __flush__();\n" +
@@ -402,7 +403,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	runnerFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath, rt.effectiveProtectedPaths())
+	args := buildDenoArgs(spec, ipcAddr, shimPath, runnerPath, rt.effectiveProtectedPaths())
 
 	// runOnce spawns the Deno subprocess, streams its output, and records the
 	// outcome on result. It reports whether the run failed with the stale-lock
@@ -419,7 +420,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		defer cancel()
 
 		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, ipcAddr, token)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		var wg sync.WaitGroup
@@ -565,6 +566,25 @@ func (rt *Runtime) relockDeno(ctx context.Context, spec *task.Spec, runID, lockP
 	return nil
 }
 
+// moduleURL renders a filesystem path as the file: URL the generated runner
+// imports it by. A bare path cannot be embedded in a module specifier on
+// Windows: its separators are escape sequences inside the string literal, and
+// the drive letter reads as a URL scheme.
+func moduleURL(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = p
+	}
+	slashed := filepath.ToSlash(abs)
+	// A Windows path starts at the drive letter; the URL path must start at the
+	// root, which is what turns C:/x into the file:///C:/x form.
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	u := url.URL{Scheme: "file", Path: slashed}
+	return u.String()
+}
+
 func expandHome(p string) string {
 	if strings.HasPrefix(p, "~/") || p == "~" {
 		home, err := os.UserHomeDir()
@@ -583,8 +603,13 @@ func findDenoLockFile(dir string, maxParents int) string {
 	return path
 }
 
-func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, protectedPaths []string) []string {
+func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protectedPaths []string) []string {
 	args := []string{"run"}
+
+	// How the task reaches the IPC endpoint depends on its transport: a Unix
+	// socket is a file (--allow-read/--allow-write), a loopback endpoint is a
+	// host:port (--allow-net). See pkg/ipc.IsLoopbackAddr.
+	loopbackIPC := ipc.IsLoopbackAddr(ipcAddr)
 
 	// Enforce the lockfile when a deno.lock is found at or near the task directory.
 	// Skip when the task has its own deno.json: that file controls lock configuration
@@ -597,12 +622,17 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 	}
 
 	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
-	// named hosts = allowlist. The IPC socket itself uses a Unix socket
-	// (--allow-read/write), not TCP, so net permission does not affect it.
+	// named hosts = allowlist. A loopback IPC endpoint needs its own exact
+	// host:port entry prepended — the narrowest grant Deno's permission
+	// vocabulary has — so a task that declared no network still reaches the
+	// daemon and nothing else. A bare --allow-net already covers it.
 	net := spec.Permissions.Net
-	if len(net) == 1 && net[0] == "*" {
+	switch {
+	case len(net) == 1 && net[0] == "*":
 		args = append(args, "--allow-net")
-	} else if len(net) > 0 {
+	case loopbackIPC:
+		args = append(args, "--allow-net="+strings.Join(append([]string{ipcAddr}, net...), ","))
+	case len(net) > 0:
 		args = append(args, "--allow-net="+strings.Join(net, ","))
 	}
 	// nil or explicit empty list → no --allow-net flag → network denied
@@ -640,11 +670,15 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 		args = append(args, "--allow-sys="+strings.Join(sys, ","))
 	}
 
-	// Deno 2.x requires explicit read+write permission for Unix socket paths.
 	// The shim needs read permission since it is imported. The entire task
 	// directory is allowed so helper modules (e.g. ./lib/foo.ts) can be imported.
-	readPaths := []string{socketPath, shimPath, spec.TaskDir}
-	writePaths := []string{socketPath}
+	readPaths := []string{shimPath, spec.TaskDir}
+	var writePaths []string
+	if !loopbackIPC {
+		// Deno 2.x requires explicit read+write permission for Unix socket paths.
+		readPaths = append([]string{ipcAddr}, readPaths...)
+		writePaths = append(writePaths, ipcAddr)
+	}
 	for _, entry := range spec.Permissions.FS {
 		path := expandHome(entry.Path)
 		if !filepath.IsAbs(path) {
@@ -664,7 +698,11 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 		}
 	}
 	args = append(args, "--allow-read="+strings.Join(readPaths, ","))
-	args = append(args, "--allow-write="+strings.Join(writePaths, ","))
+	// Deno rejects an empty value, so a task with no write grant and no socket
+	// file to write gets no flag at all — which is the same denial.
+	if len(writePaths) > 0 {
+		args = append(args, "--allow-write="+strings.Join(writePaths, ","))
+	}
 	// The approval-gate state (dicode.lock, dicode.yaml) must never be writable
 	// by a task: a broad --allow-write covering the config dir would otherwise
 	// let a task overwrite the lock to self-approve. --deny-write takes

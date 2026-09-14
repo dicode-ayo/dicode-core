@@ -1,6 +1,6 @@
 """Unit tests for dicode_sdk.py.
 
-Each test stands up a threaded fake server on a fresh Unix-domain socket,
+Each test stands up a threaded fake server on a fresh IPC endpoint,
 reloads ``dicode_sdk`` so its module-level handshake + ``input`` fetch hit
 the fake server, then drives the SDK and asserts what the fake server
 received.
@@ -26,12 +26,24 @@ if SDK_DIR not in sys.path:
 
 
 class FakeServer:
-    """Minimal Unix-socket server speaking dicode's length-prefixed JSON IPC."""
+    """Minimal server speaking dicode's length-prefixed JSON IPC.
+
+    Mirrors the daemon's own transport split (pkg/ipc/endpoint_unix.go,
+    pkg/ipc/endpoint_windows.go): a Unix-domain socket at ``path``, or a
+    loopback TCP port on Windows. ``addr`` is what the SDK reads out of
+    DICODE_SOCKET either way.
+    """
 
     def __init__(self, path):
         self.path = path
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(path)
+        if sys.platform == "win32":
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.bind(("127.0.0.1", 0))
+            self.addr = "%s:%d" % self.sock.getsockname()
+        else:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.bind(path)
+            self.addr = path
         self.sock.listen(1)
         # Match the SDK's own connect timeout (10s) so we don't fail under CI load.
         self.sock.settimeout(10.0)
@@ -59,10 +71,11 @@ class FakeServer:
                     closer.close()
             except OSError:
                 pass
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
+        if self.addr == self.path:
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
 
     def messages(self, method=None):
         with self.received_lock:
@@ -147,7 +160,7 @@ class SDKTestBase(unittest.TestCase):
         self.socket_path = os.path.join(self.tmpdir, "ipc.sock")
         self.server = FakeServer(self.socket_path)
         self.server.start()
-        os.environ["DICODE_SOCKET"] = self.socket_path
+        os.environ["DICODE_SOCKET"] = self.server.addr
         os.environ["DICODE_TOKEN"] = "test-token"
 
     def tearDown(self):

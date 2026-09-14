@@ -86,5 +86,5 @@ authoritative shapes.
 
 - **No external database** — SQLite embedded via `modernc.org/sqlite` (pure Go, no CGO for Linux builds)
 - **No git binary** — `go-git/v5` for all git operations
-- **JS/TS sandbox** — Deno subprocess per run; sandboxing via Deno's `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` permission flags derived from the task's declared permissions. The daemon communicates with the task over a unix-domain socket (`pkg/ipc`) so SDK calls like `dicode.kv.set()` go through the Go control plane, not raw `fetch`.
+- **JS/TS sandbox** — Deno subprocess per run; sandboxing via Deno's `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` permission flags derived from the task's declared permissions. The daemon communicates with the task over a unix-domain socket (`pkg/ipc`) so SDK calls like `dicode.kv.set()` go through the Go control plane, not raw `fetch`. On Windows, where neither SDK can speak AF_UNIX, the per-run endpoint is a loopback TCP port instead and the task's `--allow-net` grant carries it (`pkg/ipc/endpoint_windows.go`).
 - **Graceful shutdown** — cancels running tasks, stops daemon loops, flushes logs before exit

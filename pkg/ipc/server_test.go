@@ -72,18 +72,23 @@ func recvMsg(t *testing.T, conn net.Conn) map[string]any {
 	return m
 }
 
-// dial connects to the Unix socket, retrying for up to 2 seconds.
-func dial(t *testing.T, socketPath string) net.Conn {
+// dial connects to a per-run IPC endpoint, retrying for up to 2 seconds. The
+// network follows the address, as a task SDK's own connect does.
+func dial(t *testing.T, addr string) net.Conn {
 	t.Helper()
+	network := "unix"
+	if IsLoopbackAddr(addr) {
+		network = "tcp"
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", socketPath)
+		conn, err := net.Dial(network, addr)
 		if err == nil {
 			return conn
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("dial %s timed out", socketPath)
+	t.Fatalf("dial %s timed out", addr)
 	return nil
 }
 

@@ -84,6 +84,50 @@ jobs:
       - name: Run Python task test for tasks/examples/hello-python
         run: uv run tasks/examples/hello-python/task.test.py
 
+  # Windows task execution (#871). The per-run IPC endpoint and both task SDKs
+  # take a different transport there — a loopback TCP port, since neither Deno
+  # nor asyncio can speak AF_UNIX on Windows — and no other job in this workflow
+  # runs on Windows, so that path could only ever break silently while the
+  # release kept shipping a windows/amd64 binary.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Test the IPC endpoint and the sandbox grants derived from it
+        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestBuildDenoArgs|TestModuleURL|TestBuildGuardPolicy|TestPythonSDK' -timeout 300s
+
+      # A task run end to end is the thing that has never worked on Windows, so
+      # assert it directly. The grep is the point: both suites skip themselves
+      # when their toolchain is missing, so a green `go test` alone would not
+      # prove any task ran. uv is provisioned by the test itself, as the runtime
+      # provisions it.
+      - name: Run a Deno task end to end
+        shell: bash
+        run: |
+          go test ./pkg/runtime/deno/ -run '^TestRuntime_(ReturnValue|Log|KV)$' -v -timeout 600s | tee deno.log
+          grep -q -- '--- PASS: TestRuntime_KV' deno.log
+
+      - name: Run a Python task end to end
+        shell: bash
+        run: |
+          go test ./pkg/runtime/python/ -run '^TestExecute_(ReturnValuePersisted|OutputHTMLPersisted)$' -v -timeout 600s | tee python.log
+          grep -q -- '--- PASS: TestExecute_ReturnValuePersisted' python.log
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

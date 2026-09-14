@@ -299,3 +299,101 @@ func TestBuildDenoArgs_LockFrozen_SkippedWhenDenoJsonPresent(t *testing.T) {
 		t.Error("--frozen must not appear when task has deno.json")
 	}
 }
+
+// argValue returns the value of the first arg with the given "--flag=" prefix.
+func argValue(args []string, prefix string) (string, bool) {
+	for _, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return strings.TrimPrefix(a, prefix), true
+		}
+	}
+	return "", false
+}
+
+// loopbackSpec is a task declaring no permissions at all — the case where the
+// endpoint grant is the only thing standing between the task and a failed run.
+func loopbackSpec(perms task.Permissions) *task.Spec {
+	return &task.Spec{
+		ID: "loopback", Name: "loopback", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		TaskDir:     "/tmp/task",
+		Permissions: perms,
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NetGrant: a loopback endpoint is reached over
+// the network, so a task that declared no network must still be granted that
+// one host:port — and nothing wider.
+func TestBuildDenoArgs_LoopbackIPC_NetGrant(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "127.0.0.1:52341", "/shim.ts", "/runner.ts", nil)
+
+	got, ok := argValue(args, "--allow-net=")
+	if !ok {
+		t.Fatalf("no --allow-net grant for the IPC endpoint: %v", args)
+	}
+	if got != "127.0.0.1:52341" {
+		t.Errorf("--allow-net = %q, want the endpoint alone", got)
+	}
+	if hasArg(args, "--allow-net") {
+		t.Error("bare --allow-net grants the whole network to a task that declared none")
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NetGrantPrependsToDeclared: the endpoint entry
+// is added to what the task declared, never in place of it.
+func TestBuildDenoArgs_LoopbackIPC_NetGrantPrependsToDeclared(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"api.github.com", "example.com:8443"}}),
+		"127.0.0.1:52341", "/shim.ts", "/runner.ts", nil)
+
+	got, _ := argValue(args, "--allow-net=")
+	if want := "127.0.0.1:52341,api.github.com,example.com:8443"; got != want {
+		t.Errorf("--allow-net = %q, want %q", got, want)
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_WildcardNetUnchanged: ["*"] already covers the
+// endpoint, so it must stay the bare flag rather than collapse to a list.
+func TestBuildDenoArgs_LoopbackIPC_WildcardNetUnchanged(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"*"}}),
+		"127.0.0.1:52341", "/shim.ts", "/runner.ts", nil)
+
+	if !hasArg(args, "--allow-net") {
+		t.Errorf(`net: ["*"] must stay a bare --allow-net: %v`, args)
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NoFilesystemGrant: an endpoint address is not a
+// path. Handing it to --allow-read/--allow-write would grant a nonsense path,
+// and a task declaring no fs access must get no --allow-write at all.
+func TestBuildDenoArgs_LoopbackIPC_NoFilesystemGrant(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "127.0.0.1:52341", "/shim.ts", "/runner.ts", nil)
+
+	read, _ := argValue(args, "--allow-read=")
+	if strings.Contains(read, "127.0.0.1") {
+		t.Errorf("--allow-read carries the endpoint address: %q", read)
+	}
+	if hasArgPrefix(args, "--allow-write") {
+		t.Errorf("task declared no writable path, yet --allow-write was emitted: %v", args)
+	}
+}
+
+// TestBuildDenoArgs_UnixIPC_KeepsSocketGrants: the Unix path is unchanged — the
+// socket file is read+write, and no network grant appears for a task that
+// declared none.
+func TestBuildDenoArgs_UnixIPC_KeepsSocketGrants(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "/run/dicode-1/ipc.sock", "/shim.ts", "/runner.ts", nil)
+
+	read, _ := argValue(args, "--allow-read=")
+	if !strings.Contains(read, "/run/dicode-1/ipc.sock") {
+		t.Errorf("--allow-read %q missing the socket path", read)
+	}
+	write, ok := argValue(args, "--allow-write=")
+	if !ok || write != "/run/dicode-1/ipc.sock" {
+		t.Errorf("--allow-write = %q (present=%v), want the socket path alone", write, ok)
+	}
+	if hasArgPrefix(args, "--allow-net") {
+		t.Errorf("Unix socket IPC must not hand the task any network grant: %v", args)
+	}
+}
