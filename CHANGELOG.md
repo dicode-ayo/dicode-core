@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3](https://github.com/dicode-ayo/dicode-core/compare/v0.6.2...v0.6.3) (2026-09-14)
+
+
+### Bug Fixes
+
+* **release:** pin publish jobs to the release tag, not the run's commit ([#869](https://github.com/dicode-ayo/dicode-core/issues/869)) ([4ef406b](https://github.com/dicode-ayo/dicode-core/commit/4ef406bc0bb13fd00d0088cc397637e74f374ea5))
+
 ## [0.6.2](https://github.com/dicode-ayo/dicode-core/compare/v0.6.1...v0.6.2) (2026-09-14)
 
 
