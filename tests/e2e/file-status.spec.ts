@@ -6,7 +6,7 @@
  * with an optional `status` of "new" or "changed", computed by comparing git
  * blob hashes between the previously-approved commit and the one the
  * pending content was observed at (pkg/approval/state.go's inventoryOf,
- * internal/gitops.TreeBlobHashesForPaths). This is the per-file half of the
+ * internal/gitops.TreeBlobHashesForPathsAtTwoCommits). This is the per-file half of the
  * "what moved" strip; the commit-range/compare-link half (#846, superseding
  * #672) already has e2e coverage in approval-review.spec.ts.
  *
