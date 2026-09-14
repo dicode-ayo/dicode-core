@@ -31,8 +31,13 @@ import * as path from 'path';
 import { settleApproved } from './helpers/approval';
 
 const TASK_ID = 'e2e-tests/file-status-probe';
+const MARKER_PREFIX = 'edited-for-e2e-670';
 
-test.setTimeout(90_000);
+// Retrying the mutate-and-check-pending sequence (see attemptPendingChange)
+// can burn through several backed-off waits in a slow/loaded CI run before
+// pkg/daemon's approval-bootstrap window finally closes — give the whole
+// test enough budget to try all of them plus cleanup.
+test.setTimeout(240_000);
 
 function tasksDir(): string {
   const d = process.env.DICODE_E2E_TASKS_DIR;
@@ -46,60 +51,110 @@ async function waitForTaskCondition(
   taskID: string,
   predicate: (task: Record<string, unknown>) => boolean,
   timeoutMs = 45_000,
-): Promise<void> {
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const res = await request.get(`/api/tasks/${encodeURIComponent(taskID)}`);
     if (res.ok()) {
       const body = await res.json() as Record<string, unknown>;
-      if (predicate(body)) return;
+      if (predicate(body)) return true;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`Task ${taskID} did not satisfy condition within ${timeoutMs}ms`);
+  return false;
 }
 
 type PendingStateFile = { path: string; kind: string; status?: string };
 type PendingState = { pending_hash: string; files?: PendingStateFile[] };
+
+type PendingAttempt = {
+  ok: boolean;
+  /** The distinctive marker this attempt's edit wrote into task.js. */
+  marker: string;
+  /** The distinctive new file this attempt added, relative to probeDir. */
+  newFile: string;
+};
+
+/**
+ * attemptPendingChange edits task.js and adds a new file, commits both, and
+ * waits up to pendTimeoutMs for the task to report pending_approval === true.
+ *
+ * Each attempt uses a fresh marker/filename so a run that gets swallowed by
+ * pkg/daemon's approval-bootstrap window (bootstrapSettle, nominally 10s but
+ * slid forward by every task registration that lands while it's open — see
+ * daemon.go) auto-approving the change instead of holding it pending still
+ * leaves the NEXT attempt's edit and new file genuinely novel relative to
+ * whatever just got auto-approved as the new baseline — rather than retrying
+ * with identical content that would just get silently re-approved again with
+ * nothing left to observe as "new"/"changed".
+ */
+async function attemptPendingChange(
+  request: import('@playwright/test').APIRequestContext,
+  git: (...args: string[]) => string,
+  probeDir: string,
+  taskJsPath: string,
+  attempt: number,
+  pendTimeoutMs: number,
+): Promise<PendingAttempt> {
+  const marker = `${MARKER_PREFIX}-${attempt}`;
+  const newFile = `extra-${attempt}.js`;
+
+  const original = fs.readFileSync(taskJsPath, 'utf8');
+  // The first attempt replaces the fixture's literal "baseline" marker (see
+  // its own assertion below); later attempts just append, since "baseline"
+  // is gone after the first edit lands.
+  const edited = original.includes('baseline')
+    ? original.replace('baseline', marker)
+    : `${original}\n// ${marker}\n`;
+
+  fs.writeFileSync(taskJsPath, edited, 'utf8');
+  fs.writeFileSync(path.join(probeDir, newFile), `export const probe = ${attempt};\n`, 'utf8');
+  // A REAL commit — see the file header on why an empty one won't do — so
+  // the pending "to" commit's tree actually carries these bytes.
+  git('add', 'file-status-probe');
+  git('commit', '-q', '-m', `file-status-probe: edit + add for #670 e2e (attempt ${attempt})`);
+
+  const ok = await waitForTaskCondition(request, TASK_ID, (t) => t.pending_approval === true, pendTimeoutMs);
+  return { ok, marker, newFile };
+}
 
 test.describe('Per-file "what moved" markers (#670)', () => {
   test('pending-state marks an edited file changed, a new file new, and leaves an untouched file unmarked', async ({ request }) => {
     const repo = tasksDir();
     const probeDir = path.join(repo, 'file-status-probe');
     const taskJsPath = path.join(probeDir, 'task.js');
-    const newFilePath = path.join(probeDir, 'extra.js');
     const git = (...args: string[]): string =>
       execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 
+    const fixtureOriginal = fs.readFileSync(taskJsPath, 'utf8');
+    expect(fixtureOriginal, 'fixture task.js must contain the literal "baseline" marker this test edits')
+      .toContain('baseline');
+
     // file-status-probe is baked into the daemon's very first commit
     // (initFixtureRepo) and bootstrap-approves at startup, exactly like every
-    // other fixture task. But pkg/daemon's approval-bootstrap window
-    // (bootstrapSettle, nominally 10s but slid forward by every task
-    // registration that lands while it's open — see daemon.go) auto-approves
-    // ANY hash change observed before it closes instead of holding it
-    // pending, so mutating too early would bake this test's edit in as
-    // "already approved" and pending_approval would never flip true — the
-    // exact trap approval-review.spec.ts's withPendingChange guards against
-    // with the same fixed delay. This spec has no guarantee it runs after
-    // another spec file has already outlived the window (Playwright file
-    // order, or a filtered/solo run of just this file — as this comment's
-    // own author confirmed against a real run), so wait it out unconditionally
-    // rather than only on a "first test in the file" heuristic.
-    await new Promise((r) => setTimeout(r, 15_000));
-
-    const original = fs.readFileSync(taskJsPath, 'utf8');
-    const edited = original.replace('baseline', 'edited-for-e2e-670');
-    expect(edited, 'fixture task.js must contain the literal "baseline" marker this test edits').not.toBe(original);
+    // other fixture task. The bootstrap window's nominal 10s duration slides
+    // forward with every task registration that lands while it's open, so
+    // there is no single fixed wait that is guaranteed to outlast it under a
+    // loaded CI run with many fixture tasks — instead of one fixed sleep
+    // followed by a single check (which would fail with a confusing timeout
+    // on `pending_approval === true` if the window was still open), retry
+    // the mutate-commit-check sequence a few times with backoff so a slow
+    // run gets more chances to observe the window finally closed.
+    const backoffMs = [15_000, 20_000, 30_000, 30_000];
+    let result: PendingAttempt | undefined;
+    for (let attempt = 1; attempt <= backoffMs.length; attempt++) {
+      await new Promise((r) => setTimeout(r, backoffMs[attempt - 1]));
+      result = await attemptPendingChange(request, git, probeDir, taskJsPath, attempt, 20_000);
+      if (result.ok) break;
+    }
 
     try {
-      fs.writeFileSync(taskJsPath, edited, 'utf8');
-      fs.writeFileSync(newFilePath, 'export const probe = true;\n', 'utf8');
-      // A REAL commit — see the file header on why an empty one won't do —
-      // so the pending "to" commit's tree actually carries these bytes.
-      git('add', 'file-status-probe');
-      git('commit', '-q', '-m', 'file-status-probe: edit + add for #670 e2e');
-
-      await waitForTaskCondition(request, TASK_ID, (t) => t.pending_approval === true);
+      expect(
+        result?.ok,
+        `${TASK_ID} never reported pending_approval=true across ${backoffMs.length} attempts — ` +
+          'the approval-bootstrap window kept auto-approving every edit before it could be observed pending',
+      ).toBe(true);
+      const { marker, newFile } = result!;
 
       const res = await request.get(`/api/tasks/${encodeURIComponent(TASK_ID)}/pending-state`);
       expect(res.ok(), await res.text()).toBe(true);
@@ -111,8 +166,8 @@ test.describe('Per-file "what moved" markers (#670)', () => {
       expect(editedFile, `task.js missing from inventory: ${JSON.stringify(state.files)}`).toBeTruthy();
       expect(editedFile!.status).toBe('changed');
 
-      const addedFile = byPath.get('extra.js');
-      expect(addedFile, `extra.js missing from inventory: ${JSON.stringify(state.files)}`).toBeTruthy();
+      const addedFile = byPath.get(newFile);
+      expect(addedFile, `${newFile} missing from inventory: ${JSON.stringify(state.files)}`).toBeTruthy();
       expect(addedFile!.status).toBe('new');
 
       // task.yaml was never touched by this test: no `status` key at all
@@ -123,13 +178,13 @@ test.describe('Per-file "what moved" markers (#670)', () => {
 
       // No code bytes anywhere in the payload, same invariant every other
       // pending-state spec in this suite pins.
-      expect(JSON.stringify(state)).not.toContain('edited-for-e2e-670');
+      expect(JSON.stringify(state)).not.toContain(marker);
     } finally {
-      // The commit above is a legitimate, permanent step for this dedicated
-      // fixture — unlike hello-manual's mutate/restore convention elsewhere
-      // in this suite, there is no byte-identical-content revert path this
-      // test relies on. Settling to approved is what leaves the daemon in
-      // the state every later spec assumes: no task left pending.
+      // Every attempt's commit above is a legitimate, permanent step for this
+      // dedicated fixture — unlike hello-manual's mutate/restore convention
+      // elsewhere in this suite, there is no byte-identical-content revert
+      // path this test relies on. Settling to approved is what leaves the
+      // daemon in the state every later spec assumes: no task left pending.
       try {
         await settleApproved(request, TASK_ID);
       } catch (cleanupError) {
