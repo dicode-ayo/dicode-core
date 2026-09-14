@@ -308,7 +308,7 @@ func (g *Gate) renderState(id string, kinded task.Kinded, pendingHash string, fr
 		stateFromPipeline(&st, s)
 	}
 
-	files, err := g.inventoryOf(kinded, from, to, cache)
+	files, err := g.inventoryOf(id, kinded, from, to, cache)
 	if err != nil {
 		// The spec-derived body is still a complete and accurate answer to
 		// "what will run", so degrade rather than deny the operator a review
@@ -534,7 +534,14 @@ func containerOf(d *task.DockerConfig) *Container {
 // cached on cache (nil for CurrentState, which never has git work to cache;
 // see fileStatusCache's doc comment for why this is safe and how it stays
 // current across a re-pend).
-func (g *Gate) inventoryOf(k task.Kinded, from, to string, cache *fileStatusCache) ([]InventoryFile, error) {
+//
+// id is the caller's own g.pending map key, threaded through for the
+// diagnostic log label on a failed tree-diff — taken explicitly rather than
+// derived from k.TaskID(), the same reasoning approvalRange documents for
+// its own id parameter: the two agree today only by convention, and taking
+// id explicitly removes the dependency on that convention for this log
+// label too.
+func (g *Gate) inventoryOf(id string, k task.Kinded, from, to string, cache *fileStatusCache) ([]InventoryFile, error) {
 	var dir string
 	var includes []string
 	switch s := k.(type) {
@@ -560,11 +567,20 @@ func (g *Gate) inventoryOf(k task.Kinded, from, to string, cache *fileStatusCach
 		return out, nil
 	}
 
-	statuses := g.fileStatusesOf(k.TaskID(), dir, from, to, absPaths, cache)
+	// A hash_include target that no longer exists on disk (FileKindMissing)
+	// has no meaningful new/changed distinction, so its path is excluded
+	// from the diff query entirely — not just from the result — sparing a
+	// tree.FindEntry lookup in both commits for an answer that would only
+	// ever be discarded below.
+	diffPaths := make([]string, 0, len(absPaths))
+	for i := range out {
+		if out[i].Kind != task.FileKindMissing {
+			diffPaths = append(diffPaths, absPaths[i])
+		}
+	}
+	statuses := g.fileStatusesOf(id, dir, from, to, diffPaths, cache)
 	for i := range out {
 		if out[i].Kind == task.FileKindMissing {
-			// A hash_include target that no longer exists on disk has no
-			// meaningful new/changed distinction.
 			continue
 		}
 		if status, ok := statuses[absPaths[i]]; ok {
