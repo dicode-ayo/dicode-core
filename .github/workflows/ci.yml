@@ -132,6 +132,11 @@ jobs:
           go test ./pkg/runtime/python/ -run '^TestExecute_(ReturnValuePersisted|OutputHTMLPersisted)$' -v -timeout 600s | tee python.log
           grep -q -- '--- PASS: TestExecute_ReturnValuePersisted' python.log
 
+      - name: PROBE full suite (to be removed)
+        continue-on-error: true
+        shell: bash
+        run: go test ./... -timeout 900s 2>&1 | grep -E '^(FAIL|---|\s+\S+_test.go)' | head -200
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
