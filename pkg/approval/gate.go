@@ -52,12 +52,13 @@ type Policy struct {
 // Decoupled from the trigger engine via the arm callback so it can be unit
 // tested with a fake.
 type Gate struct {
-	policy   Policy
-	lock     *Lock
-	arm      func(task.Kinded) error
-	hashFn   func(task.Kinded) (string, error)
-	commitFn func(task.Kinded) (commit, remote string)
-	log      *zap.Logger
+	policy     Policy
+	lock       *Lock
+	arm        func(task.Kinded) error
+	hashFn     func(task.Kinded) (string, error)
+	commitFn   func(task.Kinded) (commit, remote string)
+	treeDiffFn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)
+	log        *zap.Logger
 
 	mu          sync.Mutex
 	pending     map[string]pendingEntry
@@ -123,6 +124,37 @@ type pendingEntry struct {
 	// from a hold nothing depends on to one that genuinely blocks real
 	// triggers (#822).
 	enabled bool
+	// status caches the per-file git tree-diff status computed by
+	// inventoryOf (the "what moved" markers, #670) for this pending
+	// generation. from/to (and therefore every file's status) are fixed for
+	// the whole lifetime of a pendingEntry value — Admit's default case is
+	// the only place g.pending[id] is ever written to a "still pending"
+	// state, and it always stores a brand new pendingEntry struct literal,
+	// never mutates an existing one's hash/commit/kinded in place — so a
+	// pointer here is shared, unchanged, by every copy of this pendingEntry
+	// read out of the map for as long as this generation lasts, and a
+	// concurrent Admit that replaces the entry (re-pend at a new hash, or
+	// even an unchanged-hash reconcile poll that re-resolves commit — see
+	// Admit's comment on why commit is re-resolved on every pend) always
+	// installs a fresh *fileStatusCache, so stale data can never survive a
+	// generation change. See fileStatusCache's own doc comment for the
+	// sync.Once mechanics this relies on to need no second g.mu acquisition.
+	status *fileStatusCache
+}
+
+// fileStatusCache holds the once-computed git tree-diff status map
+// (inventoryOf's expensive half, #670) for one pending generation.
+// pendingEntry values are copied out of g.pending by value under g.mu and
+// then read lock-free (see pendingEntry's and State's doc comments), so the
+// cache itself has to be reference-shared rather than value-shared: byPath
+// is populated at most once, by whichever concurrent renderer's
+// once.Do(...) wins the race, and every other copy of the same pendingEntry
+// — however many goroutines are mid-render against this exact generation —
+// observes and reuses that same result instead of repeating the git tree
+// walk. No second lock on g.mu is ever needed to populate or read it.
+type fileStatusCache struct {
+	once   sync.Once
+	byPath map[string]string
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -133,14 +165,15 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:   policy,
-		lock:     lock,
-		arm:      arm,
-		hashFn:   ContentHash,
-		commitFn: headCommitOf,
-		log:      log,
-		pending:  map[string]pendingEntry{},
-		admitted: map[string]task.Kinded{},
+		policy:     policy,
+		lock:       lock,
+		arm:        arm,
+		hashFn:     ContentHash,
+		commitFn:   headCommitOf,
+		treeDiffFn: gitops.TreeBlobHashesForPathsAtTwoCommits,
+		log:        log,
+		pending:    map[string]pendingEntry{},
+		admitted:   map[string]task.Kinded{},
 	}
 }
 
@@ -149,6 +182,15 @@ func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn
 
 // SetCommitFunc overrides the commit/remote resolver (tests).
 func (g *Gate) SetCommitFunc(fn func(task.Kinded) (commit, remote string)) { g.commitFn = fn }
+
+// SetTreeDiffFunc overrides the per-file git tree-diff resolver used to
+// compute #670's "what moved" markers (tests) — e.g. to wrap the real
+// gitops.TreeBlobHashesForPathsAtTwoCommits and count invocations, proving
+// the fileStatusCache above serves a second render from cache rather than
+// re-walking the trees.
+func (g *Gate) SetTreeDiffFunc(fn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)) {
+	g.treeDiffFn = fn
+}
 
 // SetBuiltinPinned records whether the buildin source is pinned to a tag.
 // Call once at startup, before Admit runs concurrently — it is not
@@ -276,7 +318,12 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash, commit, and remote are written together in one critical
 		// section: a concurrent Approve/ApproveIfHash can never observe a
 		// pending[id] whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, enabled: enabled}
+		// status is always a brand new *fileStatusCache — never carried over
+		// from prev — so a re-pend (even one that only re-resolves commit
+		// with an unchanged hash) can never serve a status computed against
+		// a different generation's from/to (see pendingEntry.status's doc
+		// comment).
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, enabled: enabled, status: &fileStatusCache{}}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -523,7 +570,7 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 		return "", CommitRange{}, false
 	}
 
-	from, to := g.approvalRange(ent)
+	from, to := g.approvalRange(id, ent)
 
 	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
 }
@@ -535,13 +582,22 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 // State/StateFor (the per-file "what moved" markers, #670) so the rule is
 // defined exactly once.
 //
+// id is taken explicitly from the caller's own g.pending[id] lookup rather
+// than re-derived from ent.kinded.TaskID(): the two agree today only by
+// convention (every pendingEntry is stored under the id its own kinded
+// reports), and task.Kinded exposes a public SetTaskID that could someday be
+// called on an already-pending object, silently breaking that convention and
+// pointing this lock lookup — and thus the commit-range and per-file markers
+// alike — at the wrong task's record with no error. Taking id explicitly
+// removes the dependency on that convention entirely.
+//
 // ent must already have been read from g.pending under g.mu by the caller —
 // this reads only g.lock, which guards itself per Lock's own comments, so no
 // second lock on g.pending/g.mu is taken here (see State's and StateFor's
 // doc comments on avoiding a second locked read of the same generation
 // PendingApproval warns about).
-func (g *Gate) approvalRange(ent pendingEntry) (from, to string) {
-	if rec, ok := g.lock.Get(ent.kinded.TaskID()); ok {
+func (g *Gate) approvalRange(id string, ent pendingEntry) (from, to string) {
+	if rec, ok := g.lock.Get(id); ok {
 		from = rec.Commit
 	}
 	return from, ent.commit
