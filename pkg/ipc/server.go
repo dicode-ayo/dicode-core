@@ -984,9 +984,19 @@ func (s *Server) handleConn(conn net.Conn) {
 					// env-resolver internals where CodeQL flags a secretKey
 					// taint as go/clear-text-logging false-positive.
 					_ = err
-					s.log.Warn("delete_input: storage delete failed; will still clear columns",
+					s.log.Warn("delete_input: storage delete failed; leaving row for the next sweep",
 						zap.String("run", req.RunID),
 						zap.String("error_class", "storage_delete"))
+					// Deliberately does NOT clear the row's columns on a
+					// failed blob delete: ListExpiredInputs only returns rows
+					// whose input_storage_key is still set, so clearing it
+					// here would permanently drop this row from every future
+					// retention sweep, leaking the blob forever with no
+					// retry path (#845). Matches the batched delete_inputs
+					// behavior below — leave the row intact so the next
+					// sweep retries it, and report failure to the caller.
+					reply(req.ID, nil, "ipc: storage delete failed, input metadata retained for retry")
+					continue
 				}
 			}
 			if err := s.registry.ClearRunInput(s.ctx, req.RunID); err != nil {
@@ -1016,15 +1026,13 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			// toClear accumulates the run IDs it's safe to mark "input gone"
-			// in the registry. Unlike the singular delete_input (which
-			// clears columns even when the blob delete fails, on the theory
-			// that a single failure is contained and rare), a batch failure
-			// here is deliberately NOT cleared: ListExpiredInputs only
+			// in the registry. Like the singular delete_input, a failed blob
+			// delete here is deliberately NOT cleared: ListExpiredInputs only
 			// returns rows whose input_storage_key is still set, so clearing
 			// it despite a failed blob delete would permanently drop that
 			// row from every future retention sweep, leaking the blob
-			// forever with no retry path (#819 code-review follow-up). A
-			// row left uncleared just gets picked up again next sweep.
+			// forever with no retry path (#819 code-review follow-up, #845).
+			// A row left uncleared just gets picked up again next sweep.
 			toClear := req.RunIDs
 			var failed []string
 			if s.inputStore != nil {
