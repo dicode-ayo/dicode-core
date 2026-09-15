@@ -58,10 +58,10 @@ func HeadInfo(dir string) (commit, remote string, err error) {
 // per-worktree directory that holds only its own HEAD/index, not the object
 // database — that lives in the main checkout's commondir. Without this,
 // resolving a HEAD or a commit against dir can fail to find anything when
-// dir is (or is nested inside) a linked worktree. Every gitops call site
-// that opens a repository must set this — shared here so that guarantee
-// lives in one place instead of being repeated (and possibly dropped again)
-// at each call site.
+// dir is (or is nested inside) a linked worktree. HeadInfo and
+// TreeBlobHashesForPathsAtTwoCommits both need this, since either can be
+// asked about a source that is itself a linked worktree — shared here so
+// the option can't be dropped again at either call site.
 func openRepo(dir string) (*gogit.Repository, error) {
 	repo, err := gogit.PlainOpenWithOptions(dir, &gogit.PlainOpenOptions{DetectDotGit: true, EnableDotGitCommonDir: true})
 	if err != nil {
