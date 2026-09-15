@@ -70,7 +70,7 @@ class FakeServer:
                 if closer is not None:
                     closer.close()
             except OSError:
-                pass
+                pass  # teardown: a peer that already hung up is the normal case
         if self.addr == self.path:
             try:
                 os.unlink(self.path)

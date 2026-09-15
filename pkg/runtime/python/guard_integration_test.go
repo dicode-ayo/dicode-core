@@ -211,9 +211,22 @@ c.close()
 srv.close()
 `
 
+// foreignConnectPayload connects to a loopback port this process is not
+// listening on. The guard raises before the syscall, so nothing needs to be
+// accepting on the other end — and unlike localConnectPayload it is not the
+// shape Windows exempts for asyncio's self-pipe, so deny mode is exercised on
+// every platform.
+const foreignConnectPayload = `
+import socket
+c = socket.socket()
+c.settimeout(0.2)
+c.connect(("127.0.0.1", 9))
+c.close()
+`
+
 func TestGuard_NetDenyBlocksConnect(t *testing.T) {
 	pol := guardPolicy{Net: guardNet{Mode: "deny"}, Run: guardRun{Mode: "deny"}}
-	out, err := runGuardScript(t, pol, localConnectPayload)
+	out, err := runGuardScript(t, pol, foreignConnectPayload)
 	requireDenied(t, out, err, "permissions.net")
 }
 
