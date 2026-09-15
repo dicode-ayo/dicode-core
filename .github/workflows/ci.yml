@@ -113,7 +113,7 @@ jobs:
       # filepath reads as relative on Windows — a test-portability job of its
       # own, not this endpoint's behaviour.
       - name: Test the IPC endpoint and the sandbox grants derived from it
-        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestPythonSDK' -timeout 300s
+        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestPythonSDK' -timeout 300s
 
       # A task run end to end is the thing that has never worked on Windows, so
       # assert it directly. The grep is the point: both suites skip themselves
@@ -131,11 +131,6 @@ jobs:
         run: |
           go test ./pkg/runtime/python/ -run '^TestExecute_(ReturnValuePersisted|OutputHTMLPersisted)$' -v -timeout 600s | tee python.log
           grep -q -- '--- PASS: TestExecute_ReturnValuePersisted' python.log
-
-      - name: PROBE full suite (to be removed)
-        continue-on-error: true
-        shell: bash
-        run: go test ./... -timeout 900s 2>&1 | grep -E '^(FAIL|---|\s+\S+_test.go)' | head -200
 
   lint:
     name: Lint
