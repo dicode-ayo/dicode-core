@@ -20,7 +20,10 @@
 #   - on Windows, a loopback connect to a port this process is itself listening
 #     on is never denied: asyncio builds the event loop's self-pipe out of one,
 #     and it is indistinguishable at this hook from a task connecting to its own
-#     listener. A local service in another process cannot satisfy that test.
+#     listener. A service in another process does not satisfy the test on its
+#     own, but a task that deliberately listens on that port does — Winsock
+#     permits rebinding a live port under SO_REUSEADDR — so this is a guardrail
+#     against accidental reach, not a barrier against a task that wants out.
 def _dicode_install_guard():
     import ipaddress as _ipaddress
     import json as _json
@@ -69,12 +72,20 @@ def _dicode_install_guard():
     # self-pipe out of a loopback TCP pair — every `async def main()` opens one.
     # Both ends live in this process, which is the only thing that separates the
     # pair from a deliberate connect at this hook: a loopback destination is
-    # exempt exactly when a socket here is already listening on that port, which
-    # a service in another process can never be.
+    # exempt exactly when a socket here is listening on that port. An unwitting
+    # local service is not that; a task that binds and listens on the port to
+    # reach one is, and Winsock's SO_REUSEADDR lets it.
     self_pipe_exempt = _sys.platform == "win32"
     loopback_hosts = ("127.0.0.1", "::1")
     own_socks = _weakref.WeakSet()
     own_socks_lock = _threading.Lock()
+
+    # A matching port is not enough: a connected client socket of this task
+    # carries an ephemeral local port that can collide with the destination.
+    # SO_ACCEPTCONN separates a listener from a client; where it is missing the
+    # port match stands alone, which is as wide as the check has ever been and
+    # no wider.
+    accept_conn_opt = getattr(_socket, "SO_ACCEPTCONN", None)
 
     def _is_own_listener(port):
         if port is None:
@@ -83,7 +94,11 @@ def _dicode_install_guard():
             socks = list(own_socks)
         for sock in socks:
             try:
-                if sock.getsockname()[1] == port:
+                if sock.getsockname()[1] != port:
+                    continue
+                if accept_conn_opt is None:
+                    return True
+                if sock.getsockopt(_socket.SOL_SOCKET, accept_conn_opt):
                     return True
             except (OSError, IndexError, TypeError):
                 pass  # unbound, closed, or an address shape with no port

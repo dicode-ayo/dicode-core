@@ -379,9 +379,8 @@ func TestBuildDenoArgs_LoopbackIPC_NoFilesystemGrant(t *testing.T) {
 	}
 }
 
-// TestBuildDenoArgs_UnixIPC_KeepsSocketGrants: the Unix path is unchanged — the
-// socket file is read+write, and no network grant appears for a task that
-// declared none.
+// TestBuildDenoArgs_UnixIPC_KeepsSocketGrants: a socket-path endpoint is
+// read+write, and a task that declared no network gets no network grant.
 func TestBuildDenoArgs_UnixIPC_KeepsSocketGrants(t *testing.T) {
 	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "/run/dicode-1/ipc.sock", "/shim.ts", "/runner.ts", nil)
 

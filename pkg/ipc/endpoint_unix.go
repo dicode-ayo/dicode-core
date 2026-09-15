@@ -30,7 +30,7 @@ func listenIPC(runID string) (l net.Listener, addr, dir string, err error) {
 		return nil, "", "", fmt.Errorf("ipc: listen %s: %w", addr, err)
 	}
 	// Belt-and-suspenders on top of the 0700 parent: it also closes the brief
-	// pre-chmod window on platforms that lack sticky-bit /tmp behaviour.
+	// pre-chmod window on platforms that lack sticky-bit /tmp behavior.
 	if err := os.Chmod(addr, 0600); err != nil {
 		_ = l.Close()
 		_ = os.RemoveAll(dir)

@@ -20,8 +20,8 @@ import (
 // directory, the run-scoped handshake token is the only access control here.
 //
 // dir is always empty — there is no directory to clean up.
-func listenIPC(_ string) (net.Listener, string, string, error) {
-	l, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
+func listenIPC(_ string) (l net.Listener, addr, dir string, err error) {
+	l, err = net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
 	if err != nil {
 		return nil, "", "", fmt.Errorf("ipc: listen loopback: %w", err)
 	}

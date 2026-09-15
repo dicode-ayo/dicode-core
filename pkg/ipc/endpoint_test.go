@@ -17,7 +17,7 @@ func TestIsLoopbackAddr(t *testing.T) {
 		{"127.0.0.1:0", true},
 		// A Unix socket path, as listenIPC builds it.
 		{"/tmp/dicode-8e0c/ipc.sock", false},
-		// A Windows path, in case one ever reaches this predicate.
+		// A Windows path: a drive letter is not a host.
 		{`C:\Users\x\AppData\Local\Temp\ipc.sock`, false},
 		// Any other interface is not an endpoint this daemon creates: binding
 		// one would expose the run off-host, so it must not read as loopback.

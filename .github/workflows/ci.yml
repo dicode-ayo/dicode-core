@@ -110,16 +110,13 @@ jobs:
 
       # Scoped to the endpoint and the grants derived from it. The wider
       # arg-building suites stay out: their fixtures hardcode POSIX paths, which
-      # filepath reads as relative on Windows — a test-portability job of its
-      # own, not this endpoint's behaviour.
+      # filepath reads as relative on Windows (#875).
       - name: Test the IPC endpoint and the sandbox grants derived from it
-        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_Net|TestPythonSDK' -timeout 300s
+        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_NetDenyBlocksConnect|TestPythonSDK' -timeout 300s
 
-      # A task run end to end is the thing that has never worked on Windows, so
-      # assert it directly. The grep is the point: both suites skip themselves
-      # when their toolchain is missing, so a green `go test` alone would not
-      # prove any task ran. uv is provisioned by the test itself, as the runtime
-      # provisions it.
+      # Both suites skip themselves when their toolchain is missing, so a green
+      # `go test` alone would not prove a task ran: the grep is what asserts it.
+      # uv is provisioned by the test itself, as the runtime provisions it.
       - name: Run a Deno task end to end
         shell: bash
         run: |

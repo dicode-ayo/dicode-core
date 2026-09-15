@@ -267,10 +267,11 @@ const __dec__ = new TextDecoder();
 // has no Unix-socket support — and there it is a "127.0.0.1:<port>" address
 // the daemon is listening on (see pkg/ipc/endpoint_windows.go).
 const __addr__ = Deno.env.get("DICODE_SOCKET")!;
+const __portSep__ = __addr__.lastIndexOf(":");
 const __conn__ = Deno.build.os === "windows"
   ? await Deno.connect({
-    hostname: __addr__.slice(0, __addr__.lastIndexOf(":")),
-    port: Number(__addr__.slice(__addr__.lastIndexOf(":") + 1)),
+    hostname: __addr__.slice(0, __portSep__),
+    port: Number(__addr__.slice(__portSep__ + 1)),
   })
   : await Deno.connect({ transport: "unix", path: __addr__ });
 
