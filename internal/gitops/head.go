@@ -33,15 +33,9 @@ import (
 // No blob is read: resolving a tree entry needs the tree objects along dir's
 // path and nothing else.
 func HeadInfo(dir string) (commit, remote string, err error) {
-	// EnableDotGitCommonDir: a linked worktree's .git file points at a
-	// per-worktree directory that holds only its own HEAD/index, not the
-	// object database — that lives in the main checkout's commondir. Without
-	// this, Head/CommitObject below can fail to resolve anything when dir is
-	// (or is nested inside) a linked worktree, exactly as documented at the
-	// same option in treediff.go's PlainOpenWithOptions call.
-	repo, err := gogit.PlainOpenWithOptions(dir, &gogit.PlainOpenOptions{DetectDotGit: true, EnableDotGitCommonDir: true})
+	repo, err := openRepo(dir)
 	if err != nil {
-		return "", "", fmt.Errorf("open repository at %s: %w", dir, err)
+		return "", "", err
 	}
 	ref, err := repo.Head()
 	if err != nil {
@@ -55,6 +49,25 @@ func HeadInfo(dir string) (commit, remote string, err error) {
 		return "", "", fmt.Errorf("HEAD does not track %s", dir)
 	}
 	return ref.Hash().String(), originURL(repo), nil
+}
+
+// openRepo opens the git repository that tracks dir, walking up to find its
+// .git the way DetectDotGit does, with EnableDotGitCommonDir set.
+//
+// EnableDotGitCommonDir: a linked worktree's .git file points at a
+// per-worktree directory that holds only its own HEAD/index, not the object
+// database — that lives in the main checkout's commondir. Without this,
+// resolving a HEAD or a commit against dir can fail to find anything when
+// dir is (or is nested inside) a linked worktree. Every gitops call site
+// that opens a repository must set this — shared here so that guarantee
+// lives in one place instead of being repeated (and possibly dropped again)
+// at each call site.
+func openRepo(dir string) (*gogit.Repository, error) {
+	repo, err := gogit.PlainOpenWithOptions(dir, &gogit.PlainOpenOptions{DetectDotGit: true, EnableDotGitCommonDir: true})
+	if err != nil {
+		return nil, fmt.Errorf("open repository at %s: %w", dir, err)
+	}
+	return repo, nil
 }
 
 // headTracks reports whether dir appears in the tree of commit head. The
