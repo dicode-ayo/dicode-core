@@ -109,3 +109,64 @@ func TestHeadInfo_UnbornBranch(t *testing.T) {
 		t.Fatal("expected an error for a repository with no commits")
 	}
 }
+
+// TestHeadInfo_LinkedWorktree is the regression pin for #863: HeadInfo must
+// resolve HEAD when dir is (or is nested inside) a linked git worktree (the
+// `git worktree add` concept — a second working directory sharing one object
+// store with a main checkout), not only a plain clone.
+//
+// go-git has no API to create a linked worktree, so this hand-builds the
+// on-disk layout git itself produces, following go-git's own
+// PlainOpenWithOptions/EnableDotGitCommonDir implementation
+// (repository.go's dotGitToOSFilesystems/dotGitCommonDirectory) rather than
+// guessing:
+//
+//   - <main>/.git/worktrees/<name>/HEAD — the worktree's own checked-out ref
+//     (here a detached commit hash, git's own format for a HEAD not on a
+//     branch). go-git's RepositoryFilesystem routes top-level "HEAD" to this
+//     per-worktree directory rather than the common one (see
+//     storage/filesystem/dotgit/repository_filesystem.go's
+//     mapToRepositoryFsByPath: "HEAD" is not among the objects/refs/config/…
+//     paths that always route to commondir), exactly like a real worktree.
+//   - <main>/.git/worktrees/<name>/commondir — "../..", the relative path
+//     git itself writes there, back to <main>/.git where the object database
+//     and refs actually live.
+//   - <linked>/.git — a *file* (not a directory), containing
+//     "gitdir: <absolute path to <main>/.git/worktrees/<name>>". This is
+//     what tells go-git's dotGitToOSFilesystems that dir belongs to that
+//     per-worktree directory in the first place.
+//
+// A "gitdir" reverse-pointer file inside worktrees/<name>/ (real git writes
+// one back at the linked checkout) is deliberately omitted: reading
+// go-git's source confirms PlainOpenWithOptions never opens such a file —
+// only "commondir" and "HEAD" are read from that directory — so adding it
+// would only decorate the fixture, not exercise anything.
+func TestHeadInfo_LinkedWorktree(t *testing.T) {
+	root := t.TempDir()
+	mainRepo := filepath.Join(root, "main")
+	nested := filepath.Join(mainRepo, "tasks", "deploy")
+	writeFile(t, filepath.Join(nested, "task.yaml"), "name: t\n")
+	want := initRepo(t, mainRepo)
+
+	const worktreeName = "wt1"
+	worktreeGitDir := filepath.Join(mainRepo, ".git", "worktrees", worktreeName)
+	writeFile(t, filepath.Join(worktreeGitDir, "HEAD"), want+"\n")
+	writeFile(t, filepath.Join(worktreeGitDir, "commondir"), "../..\n")
+
+	linked := filepath.Join(root, "linked")
+	writeFile(t, filepath.Join(linked, ".git"), "gitdir: "+worktreeGitDir+"\n")
+	// The linked worktree's checkout of the same tracked path — HeadInfo
+	// only needs it to exist on disk for filepath.Rel/DetectDotGit to walk
+	// up to the .git file; the tree lookup itself reads git objects, not
+	// this file's content.
+	linkedNested := filepath.Join(linked, "tasks", "deploy")
+	writeFile(t, filepath.Join(linkedNested, "task.yaml"), "name: t\n")
+
+	got, _, err := HeadInfo(linkedNested)
+	if err != nil {
+		t.Fatalf("HeadInfo: %v", err)
+	}
+	if got != want {
+		t.Fatalf("HeadInfo = %q, want %q", got, want)
+	}
+}

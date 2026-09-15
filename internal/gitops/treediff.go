@@ -44,15 +44,13 @@ import (
 // No blob content is read: a git tree entry carries its blob's hash without
 // reading the blob itself.
 func TreeBlobHashesForPathsAtTwoCommits(dir, fromSHA, toSHA string, absPaths []string) (fromHashes, toHashes map[string]string, err error) {
-	// EnableDotGitCommonDir: a linked worktree's .git file points at a
-	// per-worktree directory that holds only its own HEAD/index, not the
-	// object database — that lives in the main checkout's commondir. Without
-	// this, CommitObject below can fail to resolve fromSHA/toSHA against a
-	// source that is itself a linked worktree, and every marker in the
-	// response silently degrades to absent rather than erroring loudly.
-	repo, err := gogit.PlainOpenWithOptions(dir, &gogit.PlainOpenOptions{DetectDotGit: true, EnableDotGitCommonDir: true})
+	// openRepo sets EnableDotGitCommonDir: without it, CommitObject below can
+	// fail to resolve fromSHA/toSHA against a source that is itself a linked
+	// worktree, and every marker in the response silently degrades to absent
+	// rather than erroring loudly.
+	repo, err := openRepo(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open repository at %s: %w", dir, err)
+		return nil, nil, err
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
