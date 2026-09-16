@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.4](https://github.com/dicode-ayo/dicode-core/compare/v0.6.3...v0.6.4) (2026-09-16)
+
+
+### Features
+
+* **task:** add ${TEMPDIR} and ${CACHEDIR} template vars ([#878](https://github.com/dicode-ayo/dicode-core/issues/878)) ([f1c2024](https://github.com/dicode-ayo/dicode-core/commit/f1c202409c3c6b6682175a7830ee36bced27f479))
+
+
+### Bug Fixes
+
+* **gitops:** HeadInfo can't resolve HEAD from a linked git worktree ([#873](https://github.com/dicode-ayo/dicode-core/issues/873)) ([ecabeeb](https://github.com/dicode-ayo/dicode-core/commit/ecabeebb5806fa6c44e05c200e93a732735ad66d))
+* **ipc:** give Windows a per-run IPC endpoint both SDKs can reach ([bd0c89b](https://github.com/dicode-ayo/dicode-core/commit/bd0c89b529eb83359f0a3b2e6bff0e8444a55d50)), closes [#871](https://github.com/dicode-ayo/dicode-core/issues/871)
+
 ## [0.6.3](https://github.com/dicode-ayo/dicode-core/compare/v0.6.2...v0.6.3) (2026-09-14)
 
 
