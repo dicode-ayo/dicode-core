@@ -291,6 +291,34 @@ func TestVarDataDir_Constant(t *testing.T) {
 	}
 }
 
+func TestBuiltinVars_TEMPDIR(t *testing.T) {
+	vars := builtinVars("/repo/tasks/sweeper", nil)
+	if got := vars[VarTempDir]; got != os.TempDir() {
+		t.Errorf("TEMPDIR = %q, want %q", got, os.TempDir())
+	}
+}
+
+// A sweeper task declares the temp root as an fs grant. The grant must resolve
+// to the same directory the Deno runtime writes its wrappers into — os.TempDir()
+// — or the task is handed permission to a directory that holds nothing.
+func TestExpandSpec_TEMPDIRInFSPath(t *testing.T) {
+	spec := &Spec{
+		Permissions: Permissions{
+			FS: []FSEntry{{Path: "${TEMPDIR}", Permission: "rw"}},
+		},
+	}
+	ExpandSpec(spec, "/repo/tasks/sweeper", nil)
+	if got := spec.Permissions.FS[0].Path; got != os.TempDir() {
+		t.Errorf("fs[0].path = %q, want %q", got, os.TempDir())
+	}
+}
+
+func TestVarTempDir_Constant(t *testing.T) {
+	if VarTempDir != "TEMPDIR" {
+		t.Errorf("VarTempDir = %q, want TEMPDIR", VarTempDir)
+	}
+}
+
 func TestExpandSpec_DockerVolumes(t *testing.T) {
 	spec := &Spec{
 		Docker: &DockerConfig{

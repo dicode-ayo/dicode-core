@@ -33,6 +33,13 @@ const (
 	// context (e.g. a raw local folder source or a unit test).
 	VarTaskSetDir = "TASK_SET_DIR"
 
+	// VarTempDir is the directory the runtimes write their per-run wrapper
+	// files into — os.TempDir(), i.e. $TMPDIR or /tmp on Unix and whatever
+	// GetTempPath resolves on Windows. A task that sweeps or reads those
+	// wrappers must name the directory through this variable; a hardcoded
+	// POSIX path resolves to a nonexistent C:\tmp on Windows.
+	VarTempDir = "TEMPDIR"
+
 	// VarDataDir is the absolute path to the daemon's data directory
 	// (config.DataDir, e.g. ~/.dicode). Injected by the reconciler
 	// and the taskset resolver before each task.LoadDir call so tasks can
@@ -272,6 +279,7 @@ func ExpandSpec(spec *Spec, taskDir string, extras map[string]string) {
 func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	vars := map[string]string{
 		VarTaskDir: taskDir,
+		VarTempDir: os.TempDir(),
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		vars[VarHome] = home
