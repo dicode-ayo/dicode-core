@@ -51,6 +51,22 @@ func TestStripURLCredentials(t *testing.T) {
 		},
 		{"no URL at all", "no URL here", "no URL here"},
 		{"empty string", "", ""},
+
+		// Regression cases: the userinfo run itself contains a literal
+		// `@`. A naive `[^\s/@]+@` pattern stops at the *first* `@` and
+		// under-strips, leaking the tail of the credential. The fix
+		// greedily extends the userinfo run up to the *last* `@` before
+		// the next `/`, matching net/url's split point.
+		{
+			"userinfo containing its own @ (e.g. email-shaped username or a password with @)",
+			"https://alice:P@ssw0rd@github.example.com/repo.git",
+			"https://github.example.com/repo.git",
+		},
+		{
+			"email address as username, plus a separate token as password",
+			"https://alice@example.com:ghp_abc@github.com/org/repo.git",
+			"https://github.com/org/repo.git",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
