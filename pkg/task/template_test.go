@@ -2,6 +2,7 @@ package task
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -294,6 +295,28 @@ func TestVarDataDir_Constant(t *testing.T) {
 // A sweeper task declares the temp root as an fs grant. The grant must resolve
 // to the same directory the Deno runtime writes its wrappers into — os.TempDir()
 // — or the task is handed permission to a directory that holds nothing.
+// A relative grant is joined onto the task directory by the Deno runtime, so a
+// variable that reaches permissions.fs[].path relative points the grant at
+// somewhere the task never writes. os.TempDir returns $TMPDIR unchanged and
+// os.UserCacheDir passes a relative $HOME straight through.
+func TestBuiltinVars_DirsAreAbsolute(t *testing.T) {
+	t.Setenv("TMPDIR", "relative/tmp")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "relative/home")
+
+	for name, got := range map[string]string{
+		VarTempDir:  builtinVars("/repo/tasks/x", nil)[VarTempDir],
+		VarCacheDir: builtinVars("/repo/tasks/x", nil)[VarCacheDir],
+	} {
+		if got == "" {
+			continue // the host could not resolve it at all; absence is loud
+		}
+		if !filepath.IsAbs(got) {
+			t.Errorf("%s = %q, want an absolute path", name, got)
+		}
+	}
+}
+
 func TestExpandSpec_TEMPDIRInFSPath(t *testing.T) {
 	spec := &Spec{
 		Permissions: Permissions{
