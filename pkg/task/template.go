@@ -40,6 +40,13 @@ const (
 	// POSIX path resolves to a nonexistent C:\tmp on Windows.
 	VarTempDir = "TEMPDIR"
 
+	// VarCacheDir is the absolute path to the user cache directory —
+	// os.UserCacheDir(), i.e. $XDG_CACHE_HOME or ~/.cache on Linux,
+	// ~/Library/Caches on macOS and %LOCALAPPDATA% on Windows. A task that
+	// caches a downloaded helper binary must grant this rather than ~/.cache,
+	// which names the right directory on Linux only.
+	VarCacheDir = "CACHEDIR"
+
 	// VarDataDir is the absolute path to the daemon's data directory
 	// (config.DataDir, e.g. ~/.dicode). Injected by the reconciler
 	// and the taskset resolver before each task.LoadDir call so tasks can
@@ -280,6 +287,9 @@ func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	vars := map[string]string{
 		VarTaskDir: taskDir,
 		VarTempDir: os.TempDir(),
+	}
+	if cache, err := os.UserCacheDir(); err == nil {
+		vars[VarCacheDir] = cache
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		vars[VarHome] = home

@@ -319,6 +319,42 @@ func TestVarTempDir_Constant(t *testing.T) {
 	}
 }
 
+func TestBuiltinVars_CACHEDIR(t *testing.T) {
+	want, err := os.UserCacheDir()
+	if err != nil {
+		t.Skip("no user cache dir on this host")
+	}
+	vars := builtinVars("/repo/tasks/tray", nil)
+	if got := vars[VarCacheDir]; got != want {
+		t.Errorf("CACHEDIR = %q, want %q", got, want)
+	}
+}
+
+// A task that downloads a helper binary grants the cache root the Deno cache
+// library resolves to, which is ~/.cache on Linux, ~/Library/Caches on macOS
+// and %LOCALAPPDATA% on Windows. os.UserCacheDir() is the same set.
+func TestExpandSpec_CACHEDIRInFSPath(t *testing.T) {
+	want, err := os.UserCacheDir()
+	if err != nil {
+		t.Skip("no user cache dir on this host")
+	}
+	spec := &Spec{
+		Permissions: Permissions{
+			FS: []FSEntry{{Path: "${CACHEDIR}", Permission: "rw"}},
+		},
+	}
+	ExpandSpec(spec, "/repo/tasks/tray", nil)
+	if got := spec.Permissions.FS[0].Path; got != want {
+		t.Errorf("fs[0].path = %q, want %q", got, want)
+	}
+}
+
+func TestVarCacheDir_Constant(t *testing.T) {
+	if VarCacheDir != "CACHEDIR" {
+		t.Errorf("VarCacheDir = %q, want CACHEDIR", VarCacheDir)
+	}
+}
+
 func TestExpandSpec_DockerVolumes(t *testing.T) {
 	spec := &Spec{
 		Docker: &DockerConfig{
