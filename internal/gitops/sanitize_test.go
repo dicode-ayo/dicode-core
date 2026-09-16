@@ -67,6 +67,24 @@ func TestStripURLCredentials(t *testing.T) {
 			"https://alice@example.com:ghp_abc@github.com/org/repo.git",
 			"https://github.com/org/repo.git",
 		},
+
+		// Regression cases: the *previous* fix (extending the userinfo run
+		// to allow an embedded `@`) over-corrected by also allowing `?` and
+		// `#` into the run, so it could match through a query string or
+		// fragment to a LATER, unrelated `@` — stripping past the real
+		// host and corrupting the output. The run must stop at the end of
+		// the URL authority component (RFC 3986: the first `/`, `?`, `#`,
+		// whitespace, or end of string), not just at `/`.
+		{
+			"query string containing an unrelated @ after the real userinfo",
+			"https://user:pass@example.com?token=abc@evil.com",
+			"https://example.com?token=abc@evil.com",
+		},
+		{
+			"query and fragment each containing their own unrelated @, plus real userinfo",
+			"https://u:p@example.com/path?a=1@b#frag@end",
+			"https://example.com/path?a=1@b#frag@end",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
