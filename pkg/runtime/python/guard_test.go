@@ -287,3 +287,20 @@ func TestBuildWrapper_GuardPlacement(t *testing.T) {
 			pepIdx, sdkIdx, guardIdx, bodyIdx, retIdx)
 	}
 }
+
+// TestBuildGuardPolicy_LoopbackIPCNotAWritePath: a loopback endpoint address is
+// not a path, so it must not land in the write allowlist, where it would shadow
+// a literal file of that name. It needs no grant of its own either: the SDK
+// opens the connection before the guard installs.
+func TestBuildGuardPolicy_LoopbackIPCNotAWritePath(t *testing.T) {
+	spec := specWithPerms(task.Permissions{FS: []task.FSEntry{{Path: "data", Permission: "w"}}})
+	pol := buildGuardPolicy(spec, "127.0.0.1:52341", nil)
+
+	want := []string{filepath.Join(spec.TaskDir, "data")}
+	if len(pol.FSWrite) != len(want) || pol.FSWrite[0] != want[0] {
+		t.Errorf("fs_write = %v, want %v", pol.FSWrite, want)
+	}
+	if pol.Net.Mode != "deny" {
+		t.Errorf("net mode = %q, want the declared deny — the endpoint must not widen it", pol.Net.Mode)
+	}
+}

@@ -112,7 +112,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 
 - `runtime.go` / `manager.go` — one Deno subprocess per run; sandboxing via `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` flags derived from the task's declared permissions
-- SDK shim embedded from `pkg/runtime/deno/sdk/shim.ts`; SDK calls travel over the `pkg/ipc` unix socket, not raw `fetch`
+- SDK shim embedded from `pkg/runtime/deno/sdk/shim.ts`; SDK calls travel over the `pkg/ipc` endpoint (a unix socket; a loopback TCP port on Windows), not raw `fetch`
 - `lock.go` — per-task Deno lockfile handling with recovery
 
 ### `pkg/runtime/python/` ✅

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -211,7 +212,34 @@ c.close()
 srv.close()
 `
 
+// foreignConnectPayload connects to a loopback port this process is not
+// listening on. The guard raises before the syscall, so nothing needs to be
+// accepting on the other end — and unlike localConnectPayload it is not the
+// shape Windows exempts for asyncio's self-pipe, so deny mode is exercised on
+// every platform.
+const foreignConnectPayload = `
+import socket
+c = socket.socket()
+c.settimeout(0.2)
+c.connect(("127.0.0.1", 9))
+c.close()
+`
+
 func TestGuard_NetDenyBlocksConnect(t *testing.T) {
+	pol := guardPolicy{Net: guardNet{Mode: "deny"}, Run: guardRun{Mode: "deny"}}
+	out, err := runGuardScript(t, pol, foreignConnectPayload)
+	requireDenied(t, out, err, "permissions.net")
+}
+
+// TestGuard_NetDenyBlocksSelfListenerConnect pins the Unix side of the
+// divergence Windows introduces: there, a connect to a listener in this same
+// process is exempt so asyncio's self-pipe can be built. Everywhere else it
+// must still be denied, or the Unix guard has silently drifted to the Windows
+// rule.
+func TestGuard_NetDenyBlocksSelfListenerConnect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exempts a same-process listener; see guard.py")
+	}
 	pol := guardPolicy{Net: guardNet{Mode: "deny"}, Run: guardRun{Mode: "deny"}}
 	out, err := runGuardScript(t, pol, localConnectPayload)
 	requireDenied(t, out, err, "permissions.net")

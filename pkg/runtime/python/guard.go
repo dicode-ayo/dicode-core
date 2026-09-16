@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
@@ -62,10 +63,10 @@ type guardRun struct {
 //	     home; relative paths resolve against the task dir. "r" entries are
 //	     ignored (reads are unenforced, see guardPolicy).
 //
-// The IPC socket path is always writable so SDK traffic is never governed.
+// A Unix-socket IPC path is always writable so SDK traffic is never governed.
 // protectedPaths (dicode.lock, dicode.yaml) become the deny list so no broad
 // write grant can reach the approval-gate state.
-func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []string) guardPolicy {
+func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) guardPolicy {
 	var pol guardPolicy
 
 	net := spec.Permissions.Net
@@ -90,8 +91,11 @@ func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []strin
 		pol.Run.Mode = "deny"
 	}
 
-	if socketPath != "" {
-		pol.FSWrite = append(pol.FSWrite, socketPath)
+	// A loopback IPC endpoint is not a path and needs no grant of either kind:
+	// the SDK opens the connection before this guard installs, and no later
+	// SDK call re-connects.
+	if ipcAddr != "" && !ipc.IsLoopbackAddr(ipcAddr) {
+		pol.FSWrite = append(pol.FSWrite, ipcAddr)
 	}
 	for _, entry := range spec.Permissions.FS {
 		if entry.Permission != "w" && entry.Permission != "rw" {

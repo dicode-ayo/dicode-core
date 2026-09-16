@@ -306,7 +306,7 @@ docker:
 
 ### Task script (task.ts / task.py)
 
-The task script. Deno (TypeScript) and Python tasks communicate with the daemon over a Unix socket IPC protocol. The following globals are injected automatically — no imports needed.
+The task script. Deno (TypeScript) and Python tasks communicate with the daemon over a length-prefixed JSON IPC protocol, carried on a Unix socket (a loopback TCP connection on Windows, which has neither SDK's Unix-socket support). The following globals are injected automatically — no imports needed.
 
 #### `params` — task parameters from task.yaml (with user overrides)
 

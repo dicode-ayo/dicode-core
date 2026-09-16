@@ -78,7 +78,7 @@ return { processed: limit }
 
 ## SDK globals
 
-The Deno runtime injects all globals via a Unix socket bridge. No imports needed — all globals are available at the top level.
+The Deno runtime injects all globals via an IPC bridge — a Unix socket, or a loopback TCP connection on Windows. No imports needed — all globals are available at the top level.
 
 ### Logging
 
@@ -453,7 +453,7 @@ Permissions are derived from `task.yaml`:
 
 | Permission | Source |
 | --- | --- |
-| `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist |
+| `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist. On Windows the run's IPC endpoint (`127.0.0.1:<port>`) is prepended to the list, since the task reaches it over loopback TCP rather than a Unix socket |
 | `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + cache vars + all `env:` vars (a `PREFIX_*` pattern entry expands to its matching host var names, minus the daemon credential denylist). Bare `--allow-env` (read any var) when `env_read_exposed: true` — node-compat / npm escape hatch |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |

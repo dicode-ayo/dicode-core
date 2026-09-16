@@ -17,12 +17,21 @@
 #     be correlated back to the hostname).
 #   - C extensions that touch files or sockets without going through os/io
 #     (e.g. sqlite3's own file I/O) do not emit audit events.
+#   - on Windows, a loopback connect to a port this process is itself listening
+#     on is never denied: asyncio builds the event loop's self-pipe out of one,
+#     and it is indistinguishable at this hook from a task connecting to its own
+#     listener. A service in another process does not satisfy the test on its
+#     own, but a task that deliberately listens on that port does — Winsock
+#     permits rebinding a live port under SO_REUSEADDR — so this is a guardrail
+#     against accidental reach, not a barrier against a task that wants out.
 def _dicode_install_guard():
     import ipaddress as _ipaddress
     import json as _json
     import os as _os
     import socket as _socket
     import sys as _sys
+    import threading as _threading
+    import weakref as _weakref
 
     policy = _json.loads("__DICODE_POLICY__")
 
@@ -59,6 +68,42 @@ def _dicode_install_guard():
 
     sep = _os.sep
     af_unix = getattr(_socket, "AF_UNIX", None)
+    # Windows has no AF_UNIX socketpair, so asyncio builds the event loop's
+    # self-pipe out of a loopback TCP pair — every `async def main()` opens one.
+    # Both ends live in this process, which is the only thing that separates the
+    # pair from a deliberate connect at this hook: a loopback destination is
+    # exempt exactly when a socket here is listening on that port. An unwitting
+    # local service is not that; a task that binds and listens on the port to
+    # reach one is, and Winsock's SO_REUSEADDR lets it.
+    self_pipe_exempt = _sys.platform == "win32"
+    loopback_hosts = ("127.0.0.1", "::1")
+    own_socks = _weakref.WeakSet()
+    own_socks_lock = _threading.Lock()
+
+    # A matching port is not enough: a connected client socket of this task
+    # carries an ephemeral local port that can collide with the destination.
+    # SO_ACCEPTCONN separates a listener from a client; where it is missing the
+    # port match stands alone, which is as wide as the check has ever been and
+    # no wider.
+    accept_conn_opt = getattr(_socket, "SO_ACCEPTCONN", None)
+
+    def _is_own_listener(port):
+        if port is None:
+            return False
+        with own_socks_lock:
+            socks = list(own_socks)
+        for sock in socks:
+            try:
+                if sock.getsockname()[1] != port:
+                    continue
+                if accept_conn_opt is None:
+                    return True
+                if sock.getsockopt(_socket.SOL_SOCKET, accept_conn_opt):
+                    return True
+            except (OSError, IndexError, TypeError):
+                pass  # unbound, closed, or an address shape with no port
+        return False
+
     write_flags = (
         _os.O_WRONLY | _os.O_RDWR | _os.O_APPEND | _os.O_CREAT | _os.O_TRUNC
     )
@@ -167,8 +212,19 @@ def _dicode_install_guard():
                 return  # unix path address
             host = addr[0] if isinstance(addr, tuple) and len(addr) > 0 else None
             port = addr[1] if isinstance(addr, tuple) and len(addr) > 1 else None
+            if self_pipe_exempt and host in loopback_hosts and _is_own_listener(port):
+                return
             if net_mode == "deny" or not _host_allowed(host, port):
                 _deny_net(host, port)
+        elif event == "socket.__new__":
+            # Tracked only to answer _is_own_listener; the set holds weak refs,
+            # so a socket the task drops leaves on its own.
+            if self_pipe_exempt:
+                with own_socks_lock:
+                    try:
+                        own_socks.add(args[0])
+                    except TypeError:
+                        pass
         elif event == "socket.getaddrinfo":
             if net_mode == "unrestricted":
                 return
