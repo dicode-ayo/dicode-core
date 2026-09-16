@@ -34,17 +34,13 @@ const (
 	VarTaskSetDir = "TASK_SET_DIR"
 
 	// VarTempDir is the directory the runtimes write their per-run wrapper
-	// files into — os.TempDir(), i.e. $TMPDIR or /tmp on Unix and whatever
-	// GetTempPath resolves on Windows. A task that sweeps or reads those
-	// wrappers must name the directory through this variable; a hardcoded
-	// POSIX path resolves to a nonexistent C:\tmp on Windows.
+	// files into: os.TempDir(), i.e. $TMPDIR or /tmp on Unix and whatever
+	// GetTempPath resolves on Windows.
 	VarTempDir = "TEMPDIR"
 
-	// VarCacheDir is the absolute path to the user cache directory —
+	// VarCacheDir is the absolute path to the user cache directory:
 	// os.UserCacheDir(), i.e. $XDG_CACHE_HOME or ~/.cache on Linux,
-	// ~/Library/Caches on macOS and %LOCALAPPDATA% on Windows. A task that
-	// caches a downloaded helper binary must grant this rather than ~/.cache,
-	// which names the right directory on Linux only.
+	// ~/Library/Caches on macOS and %LOCALAPPDATA% on Windows.
 	VarCacheDir = "CACHEDIR"
 
 	// VarDataDir is the absolute path to the daemon's data directory

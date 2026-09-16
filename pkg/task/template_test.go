@@ -291,13 +291,6 @@ func TestVarDataDir_Constant(t *testing.T) {
 	}
 }
 
-func TestBuiltinVars_TEMPDIR(t *testing.T) {
-	vars := builtinVars("/repo/tasks/sweeper", nil)
-	if got := vars[VarTempDir]; got != os.TempDir() {
-		t.Errorf("TEMPDIR = %q, want %q", got, os.TempDir())
-	}
-}
-
 // A sweeper task declares the temp root as an fs grant. The grant must resolve
 // to the same directory the Deno runtime writes its wrappers into — os.TempDir()
 // — or the task is handed permission to a directory that holds nothing.
@@ -310,23 +303,6 @@ func TestExpandSpec_TEMPDIRInFSPath(t *testing.T) {
 	ExpandSpec(spec, "/repo/tasks/sweeper", nil)
 	if got := spec.Permissions.FS[0].Path; got != os.TempDir() {
 		t.Errorf("fs[0].path = %q, want %q", got, os.TempDir())
-	}
-}
-
-func TestVarTempDir_Constant(t *testing.T) {
-	if VarTempDir != "TEMPDIR" {
-		t.Errorf("VarTempDir = %q, want TEMPDIR", VarTempDir)
-	}
-}
-
-func TestBuiltinVars_CACHEDIR(t *testing.T) {
-	want, err := os.UserCacheDir()
-	if err != nil {
-		t.Skip("no user cache dir on this host")
-	}
-	vars := builtinVars("/repo/tasks/tray", nil)
-	if got := vars[VarCacheDir]; got != want {
-		t.Errorf("CACHEDIR = %q, want %q", got, want)
 	}
 }
 
@@ -346,12 +322,6 @@ func TestExpandSpec_CACHEDIRInFSPath(t *testing.T) {
 	ExpandSpec(spec, "/repo/tasks/tray", nil)
 	if got := spec.Permissions.FS[0].Path; got != want {
 		t.Errorf("fs[0].path = %q, want %q", got, want)
-	}
-}
-
-func TestVarCacheDir_Constant(t *testing.T) {
-	if VarCacheDir != "CACHEDIR" {
-		t.Errorf("VarCacheDir = %q, want CACHEDIR", VarCacheDir)
 	}
 }
 
