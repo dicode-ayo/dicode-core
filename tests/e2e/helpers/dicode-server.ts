@@ -425,7 +425,17 @@ async function startInstance(opts: {
 async function stopInstance(instance: RunningInstance): Promise<void> {
   if (instance.child.exitCode === null && instance.child.signalCode === null) {
     instance.child.kill('SIGTERM');
-    await waitForProcessExit(instance.child).catch(() => instance.child.kill('SIGKILL'));
+    try {
+      await waitForProcessExit(instance.child);
+    } catch {
+      // SIGTERM didn't land in time — force it, and this time actually wait
+      // for the exit event rather than assuming SIGKILL is immediate: the
+      // OS doesn't always release open file handles (data.db, its -wal)
+      // synchronously with the kill call, and rmSync below has no retry of
+      // its own for that.
+      instance.child.kill('SIGKILL');
+      await waitForProcessExit(instance.child).catch(() => {});
+    }
   }
   fs.rmSync(instance.tempDir, { recursive: true, force: true });
 }
