@@ -93,14 +93,17 @@ export interface IsolatedDaemon {
 /**
  * Finds a free TCP port on localhost by binding to port 0 and reading it
  * back. There's an inherent TOCTOU gap between this and the daemon actually
- * binding the port a moment later — the same tradeoff
- * task-create-fresh-install.spec.ts already accepts for its own standalone
- * daemon. A collision surfaces as waitForReady's generic timeout rather
- * than a clear EADDRINUSE, but on this suite's single-worker, sequential
- * run the only realistic contender is a leftover process from an earlier
- * failed run, not a concurrent one.
+ * binding the port a moment later — a collision surfaces as waitForReady's
+ * generic timeout rather than a clear EADDRINUSE, but on this suite's
+ * single-worker, sequential run the only realistic contender is a leftover
+ * process from an earlier failed run, not a concurrent one.
+ *
+ * Exported: relay-buildin.spec.ts, relay-protocol.spec.ts, and
+ * task-create-fresh-install.spec.ts each spin up their own standalone
+ * daemon on an ephemeral port the same way startIsolatedDaemon() does, and
+ * import this instead of keeping their own copy.
  */
-async function freePort(): Promise<number> {
+export async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.listen(0, '127.0.0.1', () => {

@@ -28,8 +28,7 @@ import { promisify } from 'node:util';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import * as net from 'net';
-import { BINARY } from './helpers/dicode-server';
+import { BINARY, freePort } from './helpers/dicode-server';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,17 +38,6 @@ const CLI_TIMEOUT_MS = 20_000;
 let daemonProc: ChildProcess | null = null;
 let tempDir = '';
 let webuiPort = 0;
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address() as net.AddressInfo;
-      srv.close(() => resolve(addr.port));
-    });
-    srv.on('error', reject);
-  });
-}
 
 async function waitForUrl(url: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
