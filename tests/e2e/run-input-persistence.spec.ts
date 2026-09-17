@@ -416,7 +416,11 @@ test.describe('Group 2: cleanup task is runnable', () => {
 // isolated daemon reports back over /api/config.
 
 test.describe('Group 3: cleanup with a near-zero retention', () => {
-  test.setTimeout(60_000);
+  // The cleanup test's worst case is sequential: waitForRun (30s budget) +
+  // expect.poll for the blob (15s) + the 2.1s retention-window sleep + a
+  // second waitForRun for the cleanup run (30s) — up to ~77s before request
+  // overhead. 60s could cut off a valid run that's merely slow, not stuck.
+  test.setTimeout(90_000);
 
   let daemon: IsolatedDaemon;
   let api: APIRequestContext;

@@ -271,14 +271,22 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
  */
 function writeAddSourceTaskset(): { tasksetPath: string; tempDir: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dicode-e2e-add-source-'));
-  const tasksDir = path.join(tempDir, 'tasks');
-  copyDirSync(ADD_SOURCE_FIXTURES_DIR, tasksDir);
+  try {
+    const tasksDir = path.join(tempDir, 'tasks');
+    copyDirSync(ADD_SOURCE_FIXTURES_DIR, tasksDir);
 
-  const template = fs.readFileSync(path.join(ADD_SOURCE_FIXTURES_DIR, 'taskset.yaml'), 'utf8');
-  const content = template.replace(/ADD_SOURCE_FIXTURES_TASKS_DIR/g, tasksDir);
-  const tasksetPath = path.join(tempDir, 'taskset.yaml');
-  fs.writeFileSync(tasksetPath, content, 'utf8');
-  return { tasksetPath, tempDir };
+    const template = fs.readFileSync(path.join(ADD_SOURCE_FIXTURES_DIR, 'taskset.yaml'), 'utf8');
+    const content = template.replace(/ADD_SOURCE_FIXTURES_TASKS_DIR/g, tasksDir);
+    const tasksetPath = path.join(tempDir, 'taskset.yaml');
+    fs.writeFileSync(tasksetPath, content, 'utf8');
+    return { tasksetPath, tempDir };
+  } catch (err) {
+    // Don't leak this tempDir if a caller's own cleanup (e.g. setup()'s
+    // stopInstance() on the daemon it already started) has no way to know
+    // this function created one before failing.
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /**
@@ -491,7 +499,19 @@ export async function setup(): Promise<void> {
 
   const instance = await startInstance({ authMode, port: PORT });
   const { tempDir, tasksDir, tasksetPath, configPath, pid } = instance;
-  const { tasksetPath: addSourceTasksetPath, tempDir: addSourceTempDir } = writeAddSourceTaskset();
+
+  // startInstance() has already spawned the daemon at this point. If the
+  // add-source fixture setup below throws, stop it — otherwise setup()
+  // exits before STATE_FILE is ever written, and teardown() (which reads
+  // STATE_FILE to find what to kill) has no way to discover this process.
+  let addSourceTasksetPath: string;
+  let addSourceTempDir: string;
+  try {
+    ({ tasksetPath: addSourceTasksetPath, tempDir: addSourceTempDir } = writeAddSourceTaskset());
+  } catch (err) {
+    await stopInstance(instance);
+    throw err;
+  }
   console.log(`[e2e] Add-source fixture temp dir: ${addSourceTempDir}`);
 
   const state: E2EState = {
