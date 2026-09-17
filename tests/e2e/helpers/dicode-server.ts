@@ -451,7 +451,13 @@ export async function startIsolatedDaemon(
   options: { overlay?: Record<string, unknown>; authMode?: AuthMode } = {},
 ): Promise<IsolatedDaemon> {
   const port = await freePort();
-  const overlay = deepMerge({ server: { port } }, options.overlay ?? {}) as Record<string, unknown>;
+  // server.port is forced last, after the caller's overlay, not the other
+  // way around: baseURL/waitForReady below are built from this exact `port`
+  // value, so an overlay.server.port winning the merge would make the
+  // written config and the port this function actually polls/returns
+  // disagree — the daemon binds where the config says, this keeps talking
+  // to a different, unbound port, and waitForReady times out.
+  const overlay = deepMerge(options.overlay ?? {}, { server: { port } }) as Record<string, unknown>;
   const instance = await startInstance({
     authMode: options.authMode ?? 'unauthenticated',
     port,

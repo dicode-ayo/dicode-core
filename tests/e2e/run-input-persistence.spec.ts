@@ -422,6 +422,13 @@ test.describe('Group 3: cleanup with a near-zero retention', () => {
   let api: APIRequestContext;
 
   test.beforeAll(async () => {
+    // test.setTimeout above only covers each test body — a beforeAll/afterAll
+    // hook has its own, separate default (30s) budget that it does NOT
+    // extend. Spinning up a whole daemon (binary check, an uncached
+    // dicode-buildin fetch the first time this worker needs it, process
+    // spawn, waitForReady) can run past that on a loaded CI box, so this
+    // hook raises its own timeout the same way.
+    test.setTimeout(60_000);
     daemon = await startIsolatedDaemon({
       overlay: { defaults: { run_inputs: { retention: '1s' } } },
     });
