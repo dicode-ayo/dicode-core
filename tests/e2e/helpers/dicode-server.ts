@@ -90,7 +90,16 @@ export interface IsolatedDaemon {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-/** Finds a free TCP port on localhost by binding to port 0 and reading it back. */
+/**
+ * Finds a free TCP port on localhost by binding to port 0 and reading it
+ * back. There's an inherent TOCTOU gap between this and the daemon actually
+ * binding the port a moment later — the same tradeoff
+ * task-create-fresh-install.spec.ts already accepts for its own standalone
+ * daemon. A collision surfaces as waitForReady's generic timeout rather
+ * than a clear EADDRINUSE, but on this suite's single-worker, sequential
+ * run the only realistic contender is a leftover process from an earlier
+ * failed run, not a concurrent one.
+ */
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -389,9 +398,20 @@ async function startInstance(opts: {
     throw new Error('[e2e] Failed to start dicode process — no PID returned');
   }
 
-  await waitForReady(baseURL);
+  const instance: RunningInstance = { child, pid: child.pid, baseURL, tempDir, tasksDir, tasksetPath, configPath };
 
-  return { child, pid: child.pid, baseURL, tempDir, tasksDir, tasksetPath, configPath };
+  // The process is already running at this point. If it never comes up (a
+  // bad overlay value, a port collision, a crash), don't leave it and its
+  // temp dir behind for the rest of the run — stop it before propagating
+  // the error.
+  try {
+    await waitForReady(baseURL);
+  } catch (err) {
+    await stopInstance(instance);
+    throw err;
+  }
+
+  return instance;
 }
 
 /**
