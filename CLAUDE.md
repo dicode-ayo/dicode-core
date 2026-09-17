@@ -88,3 +88,10 @@ authoritative shapes.
 - **No git binary** — `go-git/v5` for all git operations
 - **JS/TS sandbox** — Deno subprocess per run; sandboxing via Deno's `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` permission flags derived from the task's declared permissions. The daemon communicates with the task over a unix-domain socket (`pkg/ipc`) so SDK calls like `dicode.kv.set()` go through the Go control plane, not raw `fetch`. On Windows, where neither SDK can speak AF_UNIX, the per-run endpoint is a loopback TCP port instead and the task's `--allow-net` grant carries it (`pkg/ipc/endpoint_windows.go`).
 - **Graceful shutdown** — cancels running tasks, stops daemon loops, flushes logs before exit
+
+## Code Comments
+
+Keep comments short, and only write one when the code doesn't already say it. No narration: don't
+explain what was tried, what changed, why a decision was made, or cite an issue/PR number as
+backstory — that belongs in the commit message or PR description, not the file. State the
+non-obvious constraint or behavior itself, plainly, as if it had always been there.
