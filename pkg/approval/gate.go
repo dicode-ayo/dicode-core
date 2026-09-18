@@ -503,38 +503,48 @@ func (g *Gate) IsPending(id string) bool {
 	return ok
 }
 
-// PendingHash returns the content hash observed when id was held pending,
-// and whether id is pending at all. Approval tokens are bound to this hash.
-func (g *Gate) PendingHash(id string) (string, bool) {
-	hash, _, ok := g.PendingInfo(id)
-	return hash, ok
+// PendingView is the snapshot of a pending entry's externally-visible
+// fields, returned atomically by PendingSnapshot.
+type PendingView struct {
+	// Hash is the content hash observed when the task was held pending.
+	// Approval tokens are bound to this hash.
+	Hash string
+	// Enabled is the resolved enabled flag observed when the task was held
+	// pending. False means the task is disabled (task.yaml or a
+	// taskset/dicode.yaml override) — the trigger engine registers it with
+	// zero triggers regardless of approval state (#822), so a pending
+	// listing can surface that instead of implying the hold is blocking
+	// something that would otherwise run.
+	Enabled bool
+	// CommitRange is the "what moved" decoration: From is the commit
+	// recorded by the last approval, To the commit the currently pending
+	// content was observed at — not whatever HEAD has moved to since. A
+	// zero value is the ordinary state for a source with no git history or a
+	// task pending for the first time; its absence is never an error
+	// (ADR-0001). From is recorded without the remote it was resolved
+	// against, so repointing a source at an unrelated repository between two
+	// approvals yields a compare link across two histories, which the host
+	// renders as a dead or empty diff rather than a misleading one.
+	CommitRange CommitRange
 }
 
-// PendingEnabled reports the resolved enabled flag observed when id was held
-// pending, and whether id is pending at all. False means the task is
-// disabled (task.yaml or a taskset/dicode.yaml override) — the trigger
-// engine registers it with zero triggers regardless of approval state
-// (#822), so a pending listing can surface that instead of implying the
-// hold is blocking something that would otherwise run.
-func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
-	_, enabled, ok = g.PendingInfo(id)
-	return enabled, ok
-}
-
-// PendingInfo returns the content hash and resolved enabled flag observed
-// when id was held pending, and whether id is pending at all, all read under
-// one locked call. Callers that need both fields (e.g. `dicode task pending`)
-// must use this rather than PendingHash + PendingEnabled: two separate locked
-// calls can straddle a concurrent Approve/Forget and observe the id pending
-// for one call but not the other, which — since PendingEnabled then reports
-// ok=false and its zero value false — silently mislabels an enabled task as
-// disabled. See PendingHash/PendingEnabled for field semantics.
-func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
+// PendingSnapshot returns id's pending hash, resolved enabled flag, and
+// commit range together under one locked read, plus whether id is pending
+// at all. Callers that need more than one field must use this rather than
+// two separate accessor calls: two locked reads can straddle a concurrent
+// Approve/Forget/Admit and pair fields from different pending generations —
+// e.g. an enabled task reported disabled because the second call's ok came
+// back false and zero-valued. Named PendingSnapshot rather than Pending to
+// avoid colliding with Pending() (the sorted list of pending ids).
+//
+// PendingHash, PendingEnabled, PendingInfo, and PendingApproval are thin
+// wrappers over this for callers that only ever needed one shape.
+func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	ent, ok := g.pending[id]
+	g.mu.Unlock()
 	if !ok {
-		return "", false, false
+		return PendingView{}, false
 	}
 	// ent.enabled — the resolved-enabled snapshot recorded alongside hash in
 	// the same critical section (see pendingEntry's doc comment) — not
@@ -542,37 +552,42 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	// mutation from a different generation than the one hash describes,
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
-	return ent.hash, ent.enabled, true
+	from, to := g.approvalRange(id, ent)
+	return PendingView{
+		Hash:        ent.hash,
+		Enabled:     ent.enabled,
+		CommitRange: CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)},
+	}, true
 }
 
-// PendingApproval returns the content hash observed when id was held
-// pending together with its "what moved" commit-range decoration, both read
-// under one locked call. Callers that need both must use this rather than
-// PendingHash plus a second lookup: two calls can straddle a concurrent
-// Approve/Forget/Admit and pair the hash confirmed by one with the commit
-// range of a different pending generation.
-//
-// From is the commit recorded by the last approval, To the commit the
-// currently pending content was observed at — not whatever HEAD has moved to
-// since. A zero-value CommitRange with ok true is the ordinary state for a
-// source with no git history or a task pending for the first time; its
-// absence is never an error (ADR-0001).
-//
-// From is recorded without the remote it was resolved against, so
-// repointing a source at an unrelated repository between two approvals
-// yields a compare link across two histories, which the host renders as a
-// dead or empty diff rather than a misleading one.
+// PendingHash returns the content hash observed when id was held pending,
+// and whether id is pending at all. See PendingSnapshot.
+func (g *Gate) PendingHash(id string) (string, bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Hash, ok
+}
+
+// PendingEnabled reports the resolved enabled flag observed when id was held
+// pending, and whether id is pending at all. See PendingSnapshot.
+func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Enabled, ok
+}
+
+// PendingInfo returns the content hash and resolved enabled flag observed
+// when id was held pending, and whether id is pending at all. See
+// PendingSnapshot.
+func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Hash, v.Enabled, ok
+}
+
+// PendingApproval returns the content hash observed when id was held pending
+// together with its "what moved" commit-range decoration. See
+// PendingSnapshot.
 func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
-	g.mu.Lock()
-	ent, ok := g.pending[id]
-	g.mu.Unlock()
-	if !ok {
-		return "", CommitRange{}, false
-	}
-
-	from, to := g.approvalRange(id, ent)
-
-	return ent.hash, CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)}, true
+	v, ok := g.PendingSnapshot(id)
+	return v.Hash, v.CommitRange, ok
 }
 
 // approvalRange resolves the From/To commit pair for a pending entry: From

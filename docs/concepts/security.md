@@ -864,7 +864,7 @@ pending task's parsed spec:
   `status` of `new` or `changed` — a per-file "what moved" marker (#670)
   computed by comparing git blob hashes between the previously-approved commit
   and the one the pending content was observed at (the same pair
-  `Gate.PendingApproval`'s commit-range decoration uses), with no blob content
+  `Gate.PendingSnapshot`'s commit-range decoration uses), with no blob content
   ever read. `status` is simply absent — never a false claim — when there is no
   prior approval, no git history, or the git lookup itself fails; that omission
   decorates the listing, it never withholds or invalidates it.
@@ -917,7 +917,7 @@ truncation banner and no "too large to display" state to design.
   the task ID and its short hash, nothing about the task's contents, and —
   when resolvable — the "what moved" decoration: the commit range from the
   previously-approved commit to the one the pending content was observed at,
-  and a link to the git host's compare view (`Gate.PendingApproval`,
+  and a link to the git host's compare view (`Gate.PendingSnapshot`,
   `pkg/approval/comparelink.go`). Every piece of that degrades to simply not
   rendering rather than an error or a broken link — no prior approval, no git
   history, or an unrecognized remote host all just omit it (ADR-0001).

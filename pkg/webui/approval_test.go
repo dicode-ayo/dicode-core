@@ -88,14 +88,7 @@ func (g *fakeApprovalGate) IsPending(id string) bool {
 	return ok
 }
 
-func (g *fakeApprovalGate) PendingHash(id string) (string, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	h, ok := g.pending[id]
-	return h, ok
-}
-
-// setCommitRange stashes the CommitRange PendingApproval(id) should return
+// setCommitRange stashes the CommitRange PendingSnapshot(id) should return
 // alongside the hash, for tests that need a populated "what moved" strip.
 func (g *fakeApprovalGate) setCommitRange(id string, cr approval.CommitRange) {
 	g.mu.Lock()
@@ -106,16 +99,16 @@ func (g *fakeApprovalGate) setCommitRange(id string, cr approval.CommitRange) {
 	g.commitRanges[id] = cr
 }
 
-// PendingApproval reads the hash and the canned range in one method body,
+// PendingSnapshot reads the hash and the canned range in one method body,
 // matching the real Gate's single-locked-call shape.
-func (g *fakeApprovalGate) PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool) {
+func (g *fakeApprovalGate) PendingSnapshot(id string) (approval.PendingView, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	hash, ok = g.pending[id]
+	hash, ok := g.pending[id]
 	if !ok {
-		return "", approval.CommitRange{}, false
+		return approval.PendingView{}, false
 	}
-	return hash, g.commitRanges[id], true
+	return approval.PendingView{Hash: hash, CommitRange: g.commitRanges[id]}, true
 }
 
 func (g *fakeApprovalGate) Approve(id string) error {
