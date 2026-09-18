@@ -22,8 +22,7 @@ import (
 // SecretsManager.
 type ApprovalGate interface {
 	IsPending(id string) bool
-	PendingHash(id string) (string, bool)
-	PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool)
+	PendingSnapshot(id string) (approval.PendingView, bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
@@ -64,10 +63,11 @@ func (s *Server) MintApproveLink(ctx context.Context, taskID string) (string, er
 	if s.approvalGate == nil || s.approvalTokens == nil {
 		return "", errors.New("approval gate not configured")
 	}
-	hash, ok := s.approvalGate.PendingHash(taskID)
+	v, ok := s.approvalGate.PendingSnapshot(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q is not pending approval", taskID)
 	}
+	hash := v.Hash
 	if hash == "" {
 		return "", fmt.Errorf("task %q has no computable content hash", taskID)
 	}
@@ -313,17 +313,17 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 	// no longer pending at that exact hash, say so up front. One locked read
 	// for both, so a concurrent Admit cannot leave the rendered range
 	// describing a different generation than the hash matched here.
-	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
-	if !ok || hash != info.Hash {
+	v, ok := s.approvalGate.PendingSnapshot(info.TaskID)
+	if !ok || v.Hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
 	s.renderApprovePage(w, http.StatusOK, approvePageData{
 		TaskID:     info.TaskID,
 		Hash:       shortHash(info.Hash),
-		CommitFrom: shortCommit(cr.From),
-		CommitTo:   shortCommit(cr.To),
-		CompareURL: cr.CompareURL,
+		CommitFrom: shortCommit(v.CommitRange.From),
+		CommitTo:   shortCommit(v.CommitRange.To),
+		CompareURL: v.CommitRange.CompareURL,
 	})
 }
 

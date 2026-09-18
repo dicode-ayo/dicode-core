@@ -519,6 +519,46 @@ func TestPendingInfoIsAtomic(t *testing.T) {
 	}
 }
 
+// TestPendingSnapshotIsAtomicAndAgreesWithWrappers is the regression for
+// #848: PendingHash, PendingEnabled, PendingInfo and PendingApproval used to
+// each take their own separate locked read of g.pending, so combining any
+// two of them at a call site reopened the straddled-generation race
+// TestPendingInfoIsAtomic guards for that specific pair. PendingSnapshot
+// takes the one locked read every field needs, and the four accessors above
+// are now thin wrappers over it — this pins that they still agree with it
+// on every field, for a pending task and for a not-pending one.
+func TestPendingSnapshotIsAtomicAndAgreesWithWrappers(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	if v, ok := g.PendingSnapshot("repo/deploy"); ok || v != (PendingView{}) {
+		t.Fatalf("PendingSnapshot before Admit = (%+v, %v), want (zero value, false)", v, ok)
+	}
+
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+	spec.Enabled = true
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+
+	v, ok := g.PendingSnapshot("repo/deploy")
+	if !ok || v.Hash == "" || !v.Enabled {
+		t.Fatalf("PendingSnapshot = (%+v, %v), want (non-empty hash, enabled, true)", v, ok)
+	}
+
+	if h, hok := g.PendingHash("repo/deploy"); h != v.Hash || hok != ok {
+		t.Errorf("PendingHash = (%q, %v), want (%q, %v)", h, hok, v.Hash, ok)
+	}
+	if e, eok := g.PendingEnabled("repo/deploy"); e != v.Enabled || eok != ok {
+		t.Errorf("PendingEnabled = (%v, %v), want (%v, %v)", e, eok, v.Enabled, ok)
+	}
+	if h, e, iok := g.PendingInfo("repo/deploy"); h != v.Hash || e != v.Enabled || iok != ok {
+		t.Errorf("PendingInfo = (%q, %v, %v), want (%q, %v, %v)", h, e, iok, v.Hash, v.Enabled, ok)
+	}
+	if h, cr, aok := g.PendingApproval("repo/deploy"); h != v.Hash || cr != v.CommitRange || aok != ok {
+		t.Errorf("PendingApproval = (%q, %+v, %v), want (%q, %+v, %v)", h, cr, aok, v.Hash, v.CommitRange, ok)
+	}
+}
+
 func TestApproveIfHashMatch(t *testing.T) {
 	g, arm, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
