@@ -13,15 +13,18 @@
  *         Trigger buildin/run-inputs-cleanup and verify it completes without
  *         error. The file persisted in Group 1 must still exist (retention
  *         default is 30 days; we just stored it).
- *   3 — Cleanup with retention=0 [SKIPPED]:
- *         Asserting that cleanup actually deletes the file requires setting
- *         defaults.run_inputs.retention: 0s in dicode.yaml, which the e2e
- *         helper does not currently parameterize. Deferred to a follow-up.
+ *   3 — Cleanup with a near-zero retention:
+ *         Asserting that cleanup actually deletes the file requires a very
+ *         short defaults.run_inputs.retention, which the shared fixture
+ *         (used by every other spec in this project) does not set. Runs
+ *         against its own isolated daemon via helpers/dicode-server.ts's
+ *         startIsolatedDaemon() (#850) instead of mutating the shared one.
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect, request as pwRequest, type APIRequestContext } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { startIsolatedDaemon, type IsolatedDaemon } from './helpers/dicode-server';
 
 const WEBHOOK_PATH = '/hooks/persistence-test';
 
@@ -382,30 +385,116 @@ test.describe('Group 2: cleanup task is runnable', () => {
   );
 });
 
-// ─── Group 3: Cleanup with retention=0 [SKIPPED] ─────────────────────────────
+// ─── Group 3: Cleanup with a near-zero retention ──────────────────────────────
+//
+// Needs its own daemon rather than the shared one every other spec in this
+// project runs against, so this test can set defaults.run_inputs.retention
+// without reconfiguring the whole suite — see #850.
+//
+// Two pre-existing gaps surfaced while wiring this up, neither of which
+// #850 is the right place to fix, so this test works around both rather
+// than exercising them:
+//
+//  1. pkg/config/config.go's applyDefaults treats Retention's Go zero value
+//     as "unset" ("if cfg.Defaults.RunInputs.Retention == 0 { ...= 30 days
+//     }"), so an explicit `retention: 0s` is silently clobbered back to the
+//     30-day default — a plain time.Duration can't distinguish "explicitly
+//     zero" from "not set". Using "1s" instead avoids it.
+//  2. pkg/daemon/daemon.go's applyBuiltinOverrides only rewrites the
+//     buildin/run-inputs-cleanup task's retention_seconds default when
+//     spec.ID == "buildin/run-inputs-cleanup" exactly — this fixture's copy
+//     is namespaced e2e-tests/run-inputs-cleanup (see taskset.yaml), so
+//     dicode.yaml's defaults.run_inputs.retention never reaches it no
+//     matter what value is configured. The fire-time params override added
+//     by #836 (apiRunTask) does reach it, so that's what actually drives
+//     this test's retention window below.
+//
+// The overlay is still worth setting and asserting on here even though it
+// can't reach this particular task: it's the direct regression coverage for
+// startIsolatedDaemon()/writeConfig()'s overlay-merge behavior itself — the
+// actual "missing primitive" #850 adds — via the effective config the
+// isolated daemon reports back over /api/config.
 
-test.describe('Group 3: cleanup with retention=0', () => {
+test.describe('Group 3: cleanup with a near-zero retention', () => {
+  // The cleanup test's worst case is sequential: waitForRun (30s budget) +
+  // expect.poll for the blob (15s) + the 2.1s retention-window sleep + a
+  // second waitForRun for the cleanup run (30s) — up to ~77s before request
+  // overhead. 60s could cut off a valid run that's merely slow, not stuck.
+  test.setTimeout(90_000);
+
+  let daemon: IsolatedDaemon;
+  let api: APIRequestContext;
+
+  test.beforeAll(async () => {
+    // test.setTimeout above only covers each test body — a beforeAll/afterAll
+    // hook has its own, separate default (30s) budget that it does NOT
+    // extend. Spinning up a whole daemon (binary check, an uncached
+    // dicode-buildin fetch the first time this worker needs it, process
+    // spawn, waitForReady) can run past that on a loaded CI box, so this
+    // hook raises its own timeout the same way.
+    test.setTimeout(60_000);
+    daemon = await startIsolatedDaemon({
+      overlay: { defaults: { run_inputs: { retention: '1s' } } },
+    });
+    api = await pwRequest.newContext({ baseURL: daemon.baseURL });
+  });
+
+  test.afterAll(async () => {
+    await api?.dispose();
+    await daemon?.stop();
+  });
+
+  test('the config overlay reaches the isolated daemon\'s effective config', async () => {
+    const res = await api.get('/api/config');
+    expect(res.ok()).toBe(true);
+    const cfg = (await res.json()) as { Defaults?: { RunInputs?: { Retention?: number } } };
+    // config.Config has no json tags, so this is Go's default PascalCase;
+    // time.Duration marshals as an int64 of nanoseconds.
+    expect(cfg.Defaults?.RunInputs?.Retention).toBe(1_000_000_000);
+  });
+
   test(
-    'SKIP: asserting deletion requires dicode.yaml defaults.run_inputs.retention: 0s',
+    'cleanup deletes the persisted blob once retention has already elapsed',
     async () => {
-      // TODO(#233 follow-up): The e2e helper does not currently parameterize
-      // the daemon config's defaults.run_inputs.retention. To exercise actual
-      // blob deletion via cleanup, we would need to:
-      //
-      //   1. Write a dicode-unauth.yaml template with:
-      //        defaults:
-      //          run_inputs:
-      //            retention: 0s
-      //   2. Pass the template variant to dicode-server.ts writeConfig.
-      //
-      // Until then, deletion is covered by Go unit tests in
-      // pkg/trigger/engine_input_persistence_test.go and
-      // pkg/registry/registry_input_test.go.
-      test.skip(
-        true,
-        'retention=0 cleanup requires dicode.yaml mutation; not yet parameterized in the e2e helper. ' +
-          'Covered by Go unit tests; deferred to follow-up.',
+      const runId = await postSensitiveWebhook(api);
+      await waitForRun(api, runId);
+
+      const blobPath = path.join(daemon.tempDir, 'run-inputs', `${runId}.bin`);
+      await expect.poll(
+        () => fs.existsSync(blobPath),
+        { timeout: 15_000, intervals: [500] },
+      ).toBe(true);
+
+      const taskRes = await api.get(`/api/tasks/${encodeURIComponent(CLEANUP_TASK_ID)}`);
+      expect(taskRes.ok(), `${CLEANUP_TASK_ID} not registered on the isolated daemon`).toBe(true);
+
+      // ListExpiredInputs (pkg/registry/registry.go) compares at
+      // second-granularity ("input_stored_at < beforeUnix", both unix
+      // seconds). Sleeping past the 1s retention_seconds override below
+      // (with margin for clock-boundary rounding) makes the blob's stored
+      // second strictly earlier than cleanup's cutoff, which is the
+      // "already expired" condition this test exists to exercise.
+      await new Promise((r) => setTimeout(r, 2_100));
+
+      // retention_seconds as a fire-time param, not the daemon-config
+      // overlay above — see gap 2 in the describe-block comment.
+      const fireRes = await api.post(
+        `/api/tasks/${encodeURIComponent(CLEANUP_TASK_ID)}/run`,
+        {
+          headers: { 'Content-Type': 'application/json' },
+          data: { params: { retention_seconds: '1' } },
+        },
       );
+      expect(fireRes.ok()).toBe(true);
+      const { runId: cleanupRunId } = (await fireRes.json()) as { runId: string };
+      const cleanupRun = await waitForRun(api, cleanupRunId, 30_000);
+      const status = (cleanupRun.Status ?? cleanupRun.status) as string;
+      expect(status).toBe('success');
+
+      // Before #850, this was the assertion nothing could make: cleanup ran
+      // against a fire-time retention window that had already elapsed, so
+      // it must have deleted the blob.
+      expect(fs.existsSync(blobPath)).toBe(false);
     },
   );
 });
