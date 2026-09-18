@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.5](https://github.com/dicode-ayo/dicode-core/compare/v0.6.4...v0.6.5) (2026-09-18)
+
+
+### Documentation
+
+* add a Code Comments convention to CLAUDE.md ([#880](https://github.com/dicode-ayo/dicode-core/issues/880)) ([67fe6d5](https://github.com/dicode-ayo/dicode-core/commit/67fe6d5a20685b56ddc903828ef9153fa1789a5e))
+
 ## [0.6.4](https://github.com/dicode-ayo/dicode-core/compare/v0.6.3...v0.6.4) (2026-09-16)
 
 
