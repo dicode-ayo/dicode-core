@@ -1,7 +1,6 @@
 package gitops
 
 import (
-	"net/url"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -23,19 +22,6 @@ func originURL(repo *gogit.Repository) string {
 		return ""
 	}
 	return StripURLCredentials(urls[0])
-}
-
-// StripURLCredentials returns rawURL with any userinfo (user:password@ or
-// user:token@) removed. Returns rawURL unchanged when it has no userinfo, or
-// cannot be parsed as a URL at all — an SCP-like "git@host:owner/repo.git"
-// remote carries no scheme, so there is no parseable userinfo to strip.
-func StripURLCredentials(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil {
-		return rawURL
-	}
-	u.User = nil
-	return u.String()
 }
 
 // ParseRemote extracts the canonical host and repository path from a git

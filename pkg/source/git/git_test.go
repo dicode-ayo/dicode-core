@@ -288,6 +288,33 @@ func TestNew_StripsCredentialsFromID(t *testing.T) {
 	}
 }
 
+// TestNew_PinsCloneDirHash locks the on-disk clone directory name for a
+// typical credentialed HTTPS remote. New derives that name by
+// sha256-hashing the credential-stripped URL and hex-encoding the first 8
+// bytes (see New in git.go); the expected value below is computed by hand
+// (`sha256("https://github.com/org/repo.git")`, first 8 bytes hex-encoded),
+// not through gitops.StripURLCredentials or sha256 in this test, so it
+// actually pins the name rather than just re-deriving it. If this ever
+// fails, a credential-stripping or hashing change has repointed every
+// existing on-disk clone for this remote shape.
+func TestNew_PinsCloneDirHash(t *testing.T) {
+	const wantHash = "deb25368bca228d9" // sha256("https://github.com/org/repo.git")[:8], hex
+
+	dataDir := t.TempDir()
+	s, err := New(dataDir, "https://user:token@github.com/org/repo.git", "main", 0, "", "", zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDir := filepath.Base(s.localDir)
+	if gotDir != wantHash {
+		t.Errorf("clone dir = %q, want %q (clone-dir hash changed for this remote shape)", gotDir, wantHash)
+	}
+	wantPath := filepath.Join(dataDir, "repos", wantHash)
+	if s.localDir != wantPath {
+		t.Errorf("localDir = %q, want %q", s.localDir, wantPath)
+	}
+}
+
 // TestGitSource_IdempotentPoll covers the hash-stability contract from the
 // reconciler's perspective: running two poll-equivalent sync cycles with
 // no new commits must produce zero events the second time.
