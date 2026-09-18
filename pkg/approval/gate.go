@@ -504,7 +504,9 @@ func (g *Gate) IsPending(id string) bool {
 }
 
 // PendingView is the snapshot of a pending entry's externally-visible
-// fields, returned atomically by PendingSnapshot.
+// fields, returned by PendingSnapshot. Hash, Enabled and CommitRange.To
+// describe one pending generation, atomically. CommitRange.From does not:
+// see PendingSnapshot.
 type PendingView struct {
 	// Hash is the content hash observed when the task was held pending.
 	// Approval tokens are bound to this hash.
@@ -529,13 +531,26 @@ type PendingView struct {
 }
 
 // PendingSnapshot returns id's pending hash, resolved enabled flag, and
-// commit range together under one locked read, plus whether id is pending
-// at all. Callers that need more than one field must use this rather than
-// two separate accessor calls: two locked reads can straddle a concurrent
+// commit range, plus whether id is pending at all. Callers that need more
+// than one of Hash/Enabled must use this rather than two separate accessor
+// calls: two locked reads of the pending map can straddle a concurrent
 // Approve/Forget/Admit and pair fields from different pending generations —
 // e.g. an enabled task reported disabled because the second call's ok came
 // back false and zero-valued. Named PendingSnapshot rather than Pending to
 // avoid colliding with Pending() (the sorted list of pending ids).
+//
+// Hash, Enabled and CommitRange.To all come from the one pending-map entry
+// read under g.mu below, so they always describe the same generation.
+// CommitRange.From does not: approvalRange resolves it from g.lock, taken
+// separately (see its own doc comment for why), so a concurrent Approve
+// that records a newer commit — or a Forget that removes the record
+// entirely — between the two reads can make it describe a different
+// generation than Hash/Enabled/To, or go from populated to empty. This is
+// the same exposure PendingApproval had before this method existed, and
+// State/StateFor still have via the same approvalRange call; narrowing it
+// needs the approval baseline captured on pendingEntry at Admit time
+// instead of read live off g.lock, which is a bigger change than this
+// method's own contract and tracked separately (#884).
 //
 // PendingHash, PendingEnabled, PendingInfo, and PendingApproval are thin
 // wrappers over this for callers that only ever needed one shape.
