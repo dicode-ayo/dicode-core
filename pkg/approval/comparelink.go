@@ -15,8 +15,9 @@ import (
 // decoration: when it cannot be computed the screen is less contextual,
 // never blank.
 type CommitRange struct {
-	// From is the commit the task was approved at last time, or "" if there
-	// is no prior approval (or it recorded no commit).
+	// From is the commit the task was approved at last time, as of the moment
+	// the pending generation was held, or "" if there was no prior approval
+	// (or it recorded no commit).
 	From string
 	// To is the commit the currently pending content was observed at, or ""
 	// if none could be resolved.

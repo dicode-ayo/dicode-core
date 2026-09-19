@@ -290,8 +290,9 @@ func TestPendingApproval_FirstApprovalHasNoFrom(t *testing.T) {
 
 // approveThenRepend walks the repeat-pend shape every commit-range case
 // starts from: admit at first, approve, then re-admit a changed body at
-// second. remote is what the resolver reports for both admits.
-func approveThenRepend(t *testing.T, g *Gate, lock *Lock, first, second, remote string) {
+// second. remote is what the resolver reports for both admits. Returns the
+// spec of the still-pending second generation.
+func approveThenRepend(t *testing.T, g *Gate, lock *Lock, first, second, remote string) *task.Spec {
 	t.Helper()
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => {}")
 	g.SetCommitFunc(func(k task.Kinded) (string, string) { return first, remote })
@@ -310,6 +311,7 @@ func approveThenRepend(t *testing.T, g *Gate, lock *Lock, first, second, remote 
 	if armed, err := g.Admit(spec2); err != nil || armed {
 		t.Fatalf("re-Admit: armed=%v err=%v", armed, err)
 	}
+	return spec2
 }
 
 // TestPendingApproval_ResolvesGitOncePerAdmit pins that the commit and

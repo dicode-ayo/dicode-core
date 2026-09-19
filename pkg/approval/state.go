@@ -226,7 +226,7 @@ func (g *Gate) State(id string) (State, error) {
 	// before, no spec reachable from the pending set was ever also live in
 	// arm's hands, since Admit auto-approved BuiltinSource before the
 	// pending branch ever ran; a pinned buildin can now reach both.
-	from, to := g.approvalRange(id, ent)
+	from, to := approvalRange(ent)
 	return g.renderState(id, ent.kinded, ent.hash, from, to, ent.status), nil
 }
 
@@ -267,7 +267,7 @@ func (g *Gate) StateFor(id string, k task.Kinded) State {
 	ent, isPending := g.pending[id]
 	g.mu.Unlock()
 	if isPending {
-		from, to := g.approvalRange(id, ent)
+		from, to := approvalRange(ent)
 		return g.renderState(id, ent.kinded, ent.hash, from, to, ent.status)
 	}
 	return g.CurrentState(id, k)
@@ -537,10 +537,11 @@ func containerOf(d *task.DockerConfig) *Container {
 //
 // id is the caller's own g.pending map key, threaded through for the
 // diagnostic log label on a failed tree-diff — taken explicitly rather than
-// derived from k.TaskID(), the same reasoning approvalRange documents for
-// its own id parameter: the two agree today only by convention, and taking
-// id explicitly removes the dependency on that convention for this log
-// label too.
+// derived from k.TaskID(), which agrees with it only by convention: every
+// pendingEntry is stored under the id its own kinded reports, but
+// task.Kinded exposes a public SetTaskID that could someday be called on an
+// already-pending object and silently label this diagnostic with the wrong
+// task.
 func (g *Gate) inventoryOf(id string, k task.Kinded, from, to string, cache *fileStatusCache) ([]InventoryFile, error) {
 	var dir string
 	var includes []string
