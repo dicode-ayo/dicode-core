@@ -920,7 +920,11 @@ truncation banner and no "too large to display" state to design.
   and a link to the git host's compare view (`Gate.PendingSnapshot`,
   `pkg/approval/comparelink.go`). Every piece of that degrades to simply not
   rendering rather than an error or a broken link — no prior approval, no git
-  history, or an unrecognized remote host all just omit it (ADR-0001).
+  history, or an unrecognized remote host all just omit it (ADR-0001). Both
+  ends of that range are fixed when the task is held pending: the baseline is
+  the commit the lock recorded at that moment, so an approval or removal
+  landing while the link is in someone's inbox changes what the next pend
+  shows, never what this one links to.
 
 **Approval binds to the reviewed hash.** The panel sends
 `State.PendingHash` back with the approve request (#645). Between the panel
