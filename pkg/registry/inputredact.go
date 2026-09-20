@@ -110,6 +110,12 @@ type PartMeta struct {
 // redactPlaceholder is the value substituted for any redacted scalar.
 const redactPlaceholder = "<redacted>"
 
+// RedactPlaceholder is redactPlaceholder, exported for callers outside this
+// package that redact a value themselves instead of going through
+// BuildPersistedInputFromRunOpts — e.g. pkg/trigger's suspend-time
+// resume-param redaction, which must substitute the identical placeholder.
+const RedactPlaceholder = redactPlaceholder
+
 // denyListExact is the case-insensitive set of header/key names that are
 // always redacted. Compared lowercased against the lowercased input name.
 var denyListExact = map[string]struct{}{
@@ -161,6 +167,14 @@ func shouldRedactName(name string) bool {
 		}
 	}
 	return false
+}
+
+// ShouldRedactParamName reports whether name matches the same sensitive-name
+// deny-list BuildPersistedInputFromRunOpts uses for run-input params.
+// Exported for pkg/trigger's suspend-time resume-param redaction (#817),
+// which decides per-name whether a fire-time param is a redaction candidate.
+func ShouldRedactParamName(name string) bool {
+	return shouldRedactName(name)
 }
 
 // credentialValuePrefixes catches a credential by its value shape, for the

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
@@ -66,16 +68,89 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 		deadlineMs = time.Now().Add(defaultResumeTTL).UnixMilli()
 	}
 	// Persist the run's fire-time params and chain depth so the continuation
-	// resumes with the same ctx.params and the same chain-depth ceiling.
+	// resumes with the same ctx.params and the same chain-depth ceiling. Any
+	// param value that matches a live secrets-chain entry under its own name is
+	// redacted first (#817) — ResumeRun restores it from the chain rather than
+	// trusting the stored value.
+	redactedParams, redactedFields := e.redactSecretBackedParams(context.Background(), opts.Params)
 	var carryJSON []byte
-	carry := resumeCarry{Params: opts.Params, ChainDepth: e.chainDepth(opts.RunID)}
+	carry := resumeCarry{Params: redactedParams, ChainDepth: e.chainDepth(opts.RunID)}
 	if len(carry.Params) > 0 || carry.ChainDepth > 0 {
 		if carryJSON, err = json.Marshal(carry); err != nil {
 			return false, fmt.Errorf("marshal resume params: %w", err)
 		}
 	}
 	return e.registry.SuspendRun(context.Background(), opts.RunID,
-		result.ResumeState, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON)
+		result.ResumeState, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON, redactedFields)
+}
+
+// redactSecretBackedParams returns a copy of params (never mutated) with any
+// value that exactly matches a live secrets-chain entry under that same
+// param name replaced by registry.RedactPlaceholder — the only case
+// restoreSecretBackedParams can recover later, by re-resolving the same key.
+// A param whose name matches the redaction deny-list but whose value has no
+// live secrets-chain match is left as-is: dicode has no other way to
+// recover a literal fire-time value that never came from the secrets store,
+// and a resumed run must never see a value it never actually had.
+//
+// Returns the (possibly copied) params map and the dotted "params.<name>"
+// paths that were actually redacted, sorted for determinism.
+func (e *Engine) redactSecretBackedParams(ctx context.Context, params map[string]string) (map[string]string, []string) {
+	if len(params) == 0 || e.secrets == nil {
+		return params, nil
+	}
+	out := make(map[string]string, len(params))
+	names := make([]string, 0, len(params))
+	for k, v := range params {
+		out[k] = v
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	var redacted []string
+	for _, name := range names {
+		if !registry.ShouldRedactParamName(name) {
+			continue
+		}
+		secretVal, err := e.secrets.Resolve(ctx, name)
+		if err != nil || secretVal != params[name] {
+			continue
+		}
+		out[name] = registry.RedactPlaceholder
+		redacted = append(redacted, "params."+name)
+	}
+	return out, redacted
+}
+
+// restoreSecretBackedParams reverses redactSecretBackedParams on the resume
+// path: for each dotted "params.<name>" path in redactedFields it re-resolves
+// name from the secrets chain — the same source the value came from at
+// suspend time — instead of trusting the redaction placeholder left in the
+// stored blob. params is never mutated. Errors if a redacted field can't be
+// restored: a resumed run must never silently run with the literal
+// placeholder standing in for a real param value.
+func (e *Engine) restoreSecretBackedParams(ctx context.Context, params map[string]string, redactedFields []string) (map[string]string, error) {
+	if len(redactedFields) == 0 {
+		return params, nil
+	}
+	if e.secrets == nil {
+		return nil, fmt.Errorf("resume: %d redacted param(s) but no secrets chain is configured to restore them", len(redactedFields))
+	}
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	for _, field := range redactedFields {
+		name, ok := strings.CutPrefix(field, "params.")
+		if !ok {
+			continue
+		}
+		v, err := e.secrets.Resolve(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("resume: restore redacted param %q from secrets chain: %w", name, err)
+		}
+		out[name] = v
+	}
+	return out, nil
 }
 
 // newResumeToken returns a 32-byte crypto/rand token, hex-encoded. Long and
@@ -161,7 +236,11 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		if err := json.Unmarshal(run.ResumeParams, &carry); err != nil {
 			return "", fmt.Errorf("resume: decode carried run params: %w", err)
 		}
-		opts.Params = carry.Params
+		restored, err := e.restoreSecretBackedParams(ctx, carry.Params, run.ResumeParamsRedactedFields)
+		if err != nil {
+			return "", err
+		}
+		opts.Params = restored
 		opts.ChainDepth = carry.ChainDepth
 	}
 

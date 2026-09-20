@@ -2719,9 +2719,12 @@ func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
 // RunDetail is the shape returned by GET /api/runs/{runID}. ResumeSchema
 // carries the suspended run's JSON Schema as raw JSON so the WebUI renders a
 // form from it directly; the embedded Run's own ResumeToken/ResumeState/
-// ResumeSchema are cleared by apiGetRun before embedding — the token is the
-// resume authorization and must never reach the client, and the state blob is
-// task-internal.
+// ResumeSchema/ResumeParams are cleared by apiGetRun before embedding — the
+// token is the resume authorization and must never reach the client, the
+// state blob is task-internal, and ResumeParams is the fire-time param carry
+// (partially redacted, never fully — see registry.Registry.SuspendRun) that
+// only ResumeRun needs; ResumeParamsRedactedFields (which fields, not their
+// values) is left in place, mirroring InputRedactedFields.
 type RunDetail struct {
 	*registry.Run
 	TaskName     string          `json:"task_name"`
@@ -2749,6 +2752,7 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 	safe.ResumeToken = ""
 	safe.ResumeState = nil
 	safe.ResumeSchema = nil
+	safe.ResumeParams = nil
 	jsonOK(w, RunDetail{Run: &safe, TaskName: taskName, ResumeSchema: schema})
 }
 

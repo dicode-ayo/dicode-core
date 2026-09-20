@@ -343,6 +343,18 @@ declared.
   payload) — that is **not** replayed. If you'll need something from the original
   input after resuming, **stash it into `state`** before you suspend.
 
+  The stored params carry-over is redacted the same way run inputs are (#817):
+  if a fire-time param's value matches a live secrets-chain entry under its own
+  name, the persisted `runs.resume_params` row substitutes the redaction
+  placeholder for it and lists the dotted `params.<name>` path in
+  `resume_params_redacted_fields` — mirroring `input_redacted_fields`. `ctx.params`
+  on the continuation is unaffected: the value is re-resolved from the secrets
+  chain, not read back from the placeholder. A param whose name merely *looks*
+  sensitive (`token`, `key`, `password`, …) but whose value isn't actually
+  backed by a secrets-chain entry under that name is left as-is in the stored
+  blob — dicode has no other way to recover a literal value later, and a
+  resumed run must never run with a value it never had.
+
 - **`deadline` is optional.** It's a Unix-ms instant; the run stays resumable
   until then. Omit it (or pass `0`) for the default **24-hour** window. Once the
   deadline lapses, the sweep cancels the run (status `cancelled`, fail reason

@@ -199,8 +199,15 @@ func (s *SQLiteDB) migrate() error {
 		// resume_params carries the ORIGINAL run's fire-time param overrides and
 		// chain depth as a JSON envelope so the continuation resumes with the same
 		// ctx.params and honors the same chain-depth ceiling. NULL when the
-		// suspended run carried neither.
+		// suspended run carried neither. Any param value that matched a live
+		// secrets-chain entry under its own name is replaced with the redaction
+		// placeholder before this is written (#817) — ResumeRun restores it by
+		// re-resolving that same name, rather than trusting the stored value.
 		{"resume_params", "BLOB"},
+		// resume_params_redacted_fields lists the dotted "params.<name>" paths
+		// that were redacted out of resume_params (#817), mirroring
+		// input_redacted_fields. NULL/empty when nothing was redacted.
+		{"resume_params_redacted_fields", "TEXT"},
 		// root_run_id (#569) — the topmost ancestor of a run's parent chain
 		// (chain / pipeline stage / replay / suspend-resume continuation). A
 		// parentless run is its own root. Denormalized at insert time

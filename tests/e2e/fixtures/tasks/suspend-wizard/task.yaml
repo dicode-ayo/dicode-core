@@ -6,3 +6,7 @@ runtime: deno
 trigger:
   manual: true
 timeout: 10s
+params:
+  api_key:
+    description: Optional fire-time param used by resume-param redaction e2e coverage (#817)
+    required: false
