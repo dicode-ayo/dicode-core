@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,11 +12,10 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// TestSuspendRun_RedactsSecretBackedParamAtRest pins #817: a fire-time param
+// TestSuspendRun_RedactsSecretBackedParamAtRest proves a fire-time param
 // whose value matches a live secrets-chain entry under its own name must not
 // reach runs.resume_params in the clear — the same guarantee run inputs get
-// from pkg/registry/inputredact.go. Before the fix, SuspendRun wrote
-// opts.Params straight through with no redaction at all.
+// from pkg/registry/inputredact.go.
 func TestSuspendRun_RedactsSecretBackedParamAtRest(t *testing.T) {
 	exec := &suspendExec{}
 	eng, reg := newSuspendEnv(t, exec)
@@ -54,11 +54,12 @@ func TestSuspendRun_RedactsSecretBackedParamAtRest(t *testing.T) {
 	}
 }
 
-// TestResumeRun_RestoresSecretBackedParam pins #817's other half: a param
-// redacted at suspend time must come back with its REAL value on resume,
-// re-resolved from the secrets chain — not the placeholder left in the blob.
-// A resume that silently ran with "<redacted>" as a param value would be a
-// worse regression than the disclosure #817 fixes.
+// TestResumeRun_RestoresSecretBackedParam proves the other half of the
+// redaction guarantee: a param redacted at suspend time must come back with
+// its REAL value on resume, re-resolved from the secrets chain — not the
+// placeholder left in the blob. A resume that silently ran with
+// "<redacted>" as a param value would be a worse regression than the
+// disclosure this redaction prevents.
 func TestResumeRun_RestoresSecretBackedParam(t *testing.T) {
 	exec := &suspendExec{}
 	eng, reg := newSuspendEnv(t, exec)
@@ -146,9 +147,9 @@ func TestResumeRun_NonSecretParamRoundTripsUnchanged(t *testing.T) {
 	}
 }
 
-// TestSuspendRun_UngrantedSecretNameNeverResolvedOrLeaked closes the #886
-// review finding: a param whose value happens to equal a live secrets-chain
-// entry under its own name must NOT be treated as secret-backed unless the
+// TestSuspendRun_UngrantedSecretNameNeverResolvedOrLeaked proves a param
+// whose value happens to equal a live secrets-chain entry under its own
+// name must NOT be treated as secret-backed unless the
 // task's own permissions.env declares that exact name as a Secret key. Here
 // "wiz" declares no permissions.env at all, so params.api_key must round-trip
 // as the literal fire-time value the caller already had — and the
@@ -271,13 +272,13 @@ func TestResumeRun_RevokedPermissionFailsRestoreWithoutStrandingRun(t *testing.T
 	waitStatus(t, reg, newID, registry.StatusSuccess)
 }
 
-// TestApiGetRun_NeverExposesRawResumeParams is the registry-level half of the
-// webui wire-format guarantee: GetRun still returns the byte-for-byte
-// ResumeParams blob for ResumeRun's own use (it needs the real bytes to
-// reconstruct ctx.params) — it is pkg/webui's apiGetRun, not the registry,
-// that strips it before the value ever reaches an HTTP response. This test
-// only pins that the registry itself keeps the metadata (redacted field
-// names) queryable independently of the blob.
+// TestGetRun_ExposesRedactedFieldMetadataAlongsideBlob is the registry-level
+// half of the webui wire-format guarantee: GetRun still returns the
+// byte-for-byte ResumeParams blob for ResumeRun's own use (it needs the real
+// bytes to reconstruct ctx.params) — it is pkg/webui's apiGetRun, not the
+// registry, that strips it before the value ever reaches an HTTP response.
+// This test only pins that the registry itself keeps the metadata (redacted
+// field names) queryable independently of the blob.
 func TestGetRun_ExposesRedactedFieldMetadataAlongsideBlob(t *testing.T) {
 	exec := &suspendExec{}
 	eng, reg := newSuspendEnv(t, exec)
@@ -302,5 +303,40 @@ func TestGetRun_ExposesRedactedFieldMetadataAlongsideBlob(t *testing.T) {
 	}
 	if len(fetched.ResumeParamsRedactedFields) != 1 || fetched.ResumeParamsRedactedFields[0] != "params.api_key" {
 		t.Errorf("GetRun ResumeParamsRedactedFields = %v, want [\"params.api_key\"]", fetched.ResumeParamsRedactedFields)
+	}
+}
+
+// TestSuspendRun_SecretsProviderErrorFailsClosed proves that a real (non-
+// NotFound) error from the secrets provider while checking a granted param
+// for redaction must fail the whole suspend rather than persist that param
+// unredacted. Whether the value matched the live secret is unknowable when
+// Resolve errors, and writing it to resume_params in the clear on that
+// ambiguity would be the exact disclosure this redaction exists to prevent.
+func TestSuspendRun_SecretsProviderErrorFailsClosed(t *testing.T) {
+	exec := &suspendExec{}
+	eng, reg := newSuspendEnv(t, exec)
+	mock := newMockSecrets(nil)
+	mock.setErr("api_key", errors.New("secrets backend locked"))
+	eng.SetSecrets(secrets.Chain{mock})
+
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno,
+		Params:      []task.Param{{Name: "api_key"}},
+		Permissions: task.Permissions{Env: []task.EnvEntry{{Name: "API_KEY", Secret: "api_key"}}},
+		Trigger:     task.TriggerConfig{Manual: true}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	origID, err := eng.FireManual(context.Background(), "wiz", map[string]string{"api_key": "sk_live_topsecret"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	run := waitStatus(t, reg, origID, registry.StatusFailure)
+
+	if len(run.ResumeParams) != 0 {
+		t.Errorf("resume_params = %s, want nothing persisted when redaction could not complete", run.ResumeParams)
+	}
+	if len(run.ResumeParamsRedactedFields) != 0 {
+		t.Errorf("ResumeParamsRedactedFields = %v, want none", run.ResumeParamsRedactedFields)
 	}
 }

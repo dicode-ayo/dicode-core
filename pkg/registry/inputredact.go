@@ -169,14 +169,6 @@ func shouldRedactName(name string) bool {
 	return false
 }
 
-// ShouldRedactParamName reports whether name matches the same sensitive-name
-// deny-list BuildPersistedInputFromRunOpts uses for run-input params.
-// Exported for other packages that need the same redaction-candidate
-// heuristic for a param name.
-func ShouldRedactParamName(name string) bool {
-	return shouldRedactName(name)
-}
-
 // credentialValuePrefixes catches a credential by its value shape, for the
 // field names denyListExact/denyListSubstrings haven't been taught yet — a
 // task author who forwards an approval link through `link`, `cta`, or

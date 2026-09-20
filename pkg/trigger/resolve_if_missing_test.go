@@ -23,6 +23,7 @@ import (
 type mockSecretsProvider struct {
 	mu   sync.Mutex
 	data map[string]string
+	errs map[string]error
 }
 
 func newMockSecrets(initial map[string]string) *mockSecretsProvider {
@@ -38,6 +39,9 @@ func (m *mockSecretsProvider) Name() string { return "mock" }
 func (m *mockSecretsProvider) Get(_ context.Context, key string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err, ok := m.errs[key]; ok {
+		return "", err
+	}
 	return m.data[key], nil
 }
 
@@ -45,6 +49,17 @@ func (m *mockSecretsProvider) set(key, val string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.data[key] = val
+}
+
+// setErr makes Get(key) return err (a real provider failure, not a missing
+// key) until cleared with set.
+func (m *mockSecretsProvider) setErr(key string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.errs == nil {
+		m.errs = make(map[string]error)
+	}
+	m.errs[key] = err
 }
 
 // mockExecutor is a task.Runtime-agnostic Executor stand-in. Tests configure

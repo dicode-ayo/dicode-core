@@ -75,7 +75,10 @@ func (e *Engine) suspendRun(spec *task.Spec, opts *pkgruntime.RunOptions, result
 	// permissions.env declares under that same name is redacted first —
 	// ResumeRun restores it from the chain rather than trusting the stored
 	// value.
-	redactedParams, redactedFields := e.redactSecretBackedParams(context.Background(), spec, opts.RunID, opts.Params)
+	redactedParams, redactedFields, err := e.redactSecretBackedParams(context.Background(), spec, opts.RunID, opts.Params)
+	if err != nil {
+		return false, fmt.Errorf("redact resume params: %w", err)
+	}
 	var carryJSON []byte
 	carry := resumeCarry{Params: redactedParams, ChainDepth: e.chainDepth(opts.RunID)}
 	if len(carry.Params) > 0 || carry.ChainDepth > 0 {
@@ -118,11 +121,17 @@ func secretBackedParamNames(spec *task.Spec) map[string]struct{} {
 // value that never came from the secrets store, and a resumed run must never
 // see a value it never actually had.
 //
+// A real (non-NotFound) error resolving a granted name aborts the whole pass
+// with an error rather than leaving that param unredacted: the caller cannot
+// tell whether the value matches the secret, and persisting it unredacted on
+// that ambiguity would be the exact disclosure this redaction exists to
+// prevent. Mirrors resolveIfMissing's own hard-fail on a real secrets error.
+//
 // Returns the (possibly copied) params map and the dotted "params.<name>"
 // paths that were actually redacted, sorted for determinism.
-func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, runID string, params map[string]string) (map[string]string, []string) {
+func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, runID string, params map[string]string) (map[string]string, []string, error) {
 	if len(params) == 0 || e.secrets == nil {
-		return params, nil
+		return params, nil, nil
 	}
 	allowed := secretBackedParamNames(spec)
 	out := make(map[string]string, len(params))
@@ -133,7 +142,7 @@ func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, 
 	}
 	sort.Strings(names)
 	if len(allowed) == 0 {
-		return out, nil
+		return out, nil, nil
 	}
 	var redacted []string
 	for _, name := range names {
@@ -143,12 +152,10 @@ func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, 
 		secretVal, err := e.secrets.Resolve(ctx, name)
 		if err != nil {
 			var notFound *secrets.NotFoundError
-			if !errors.As(err, &notFound) {
-				e.log.Warn("resume: redaction check for param could not be completed",
-					zap.String("task", spec.ID), zap.String("run", runID),
-					zap.String("param", name), zap.Error(err))
+			if errors.As(err, &notFound) {
+				continue
 			}
-			continue
+			return nil, nil, fmt.Errorf("resume: redaction check for param %q (run %s, task %q): %w", name, runID, spec.ID, err)
 		}
 		if secretVal != params[name] {
 			continue
@@ -156,7 +163,7 @@ func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, 
 		out[name] = registry.RedactPlaceholder
 		redacted = append(redacted, "params."+name)
 	}
-	return out, redacted
+	return out, redacted, nil
 }
 
 // restoreSecretBackedParams reverses redactSecretBackedParams on the resume
