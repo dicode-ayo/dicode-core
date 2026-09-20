@@ -33,6 +33,12 @@ type resumeCarry struct {
 // ReasonResumeTimeout.
 const defaultResumeTTL = 24 * time.Hour
 
+// secretResolveTimeout bounds each secrets-chain lookup during resume-param
+// redaction/restoration, the same way ifMissingPrereqTimeout bounds the
+// secrets-chain check in resolveIfMissing: a network-backed provider (Vault,
+// AWS SM, …) that hangs must not block a suspend or resume indefinitely.
+const secretResolveTimeout = 10 * time.Second
+
 // Resume errors surfaced to callers (webui/CLI in later PRs).
 var (
 	// ErrResumeTokenNotFound is returned when no suspended run carries the token.
@@ -149,7 +155,9 @@ func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, 
 		if _, granted := allowed[name]; !granted {
 			continue
 		}
-		secretVal, err := e.secrets.Resolve(ctx, name)
+		resolveCtx, cancel := context.WithTimeout(ctx, secretResolveTimeout)
+		secretVal, err := e.secrets.Resolve(resolveCtx, name)
+		cancel()
 		if err != nil {
 			var notFound *secrets.NotFoundError
 			if errors.As(err, &notFound) {
@@ -195,7 +203,9 @@ func (e *Engine) restoreSecretBackedParams(ctx context.Context, spec *task.Spec,
 		if _, granted := allowed[name]; !granted {
 			return nil, fmt.Errorf("resume: redacted param %q is no longer granted by task %q's permissions.env; refusing to restore", name, spec.ID)
 		}
-		v, err := e.secrets.Resolve(ctx, name)
+		resolveCtx, cancel := context.WithTimeout(ctx, secretResolveTimeout)
+		v, err := e.secrets.Resolve(resolveCtx, name)
+		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("resume: restore redacted param %q from secrets chain: %w", name, err)
 		}

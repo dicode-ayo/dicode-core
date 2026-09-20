@@ -706,6 +706,14 @@ match under that name, is left untouched in `resume_params`: dicode has no
 other way to recover a literal fire-time value later, and a resumed run must
 never run with a value it never actually had or was never granted.
 
+Restoration always re-resolves the secret's *current* value, not the literal
+value the original run fired with — the same live-lookup behavior every other
+`permissions.env` secret already has. If the underlying secret is rotated
+between suspend and resume, the continuation runs with the rotated value, not
+the one redacted at suspend time; there is no mechanism to detect or flag
+this, since the literal fire-time value is never persisted anywhere to
+compare against.
+
 `GET /api/runs/{runID}` (`apiGetRun` in `pkg/webui/server.go`) never returns
 the `ResumeParams` blob itself — same treatment as `ResumeToken`/`ResumeState`
 — but does return `ResumeParamsRedactedFields`, so a caller can see which
