@@ -106,7 +106,7 @@ type Run struct {
 	// overrides and chain depth, preserved so the continuation resumes with the
 	// same ctx.params and honors the same chain-depth ceiling. nil when absent.
 	// Any param redacted per ResumeParamsRedactedFields carries the redaction
-	// placeholder here, not its real value (#817).
+	// placeholder here, not its real value.
 	ResumeParams []byte
 	// ResumeParamsRedactedFields lists the dotted "params.<name>" paths redacted
 	// out of ResumeParams — mirrors InputRedactedFields. nil when nothing was

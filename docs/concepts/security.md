@@ -678,26 +678,33 @@ API route.
 
 ---
 
-## Suspend/Resume Param Redaction (#817)
+## Suspend/Resume Param Redaction
 
 A suspended run's fire-time param overrides are carried forward in
 `runs.resume_params` so the continuation resumes with the same `ctx.params`
 (see [Suspendable Tasks](suspendable-tasks.md)). Before persisting that blob,
 `Registry.SuspendRun` (via `Engine.redactSecretBackedParams` in
 `pkg/trigger/resume.go`) replaces any param value that exactly matches a live
-secrets-chain entry under that same param name with the redaction placeholder
-— the same substitution `pkg/registry/inputredact.go` applies to persisted run
-inputs. The dotted `params.<name>` paths actually redacted are recorded in the
-sibling `resume_params_redacted_fields` column, mirroring
-`input_redacted_fields`.
+secrets-chain entry with the redaction placeholder — but only for a param
+name the task's own `permissions.env` declares as a `secret:` key
+(`task.EnvEntry.Secret`). A param whose name isn't among the task's own
+declared secret grants is never resolved against the secrets chain at all,
+regardless of its name or value — the same substitution
+`pkg/registry/inputredact.go` applies to persisted run inputs, scoped the same
+way `resolveIfMissing` scopes secret lookups to a task's own grants. The
+dotted `params.<name>` paths actually redacted are recorded in the sibling
+`resume_params_redacted_fields` column, mirroring `input_redacted_fields`.
 
 `Engine.ResumeRun` restores the real value for each redacted field by
 re-resolving that same name from the secrets chain — never by trusting the
-placeholder left in the stored blob. A param whose name merely looks
-sensitive but whose value has no live secrets-chain match under that name is
-left untouched in `resume_params`: dicode has no other way to recover a
-literal fire-time value later, and a resumed run must never run with a value
-it never actually had.
+placeholder left in the stored blob — and only when the task's *current*
+`permissions.env` still grants that name; if the grant was removed between
+suspend and resume, restoration fails and the resume is rejected rather than
+silently dropping or mis-restoring the value. A param whose name isn't among
+the task's declared secret grants, or whose value has no live secrets-chain
+match under that name, is left untouched in `resume_params`: dicode has no
+other way to recover a literal fire-time value later, and a resumed run must
+never run with a value it never actually had or was never granted.
 
 `GET /api/runs/{runID}` (`apiGetRun` in `pkg/webui/server.go`) never returns
 the `ResumeParams` blob itself — same treatment as `ResumeToken`/`ResumeState`
@@ -1105,7 +1112,7 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
-| Suspend/resume params redacted at rest | A fire-time param backed by a live secrets-chain entry is replaced with the redaction placeholder in `runs.resume_params` before it's written; `Engine.ResumeRun` restores it by re-resolving the secrets chain, not by reading the blob (#817) |
+| Suspend/resume params redacted at rest | A fire-time param backed by a live secrets-chain entry AND declared under that same name in the task's own `permissions.env` is replaced with the redaction placeholder in `runs.resume_params` before it's written; `Engine.ResumeRun` restores it by re-resolving the secrets chain — checked again against the task's current `permissions.env` — not by reading the blob |
 | Pending-approval changes are reviewable, not blind | `Gate.State` renders the resolved task a pending change would arm — triggers, effective permissions, env declarations and a per-file inventory — on the dashboard before the operator confirms, without rendering code or dereferencing a secret |
 | Per-run IPC capability tokens require a real signing key | `ipc.IssueToken`/`ipc.VerifyToken` (`pkg/ipc/token.go`) fail closed with an error when handed a nil/empty secret, rather than signing/verifying under an implicit all-zero HMAC key. Both runtimes' per-version executors (`runtimes.deno.version` / `runtimes.python.version` pinned) snapshot the daemon's real `IPCSecret` at construction (`pkg/runtime/deno/manager.go`, `pkg/runtime/python/runtime.go`), and `pkg/daemon/runtimes_test.go` asserts it's non-nil for both — see [#718](https://github.com/dicode-ayo/dicode-core/issues/718). |
 | Task list doesn't misrepresent a pending task as live (#650) | A held task's toggle no longer shows a plain "on" green dot, its trigger column no longer hyperlinks a webhook route that 404s until approved, and `Run` is disabled with a tooltip rather than silently 400ing behind a raw `alert()`. A pending count/filter and a notification-tray entry (wired to the existing `approval:pending` WebSocket event) make held tasks discoverable at a glance instead of requiring a per-row badge scan. |

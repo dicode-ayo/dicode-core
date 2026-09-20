@@ -171,8 +171,8 @@ func shouldRedactName(name string) bool {
 
 // ShouldRedactParamName reports whether name matches the same sensitive-name
 // deny-list BuildPersistedInputFromRunOpts uses for run-input params.
-// Exported for pkg/trigger's suspend-time resume-param redaction (#817),
-// which decides per-name whether a fire-time param is a redaction candidate.
+// Exported for other packages that need the same redaction-candidate
+// heuristic for a param name.
 func ShouldRedactParamName(name string) bool {
 	return shouldRedactName(name)
 }

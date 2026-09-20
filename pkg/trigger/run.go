@@ -709,7 +709,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	// chain — suspended is non-terminal, so success/failure chains must not
 	// fire until the continuation run reaches a real terminal state.
 	if result.Suspended {
-		suspended, serr := e.suspendRun(&opts, result)
+		suspended, serr := e.suspendRun(spec, &opts, result)
 		if serr != nil {
 			e.log.Warn("suspend run persist failed", zap.String("run", opts.RunID), zap.Error(serr))
 			if ferr := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); ferr != nil {

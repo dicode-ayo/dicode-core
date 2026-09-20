@@ -15,8 +15,8 @@ export default async function main({ dicode }) {
 }
 
 export async function resume({ input, params }) {
-  // api_key rides along only when the fire-time caller passed one (#817's
-  // redaction/restore e2e coverage) — echoing it back proves the continuation
-  // got the real value, not the redaction placeholder.
+  // api_key rides along only when the fire-time caller passed one; echoing
+  // it back proves the continuation got the real value, not the redaction
+  // placeholder.
   return { created: input?.project_name, api_key: await params.get('api_key') };
 }
