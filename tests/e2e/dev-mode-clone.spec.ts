@@ -17,7 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { Run, runID, runStatus, runReturnValue } from './helpers/runs';
+import { Run, runID, runStatus } from './helpers/runs';
 
 // All REST tests use the unauthenticated server on port 8765 (no API key
 // required). The `request` fixture is pre-configured with baseURL by
