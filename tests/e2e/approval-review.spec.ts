@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
 import { settleApproved } from './helpers/approval';
+import { Run, runID, runStatus, runReturnValue } from './helpers/runs';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
 const NOTIFY_TASK_ID = 'e2e-tests/notify-echo';
@@ -52,28 +53,6 @@ function tasksDir(): string {
   const d = process.env.DICODE_E2E_TASKS_DIR;
   if (!d) throw new Error('DICODE_E2E_TASKS_DIR not set — global setup may have failed');
   return d;
-}
-
-// Run mirrors dev-mode-clone.spec.ts's Go-JSON-field-shape tolerance: the
-// registry.Run struct carries no json tags, so field names reach the wire
-// as Go's default PascalCase.
-interface Run {
-  ID?: string;
-  id?: string;
-  Status?: string;
-  status?: string;
-  ReturnValue?: string;
-  return_value?: string;
-}
-
-function runID(r: Run): string {
-  return (r.ID ?? r.id) as string;
-}
-function runStatus(r: Run): string {
-  return (r.Status ?? r.status) as string;
-}
-function runReturnValue(r: Run): string {
-  return (r.ReturnValue ?? r.return_value ?? '') as string;
 }
 
 /**
