@@ -1,11 +1,10 @@
 package trigger
 
-// Regression coverage for #820: buildChainPayload stamps a run_url key
-// (linking to the upstream run that fired the chain) built through
-// Engine.SetRunURLFunc, the same injection point the suspend notifier's
-// resumeURL uses (pkg/daemon/daemon.go) — so notification tasks stop needing
-// a second copy of server.public_url. Mirrors the existing
-// engine_chain_params_test.go / engine_success_chain_params_test.go pattern.
+// buildChainPayload stamps a run_url key (linking to the upstream run that
+// fired the chain) built through Engine.SetRunURLFunc, the same injection
+// point the suspend notifier's resumeURL uses (pkg/daemon/daemon.go).
+// Mirrors the existing engine_chain_params_test.go /
+// engine_success_chain_params_test.go pattern.
 
 import (
 	"context"

@@ -222,7 +222,7 @@ func (e *Engine) fireSuccessChains(ctx context.Context, completedTaskID, runID, 
 			zap.String("on", on),
 			zap.Int("depth", nextDepth),
 		)
-		chainInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, e.buildRunURL(runID))
+		chainInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, func() string { return e.buildRunURL(runID) })
 		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
 			Input:       chainInput,
@@ -257,7 +257,7 @@ func (e *Engine) firePipelineChains(ctx context.Context, completedTaskID, runID,
 		if !withinCeiling {
 			continue
 		}
-		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, e.buildRunURL(runID))
+		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, func() string { return e.buildRunURL(runID) })
 		triggerParams := flatStringMap(resolvedParams)
 		e.log.Info("chain trigger (pipeline)",
 			zap.String("from", completedTaskID), zap.String("to", p.ID),
@@ -385,8 +385,8 @@ func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, r
 				)
 				// Build input via the shared buildChainPayload kernel so the
 				// failure-path and success-path stamps stay in lockstep.
-				// Reserved keys (taskID, runID, status, output, _chain_depth)
-				// are populated by the engine and are NOT user-overridable;
+				// Reserved keys (taskID, runID, status, output, _chain_depth,
+				// run_url) are populated by the engine and are NOT user-overridable;
 				// config-load validation (#236 Task 11) rejects any
 				// chainSpec.Params containing these keys, so collisions
 				// cannot reach here in a well-validated config.
@@ -476,11 +476,16 @@ func (e *Engine) chainDepth(runID string) int {
 //
 // The hop count reaches the downstream on RunOptions.ChainDepth either way, so
 // neither ceiling depends on this shaping.
-func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any, depth int, runURL string) any {
+//
+// runURL is a thunk rather than a plain string so the common bare-edge case
+// (no declared params, the early return below) never pays for building a
+// link — and the caller's WebUIBaseURL lookup — that this call would then
+// discard unused.
+func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any, depth int, runURL func() string) any {
 	if len(userParams) == 0 {
 		return output
 	}
-	return buildChainPayload(userParams, completedTaskID, runID, status, output, depth, runURL)
+	return buildChainPayload(userParams, completedTaskID, runID, status, output, depth, runURL())
 }
 
 // buildChainPayload is the shared kernel that produces the input map fed to
