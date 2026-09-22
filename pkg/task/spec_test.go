@@ -834,7 +834,7 @@ trigger:
 }
 
 func TestChainTrigger_Params_ReservedKeyRejected(t *testing.T) {
-	for _, reserved := range []string{"taskID", "runID", "status", "output", "_chain_depth"} {
+	for _, reserved := range []string{"taskID", "runID", "status", "output", "_chain_depth", "run_url"} {
 		t.Run(reserved, func(t *testing.T) {
 			src := "name: t\nruntime: deno\ntrigger:\n  chain:\n    from: x\n    params:\n      " + reserved + ": v\n"
 			var s Spec

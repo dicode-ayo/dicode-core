@@ -375,7 +375,7 @@ The failure handler receives:
 
 ```typescript
 // input to the failure handler task:
-// { taskID, runID, status, output, _chain_depth, ...params }
+// { taskID, runID, status, output, _chain_depth, run_url, ...params }
 export default async function main({ input }: any) {
   const { taskID, runID, status, _chain_depth } = input
   console.log(`Task ${taskID} failed (depth ${_chain_depth}) — run ${runID}`)

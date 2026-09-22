@@ -220,6 +220,20 @@ type Engine struct {
 	// derived sub-key is available.
 	inputStore *registry.InputStore
 
+	// runURLFunc builds a link to a run in the web UI, the same way the
+	// suspend notifier's resumeURL does (daemon.go, wired after the webui
+	// Server exists so it can honor server.public_url). nil when the web UI
+	// isn't available to wire it — buildRunURL then returns "", and the
+	// chain payload's run_url key is simply omitted (see buildChainPayload).
+	// Guarded by runURLMu: a trigger.daemon task can already be running (and
+	// finishing, which fires its own chain edges) before the daemon's boot
+	// sequence reaches the SetRunURLFunc call — registerDaemon fires the
+	// daemon body synchronously from Register, well before the engine's own
+	// Start() — so the write here is genuinely concurrent with reads from
+	// that run's finish path, not just sequenced-before by construction.
+	runURLMu   sync.RWMutex
+	runURLFunc func(runID string) string
+
 	guards *chainGuards
 }
 
@@ -269,6 +283,31 @@ func (e *Engine) SetSecrets(s secrets.Chain) {
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
 func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
+
+// SetRunURLFunc wires the function the engine uses to stamp a chained run's
+// completed-run link (the chain payload's run_url key — see
+// buildChainPayload). The daemon wires this after the webui Server exists,
+// mirroring the suspend notifier's resumeURL (daemon.go). Never called by the
+// engine itself before dispatch — pkg/trigger must not import pkg/webui.
+func (e *Engine) SetRunURLFunc(fn func(runID string) string) {
+	e.runURLMu.Lock()
+	e.runURLFunc = fn
+	e.runURLMu.Unlock()
+}
+
+// buildRunURL returns the run URL for runID, or "" when no SetRunURLFunc has
+// been wired (e.g. tests, or a daemon boot path that hasn't reached the webui
+// step yet) — buildChainPayload treats "" as "omit the key", never a broken
+// link.
+func (e *Engine) buildRunURL(runID string) string {
+	e.runURLMu.RLock()
+	fn := e.runURLFunc
+	e.runURLMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(runID)
+}
 
 // SetFireGuard installs a veto consulted before any run starts (see the
 // fireGuard field doc). A nil guard removes the veto.

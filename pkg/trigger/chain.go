@@ -222,7 +222,7 @@ func (e *Engine) fireSuccessChains(ctx context.Context, completedTaskID, runID, 
 			zap.String("on", on),
 			zap.Int("depth", nextDepth),
 		)
-		chainInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
+		chainInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, func() string { return e.buildRunURL(runID) })
 		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
 			Input:       chainInput,
@@ -257,7 +257,7 @@ func (e *Engine) firePipelineChains(ctx context.Context, completedTaskID, runID,
 		if !withinCeiling {
 			continue
 		}
-		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
+		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, func() string { return e.buildRunURL(runID) })
 		triggerParams := flatStringMap(resolvedParams)
 		e.log.Info("chain trigger (pipeline)",
 			zap.String("from", completedTaskID), zap.String("to", p.ID),
@@ -385,12 +385,12 @@ func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, r
 				)
 				// Build input via the shared buildChainPayload kernel so the
 				// failure-path and success-path stamps stay in lockstep.
-				// Reserved keys (taskID, runID, status, output, _chain_depth)
-				// are populated by the engine and are NOT user-overridable;
+				// Reserved keys (taskID, runID, status, output, _chain_depth,
+				// run_url) are populated by the engine and are NOT user-overridable;
 				// config-load validation (#236 Task 11) rejects any
 				// chainSpec.Params containing these keys, so collisions
 				// cannot reach here in a well-validated config.
-				input := buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
+				input := buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth, e.buildRunURL(runID))
 				// Auto-fix safety default: when the chain target is the
 				// buildin auto-fix preset, force mode=review unless the
 				// operator explicitly set it. Autonomous-by-default would
@@ -470,17 +470,22 @@ func (e *Engine) chainDepth(runID string) int {
 // With no declared params on the edge the downstream receives the upstream's
 // raw return value unchanged: tasks read `input` as that value directly — a
 // string, a typed object. Otherwise it receives a map merging the edge's params
-// with the engine-reserved keys (taskID, runID, status, output, _chain_depth),
-// which Spec.validate rejects in trigger.chain.params so a user map cannot
-// collide.
+// with the engine-reserved keys (taskID, runID, status, output, _chain_depth,
+// run_url), which Spec.validate rejects in trigger.chain.params so a user map
+// cannot collide.
 //
 // The hop count reaches the downstream on RunOptions.ChainDepth either way, so
 // neither ceiling depends on this shaping.
-func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any, depth int) any {
+//
+// runURL is a thunk rather than a plain string so the common bare-edge case
+// (no declared params, the early return below) never pays for building a
+// link — and the caller's WebUIBaseURL lookup — that this call would then
+// discard unused.
+func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any, depth int, runURL func() string) any {
 	if len(userParams) == 0 {
 		return output
 	}
-	return buildChainPayload(userParams, completedTaskID, runID, status, output, depth)
+	return buildChainPayload(userParams, completedTaskID, runID, status, output, depth, runURL())
 }
 
 // buildChainPayload is the shared kernel that produces the input map fed to
@@ -488,12 +493,18 @@ func buildChainInput(userParams map[string]any, completedTaskID, runID, status s
 // (on_failure_chain). Both sites used to inline the same five engine-key
 // stamps; the unification eliminates that drift (survey §5.4 / 6.2.3).
 //
-// Reserved keys (taskID, runID, status, output, _chain_depth) are always
-// stamped *after* the userParams overlay, so a (well-validated) user map
-// cannot collide. Config-load validation enforces the reserved-key
+// Reserved keys (taskID, runID, status, output, _chain_depth, run_url) are
+// always stamped *after* the userParams overlay, so a (well-validated) user
+// map cannot collide. Config-load validation enforces the reserved-key
 // invariant at three sites; this helper is the runtime backstop.
-func buildChainPayload(userParams map[string]any, completedTaskID, runID, status string, output any, depth int) map[string]any {
-	m := make(map[string]any, len(userParams)+5)
+//
+// runURL is the link to runID in the web UI, or "" when the caller has no
+// base URL to build one from (see Engine.buildRunURL) — omitted from the
+// payload rather than stamped as a broken link, the same degrade-to-absent
+// rule the approval "what moved" strip follows for its own optional
+// decoration.
+func buildChainPayload(userParams map[string]any, completedTaskID, runID, status string, output any, depth int, runURL string) map[string]any {
+	m := make(map[string]any, len(userParams)+6)
 	for k, v := range userParams {
 		m[k] = v
 	}
@@ -502,6 +513,9 @@ func buildChainPayload(userParams map[string]any, completedTaskID, runID, status
 	m["status"] = status
 	m["output"] = output
 	m["_chain_depth"] = depth
+	if runURL != "" {
+		m["run_url"] = runURL
+	}
 	return m
 }
 
