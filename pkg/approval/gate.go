@@ -94,7 +94,7 @@ type Gate struct {
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
-// commit and remote observed alongside it.
+// commit, remote and approval baseline observed alongside it.
 //
 // All are published in one critical section (see Admit's default case), so a
 // reader can never observe a hash paired with a commit from a different
@@ -113,6 +113,15 @@ type pendingEntry struct {
 	// in-memory: /approve/{token} is prefetched by mail clients and chat
 	// unfurlers, and must never walk the filesystem per view.
 	remote string
+	// baseCommit is the commit the lock recorded for this task when the
+	// generation pended — the "from" endpoint of the commit-range
+	// decoration, "" when there is no prior approval or it recorded no
+	// commit. Captured here rather than read off the lock per render so
+	// every field a renderer pairs it with describes the same generation:
+	// an approval or eviction landing while this generation sits pending
+	// changes the lock, never an entry already published, and the next
+	// Admit republishes the entry against the new baseline.
+	baseCommit string
 	// enabled is the resolved enabled flag observed alongside hash, after
 	// previewFn (if any) — the same value State() renders and
 	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
@@ -313,17 +322,25 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// full of commits that never touched the task. Kept outside the lock —
 		// it opens the repository.
 		commit, remote := g.commitFn(k)
+		// Read outside g.mu, like commit above: the lock guards itself, and
+		// taking it under g.mu would nest the two for a value that is a
+		// snapshot either way.
+		base := ""
+		if rec, ok := g.lock.Get(id); ok {
+			base = rec.Commit
+		}
 
 		g.mu.Lock()
-		// hash, commit, and remote are written together in one critical
-		// section: a concurrent Approve/ApproveIfHash can never observe a
-		// pending[id] whose fields disagree on which generation they describe.
+		// hash, commit, remote, and baseCommit are written together in one
+		// critical section: a concurrent Approve/ApproveIfHash can never
+		// observe a pending[id] whose fields disagree on which generation they
+		// describe.
 		// status is always a brand new *fileStatusCache — never carried over
 		// from prev — so a re-pend (even one that only re-resolves commit
 		// with an unchanged hash) can never serve a status computed against
 		// a different generation's from/to (see pendingEntry.status's doc
 		// comment).
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, enabled: enabled, status: &fileStatusCache{}}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, baseCommit: base, enabled: enabled, status: &fileStatusCache{}}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -504,9 +521,8 @@ func (g *Gate) IsPending(id string) bool {
 }
 
 // PendingView is the snapshot of a pending entry's externally-visible
-// fields, returned by PendingSnapshot. Hash, Enabled and CommitRange.To
-// describe one pending generation, atomically. CommitRange.From does not:
-// see PendingSnapshot.
+// fields, returned by PendingSnapshot. Every field describes one pending
+// generation, atomically.
 type PendingView struct {
 	// Hash is the content hash observed when the task was held pending.
 	// Approval tokens are bound to this hash.
@@ -518,9 +534,10 @@ type PendingView struct {
 	// listing can surface that instead of implying the hold is blocking
 	// something that would otherwise run.
 	Enabled bool
-	// CommitRange is the "what moved" decoration: From is the commit
-	// recorded by the last approval, To the commit the currently pending
-	// content was observed at — not whatever HEAD has moved to since. A
+	// CommitRange is the "what moved" decoration: From is the commit the
+	// last approval had recorded when this generation pended, To the commit
+	// the currently pending content was observed at — not whatever HEAD has
+	// moved to since, and not whatever the lock holds by render time. A
 	// zero value is the ordinary state for a source with no git history or a
 	// task pending for the first time; its absence is never an error
 	// (ADR-0001). From is recorded without the remote it was resolved
@@ -539,18 +556,10 @@ type PendingView struct {
 // back false and zero-valued. Named PendingSnapshot rather than Pending to
 // avoid colliding with Pending() (the sorted list of pending ids).
 //
-// Hash, Enabled and CommitRange.To all come from the one pending-map entry
-// read under g.mu below, so they always describe the same generation.
-// CommitRange.From does not: approvalRange resolves it from g.lock, taken
-// separately (see its own doc comment for why), so a concurrent Approve
-// that records a newer commit — or a Forget that removes the record
-// entirely — between the two reads can make it describe a different
-// generation than Hash/Enabled/To, or go from populated to empty. This is
-// the same exposure PendingApproval had before this method existed, and
-// State/StateFor still have via the same approvalRange call; narrowing it
-// needs the approval baseline captured on pendingEntry at Admit time
-// instead of read live off g.lock, which is a bigger change than this
-// method's own contract and tracked separately (#884).
+// Every returned field — the whole CommitRange included — comes from the one
+// pending-map entry read under g.mu below, so they always describe the same
+// generation: an Approve or Forget landing mid-call changes what the NEXT
+// pend will render, never the view this one returns.
 //
 // PendingHash, PendingEnabled, PendingInfo, and PendingApproval are thin
 // wrappers over this for callers that only ever needed one shape.
@@ -567,7 +576,7 @@ func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
 	// mutation from a different generation than the one hash describes,
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
-	from, to := g.approvalRange(id, ent)
+	from, to := approvalRange(ent)
 	return PendingView{
 		Hash:        ent.hash,
 		Enabled:     ent.enabled,
@@ -606,31 +615,17 @@ func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool)
 }
 
 // approvalRange resolves the From/To commit pair for a pending entry: From
-// is the commit the last approval recorded for id (empty when the task has
-// never been approved before), To is the commit ent's content was observed
-// at. Shared by PendingApproval (the commit-range decoration, #846) and
-// State/StateFor (the per-file "what moved" markers, #670) so the rule is
-// defined exactly once.
+// is the commit the last approval recorded before this generation pended
+// (empty when the task had never been approved), To is the commit ent's
+// content was observed at. Shared by PendingApproval (the commit-range
+// decoration) and State/StateFor (the per-file "what moved" markers) so the
+// rule is defined exactly once.
 //
-// id is taken explicitly from the caller's own g.pending[id] lookup rather
-// than re-derived from ent.kinded.TaskID(): the two agree today only by
-// convention (every pendingEntry is stored under the id its own kinded
-// reports), and task.Kinded exposes a public SetTaskID that could someday be
-// called on an already-pending object, silently breaking that convention and
-// pointing this lock lookup — and thus the commit-range and per-file markers
-// alike — at the wrong task's record with no error. Taking id explicitly
-// removes the dependency on that convention entirely.
-//
-// ent must already have been read from g.pending under g.mu by the caller —
-// this reads only g.lock, which guards itself per Lock's own comments, so no
-// second lock on g.pending/g.mu is taken here (see State's and StateFor's
-// doc comments on avoiding a second locked read of the same generation
-// PendingApproval warns about).
-func (g *Gate) approvalRange(id string, ent pendingEntry) (from, to string) {
-	if rec, ok := g.lock.Get(id); ok {
-		from = rec.Commit
-	}
-	return from, ent.commit
+// Both endpoints come off ent alone: no lock of any kind is taken here, so
+// the range can never pair a baseline with a To from a different generation,
+// however long a renderer holds the entry it read under g.mu.
+func approvalRange(ent pendingEntry) (from, to string) {
+	return ent.baseCommit, ent.commit
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not
