@@ -17,6 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { Run, runID, runStatus } from './helpers/runs';
 
 // All REST tests use the unauthenticated server on port 8765 (no API key
 // required). The `request` fixture is pre-configured with baseURL by
@@ -33,32 +34,8 @@ interface SourceInfo {
   dev_path?: string;
 }
 
-interface Run {
-  ID?: string;
-  id?: string;
-  TaskID?: string;
-  task_id?: string;
-  Status?: string;
-  status?: string;
-  ParentRunID?: string;
-  parent_run_id?: string;
-  TriggerSource?: string;
-  trigger_source?: string;
-  ReturnValue?: string;
-  return_value?: string;
-}
-
-function runID(r: Run): string {
-  return (r.ID ?? r.id) as string;
-}
-function runStatus(r: Run): string {
-  return (r.Status ?? r.status) as string;
-}
 function runParentID(r: Run): string {
   return (r.ParentRunID ?? r.parent_run_id ?? '') as string;
-}
-function runReturnValue(r: Run): string {
-  return (r.ReturnValue ?? r.return_value ?? '') as string;
 }
 
 /**
