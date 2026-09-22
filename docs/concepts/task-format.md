@@ -285,10 +285,14 @@ ceiling applies to a bare edge too even though `_chain_depth` is not
 visible to the task there.
 
 `run_url` links to the *upstream* run (`input.runID`) — the one that
-just completed or failed, not the chained task's own run — like `params`
-itself, only present on an edge that declares at least one param (a bare
-edge with no `params` gets the raw output, unwrapped, with none of the
-reserved keys). It is built from `server.public_url` the same way an
+just completed or failed, not the chained task's own run. On a
+`trigger.chain` edge it rides the same params-gate as the other reserved
+keys — present only when the edge declares at least one param; a bare
+edge with no `params` gets the raw output, unwrapped, with none of them.
+`on_failure_chain` has no such gate: every failure-chain fire wraps and
+stamps the full reserved-key set, `run_url` included, whether or not the
+edge declares any params of its own. It is built from `server.public_url`
+the same way an
 approval or suspend notification link is: set `server.public_url` for a
 link a notification recipient outside the daemon's own machine can
 actually open, since without it the link falls back to a `localhost`
