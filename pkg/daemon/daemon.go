@@ -933,6 +933,12 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	}
 	eng.AddRunFinishedHook(suspendNotify.onRunFinished)
 
+	// Chain payload run_url (#820): same link shape as the suspend
+	// notifier's resumeURL above, so every chained task (trigger.chain and
+	// on_failure_chain alike) can open the run that triggered it without
+	// operators duplicating server.public_url into their own chain params.
+	eng.SetRunURLFunc(func(runID string) string { return srv.WebUIBaseURL() + "/?run=" + runID })
+
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}

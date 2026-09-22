@@ -72,7 +72,7 @@ permissions:
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
-| `trigger.chain.params` | map | | User-defined keys merged into the downstream `input` map alongside engine-reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`). When omitted, `input` is the upstream's raw output unchanged. See [chain params and per-edge overrides](#chain-params-and-per-edge-overrides). |
+| `trigger.chain.params` | map | | User-defined keys merged into the downstream `input` map alongside engine-reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`, `run_url`). When omitted, `input` is the upstream's raw output unchanged. See [chain params and per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
@@ -273,15 +273,24 @@ input.taskID        // "task-a"  (engine-reserved)
 input.runID         // upstream run ID
 input.status        // "success"
 input._chain_depth  // hop count: 1 for a directly-fired upstream
+input.run_url       // link to task-a's run in the web UI, or absent
 ```
 
-Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`)
-are rejected at config-load if present in `params`. When `params` is
-empty (the default), `input` stays as the upstream's raw value — no
-wrapping — so existing chains keep working unchanged. The engine
-tracks the hop count separately from this payload, so the depth
+Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`,
+`run_url`) are rejected at config-load if present in `params`. When
+`params` is empty (the default), `input` stays as the upstream's raw
+value — no wrapping — so existing chains keep working unchanged. The
+engine tracks the hop count separately from this payload, so the depth
 ceiling applies to a bare edge too even though `_chain_depth` is not
 visible to the task there.
+
+`run_url` links to the *upstream* run (`input.runID`) — the one that
+just completed or failed, not the chained task's own run. It is built
+from `server.public_url` the same way an approval or suspend
+notification link is, and is omitted entirely (not stamped as a
+placeholder) when the daemon has no base URL to build one from — a
+notification task should treat its absence as "no link available",
+never a broken one.
 
 String values in `params` may reference the upstream's runtime state
 via the dispatch-time interpolation grammar — `${input.output}`,

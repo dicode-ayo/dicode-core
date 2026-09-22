@@ -220,6 +220,13 @@ type Engine struct {
 	// derived sub-key is available.
 	inputStore *registry.InputStore
 
+	// runURLFunc builds a link to a run in the web UI, the same way the
+	// suspend notifier's resumeURL does (daemon.go, wired after the webui
+	// Server exists so it can honor server.public_url). nil when the web UI
+	// isn't available to wire it — buildRunURL then returns "", and the
+	// chain payload's run_url key is simply omitted (see buildChainPayload).
+	runURLFunc func(runID string) string
+
 	guards *chainGuards
 }
 
@@ -269,6 +276,24 @@ func (e *Engine) SetSecrets(s secrets.Chain) {
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
 func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
+
+// SetRunURLFunc wires the function the engine uses to stamp a chained run's
+// completed-run link (the chain payload's run_url key — see
+// buildChainPayload). The daemon wires this after the webui Server exists,
+// mirroring the suspend notifier's resumeURL (daemon.go). Never called by the
+// engine itself before dispatch — pkg/trigger must not import pkg/webui.
+func (e *Engine) SetRunURLFunc(fn func(runID string) string) { e.runURLFunc = fn }
+
+// buildRunURL returns the run URL for runID, or "" when no SetRunURLFunc has
+// been wired (e.g. tests, or a daemon boot path that hasn't reached the webui
+// step yet) — buildChainPayload treats "" as "omit the key", never a broken
+// link.
+func (e *Engine) buildRunURL(runID string) string {
+	if e.runURLFunc == nil {
+		return ""
+	}
+	return e.runURLFunc(runID)
+}
 
 // SetFireGuard installs a veto consulted before any run starts (see the
 // fireGuard field doc). A nil guard removes the veto.
