@@ -285,12 +285,18 @@ ceiling applies to a bare edge too even though `_chain_depth` is not
 visible to the task there.
 
 `run_url` links to the *upstream* run (`input.runID`) — the one that
-just completed or failed, not the chained task's own run. It is built
-from `server.public_url` the same way an approval or suspend
-notification link is, and is omitted entirely (not stamped as a
-placeholder) when the daemon has no base URL to build one from — a
-notification task should treat its absence as "no link available",
-never a broken one.
+just completed or failed, not the chained task's own run — like `params`
+itself, only present on an edge that declares at least one param (a bare
+edge with no `params` gets the raw output, unwrapped, with none of the
+reserved keys). It is built from `server.public_url` the same way an
+approval or suspend notification link is: set `server.public_url` for a
+link a notification recipient outside the daemon's own machine can
+actually open, since without it the link falls back to a `localhost`
+address. `run_url` is present for the whole of the daemon's normal
+operation and is omitted only during the narrow startup window before
+the trigger engine has been wired to build one — a notification task
+should still treat a missing key as "no link available" rather than
+assume the key is always there.
 
 String values in `params` may reference the upstream's runtime state
 via the dispatch-time interpolation grammar — `${input.output}`,
