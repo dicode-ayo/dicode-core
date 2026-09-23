@@ -25,6 +25,16 @@ type CommitRange struct {
 	// CompareURL is a link to the git host's compare view for From...To, or
 	// "" when it cannot be built (see compareURL).
 	CompareURL string
+	// Commits is the number of commits strictly after From up to and
+	// including To, or -1 when it could not be determined — no baseline
+	// (From or To empty), an unreachable history, or a rewritten one. Never
+	// asserted unless known, per ADR-0001.
+	Commits int
+	// CommitsBounded is true when Commits hit the walk's cap
+	// (internal/gitops.CommitCountBetween's limit) before reaching From, so
+	// Commits is a lower bound ("at least this many") rather than an exact
+	// count.
+	CommitsBounded bool
 }
 
 // compareURL returns a link to the git host's compare view for the range

@@ -261,6 +261,7 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
   {{if .CommitTo}}
   <p class="meta">
     {{if and .CommitFrom (ne .CommitFrom .CommitTo)}}Commit range: <code>{{.CommitFrom}}...{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
+    {{if .CommitsLabel}} ({{.CommitsLabel}}){{end}}
     {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}">compare</a>{{end}}
   </p>
   {{end}}
@@ -275,12 +276,34 @@ type approvePageData struct {
 	Approved bool
 	Error    string
 
-	// CommitFrom, CommitTo and CompareURL carry the "what moved" decoration.
-	// Each is "" whenever it cannot be resolved, and the template renders
-	// nothing at all rather than a blank range when CommitTo is empty.
+	// CommitFrom, CommitTo, CompareURL and CommitsLabel carry the "what
+	// moved" decoration. Each is "" whenever it cannot be resolved, and the
+	// template renders nothing at all rather than a blank range when
+	// CommitTo is empty.
 	CommitFrom string
 	CommitTo   string
 	CompareURL string
+	// CommitsLabel is a pre-formatted "N commit(s)" / "N+ commits" string —
+	// see commitsLabel — or "" when the count could not be determined.
+	CommitsLabel string
+}
+
+// commitsLabel formats a approval.CommitRange's Commits/CommitsBounded pair
+// for the approve page: "" when count is unknown (< 0), "1 commit" /
+// "N commits" for an exact count, or "N+ commits" when the walk hit its cap
+// (bounded) and N is a lower bound rather than an exact count.
+func commitsLabel(count int, bounded bool) string {
+	if count < 0 {
+		return ""
+	}
+	unit := "commits"
+	if count == 1 && !bounded {
+		unit = "commit"
+	}
+	if bounded {
+		return fmt.Sprintf("%d+ %s", count, unit)
+	}
+	return fmt.Sprintf("%d %s", count, unit)
 }
 
 func (s *Server) renderApprovePage(w http.ResponseWriter, status int, data approvePageData) {
@@ -319,11 +342,12 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderApprovePage(w, http.StatusOK, approvePageData{
-		TaskID:     info.TaskID,
-		Hash:       shortHash(info.Hash),
-		CommitFrom: shortCommit(v.CommitRange.From),
-		CommitTo:   shortCommit(v.CommitRange.To),
-		CompareURL: v.CommitRange.CompareURL,
+		TaskID:       info.TaskID,
+		Hash:         shortHash(info.Hash),
+		CommitFrom:   shortCommit(v.CommitRange.From),
+		CommitTo:     shortCommit(v.CommitRange.To),
+		CompareURL:   v.CommitRange.CompareURL,
+		CommitsLabel: commitsLabel(v.CommitRange.Commits, v.CommitRange.CommitsBounded),
 	})
 }
 

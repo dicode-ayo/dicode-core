@@ -864,7 +864,7 @@ func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
 	to := strings.Repeat("b", 40)
 	compareURL := "https://github.com/o/r/compare/" + from + "..." + to
 	gate.setCommitRange("repo/pending-task", approval.CommitRange{
-		From: from, To: to, CompareURL: compareURL,
+		From: from, To: to, CompareURL: compareURL, Commits: 3,
 	})
 	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
 	if err != nil {
@@ -890,6 +890,87 @@ func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
 	if !strings.Contains(body, `href="`+compareURL+`"`) {
 		t.Errorf("confirm page missing the compare link href %q: %s", compareURL, body)
 	}
+	if !strings.Contains(body, "(3 commits)") {
+		t.Errorf("confirm page missing the commit count %q: %s", "(3 commits)", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersSingularCommit covers the "1 commit"
+// wording: a count of exactly one, unbounded, must not pluralize.
+func TestApproveLink_ConfirmPageRendersSingularCommit(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: 1})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "(1 commit)") {
+		t.Errorf("confirm page missing the singular commit count %q: %s", "(1 commit)", body)
+	}
+	if strings.Contains(body, "(1 commits)") {
+		t.Errorf("confirm page pluralized a count of one: %s", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersBoundedCommits covers a walk that hit
+// its cap: the page must say "N+ commits", a lower bound, never claim an
+// exact count it does not have.
+func TestApproveLink_ConfirmPageRendersBoundedCommits(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: 500, CommitsBounded: true})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// html/template escapes "+" in text content as "&#43;".
+	if !strings.Contains(body, "(500&#43; commits)") {
+		t.Errorf("confirm page missing the bounded commit count %q: %s", "500+ commits", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageOmitsCommitsLabelWhenUnknown covers ADR-0001
+// for this decoration: an unresolvable count (e.g. a rewritten history)
+// must render nothing, never a false number.
+func TestApproveLink_ConfirmPageOmitsCommitsLabelWhenUnknown(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: -1})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "commit)") || strings.Contains(body, "commits)") {
+		t.Errorf("confirm page rendered a commit count it does not have: %s", body)
+	}
 }
 
 // TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne covers a re-pend at
@@ -899,7 +980,7 @@ func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
 func TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne(t *testing.T) {
 	srv, gate, _ := newTokenLinkServer(t)
 	only := strings.Repeat("a", 40)
-	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: only, To: only})
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: only, To: only, Commits: 0})
 	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
 	if err != nil {
 		t.Fatalf("mint: %v", err)
@@ -919,6 +1000,9 @@ func TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne(t *testing.T) {
 	}
 	if strings.Contains(body, "Commit range:") {
 		t.Errorf("confirm page rendered a range for an unmoved commit: %s", body)
+	}
+	if !strings.Contains(body, "(0 commits)") {
+		t.Errorf("confirm page missing the zero-commit count for an unmoved commit: %s", body)
 	}
 }
 

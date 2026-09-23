@@ -24,6 +24,12 @@ const BuiltinSource = "buildin"
 // the task is awaiting approval.
 var ErrPending = errors.New("task pending approval")
 
+// commitCountLimit bounds how many commits PendingSnapshot's CommitRange.Commits
+// walk will visit before giving up and reporting a lower bound instead of an
+// exact count (#670) — capping the cost of a large history rather than
+// walking it in full.
+const commitCountLimit = 500
+
 // ErrHashMismatch is returned (wrapped) by ApproveIfHash when the task's
 // currently pending hash no longer matches the hash the caller reviewed —
 // e.g. a dashboard operator approving against a diff the reconciler has
@@ -58,7 +64,10 @@ type Gate struct {
 	hashFn     func(task.Kinded) (string, error)
 	commitFn   func(task.Kinded) (commit, remote string)
 	treeDiffFn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)
-	log        *zap.Logger
+	// commitCountFn resolves the #670 commit-count decoration — see
+	// PendingSnapshot's use of it via commitCount.
+	commitCountFn func(dir, from, to string, limit int) (count int, bounded bool, err error)
+	log           *zap.Logger
 
 	mu          sync.Mutex
 	pending     map[string]pendingEntry
@@ -149,6 +158,20 @@ type pendingEntry struct {
 	// generation change. See fileStatusCache's own doc comment for the
 	// sync.Once mechanics this relies on to need no second g.mu acquisition.
 	status *fileStatusCache
+	// commits caches the once-computed "commits since approval" walk (#670)
+	// for this pending generation, the same way status caches the per-file
+	// tree-diff — see commitCountCache's doc comment.
+	commits *commitCountCache
+}
+
+// commitCountCache holds the once-computed commit-count walk result (#670)
+// for one pending generation, mirroring fileStatusCache: /approve/{token} is
+// prefetched by mail clients and chat unfurlers, so any number of renders of
+// the same generation must cost at most one git walk, not one per render.
+type commitCountCache struct {
+	once    sync.Once
+	count   int
+	bounded bool
 }
 
 // fileStatusCache holds the once-computed git tree-diff status map
@@ -174,15 +197,16 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:     policy,
-		lock:       lock,
-		arm:        arm,
-		hashFn:     ContentHash,
-		commitFn:   headCommitOf,
-		treeDiffFn: gitops.TreeBlobHashesForPathsAtTwoCommits,
-		log:        log,
-		pending:    map[string]pendingEntry{},
-		admitted:   map[string]task.Kinded{},
+		policy:        policy,
+		lock:          lock,
+		arm:           arm,
+		hashFn:        ContentHash,
+		commitFn:      headCommitOf,
+		treeDiffFn:    gitops.TreeBlobHashesForPathsAtTwoCommits,
+		commitCountFn: gitops.CommitCountBetween,
+		log:           log,
+		pending:       map[string]pendingEntry{},
+		admitted:      map[string]task.Kinded{},
 	}
 }
 
@@ -199,6 +223,13 @@ func (g *Gate) SetCommitFunc(fn func(task.Kinded) (commit, remote string)) { g.c
 // re-walking the trees.
 func (g *Gate) SetTreeDiffFunc(fn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)) {
 	g.treeDiffFn = fn
+}
+
+// SetCommitCountFunc overrides the commit-count resolver used to compute
+// #670's "commits since approval" decoration (tests) — e.g. to fake a large
+// or diverged history without building a real git fixture for it.
+func (g *Gate) SetCommitCountFunc(fn func(dir, from, to string, limit int) (count int, bounded bool, err error)) {
+	g.commitCountFn = fn
 }
 
 // SetBuiltinPinned records whether the buildin source is pinned to a tag.
@@ -340,7 +371,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// with an unchanged hash) can never serve a status computed against
 		// a different generation's from/to (see pendingEntry.status's doc
 		// comment).
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, baseCommit: base, enabled: enabled, status: &fileStatusCache{}}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, baseCommit: base, enabled: enabled, status: &fileStatusCache{}, commits: &commitCountCache{}}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -577,11 +608,47 @@ func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
 	from, to := approvalRange(ent)
+	commits, bounded := g.commitCount(taskDirOf(ent.kinded), from, to, ent.commits)
 	return PendingView{
-		Hash:        ent.hash,
-		Enabled:     ent.enabled,
-		CommitRange: CommitRange{From: from, To: to, CompareURL: compareURL(ent.remote, from, to)},
+		Hash:    ent.hash,
+		Enabled: ent.enabled,
+		CommitRange: CommitRange{
+			From: from, To: to, CompareURL: compareURL(ent.remote, from, to),
+			Commits: commits, CommitsBounded: bounded,
+		},
 	}, true
+}
+
+// commitCount resolves the "commits since approval" decoration for dir
+// between from and to via g.commitCountFn, degrading to (-1, false) — never
+// a false claim — whenever from, to or dir is unknown, or the walk cannot
+// resolve one of them at all. Mirrors compareURL's early return for the same
+// "nothing to report" conditions.
+//
+// cache is non-nil for a genuinely pending generation (see
+// commitCountCache's doc comment): the walk runs at most once no matter how
+// many times this generation is rendered, the same guarantee
+// fileStatusesOf's cache gives the per-file markers and for the same reason
+// (/approve/{token} prefetch). nil degrades to "always recompute", mirroring
+// fileStatusesOf's own nil branch.
+func (g *Gate) commitCount(dir, from, to string, cache *commitCountCache) (count int, bounded bool) {
+	if dir == "" || from == "" || to == "" {
+		return -1, false
+	}
+	compute := func() (int, bool) {
+		n, b, err := g.commitCountFn(dir, from, to, commitCountLimit)
+		if err != nil {
+			return -1, false
+		}
+		return n, b
+	}
+	if cache == nil {
+		return compute()
+	}
+	cache.once.Do(func() {
+		cache.count, cache.bounded = compute()
+	})
+	return cache.count, cache.bounded
 }
 
 // PendingHash returns the content hash observed when id was held pending,
