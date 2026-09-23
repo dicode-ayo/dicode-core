@@ -154,6 +154,26 @@ func TestCommitCountBetween_BoundedAtLimit(t *testing.T) {
 	}
 }
 
+// TestCommitCountBetween_ExactCountAtLimitIsNotBounded covers the boundary
+// CodeRabbit flagged on PR #890: a true distance exactly equal to limit must
+// report an exact count (bounded=false), not "N+" — the walk must confirm
+// whether the very next commit is fromSHA before giving up at the cap.
+func TestCommitCountBetween_ExactCountAtLimitIsNotBounded(t *testing.T) {
+	root := t.TempDir()
+	from := seedInitRepo(t, root)
+	nextChange(t, root, 1)
+	nextChange(t, root, 2)
+	to := nextChange(t, root, 3)
+
+	count, bounded, err := CommitCountBetween(root, from, to, 3)
+	if err != nil {
+		t.Fatalf("CommitCountBetween: %v", err)
+	}
+	if count != 3 || bounded {
+		t.Errorf("got (%d, %v), want (3, false) — true distance equals limit exactly, so the count is exact", count, bounded)
+	}
+}
+
 // TestCommitCountBetween_FromAbsentFromRepoIsAnError covers a fromSHA that
 // is well-formed but not an object this repository holds at all — e.g. a
 // rewritten history whose old commits have since been garbage-collected.

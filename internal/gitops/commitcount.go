@@ -69,10 +69,18 @@ func CommitCountBetween(dir, fromSHA, toSHA string, limit int) (count int, bound
 		if current.Hash == fromHash {
 			return n, false, nil
 		}
-		n++
+		// Checked before counting current and advancing: reaching this with
+		// n already at limit means limit commits were confirmed to not be
+		// fromSHA on a prior iteration, but current itself — a candidate
+		// that could still turn out to be fromSHA, as just checked above —
+		// has not yet been charged against the cap. Counting it first and
+		// checking the cap after (n++ then n >= limit) would report a
+		// range whose true length is exactly limit as bounded, since the
+		// walk would stop one step before ever comparing that final node.
 		if n >= limit {
 			return n, true, nil
 		}
+		n++
 		if current.NumParents() == 0 {
 			return 0, false, fmt.Errorf("walk first-parent history from %s toward %s: reached a root commit without finding it", toSHA, fromSHA)
 		}
