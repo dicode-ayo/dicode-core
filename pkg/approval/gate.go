@@ -24,10 +24,10 @@ const BuiltinSource = "buildin"
 // the task is awaiting approval.
 var ErrPending = errors.New("task pending approval")
 
-// commitCountLimit bounds how many commits PendingSnapshot's CommitRange.Commits
-// walk will visit before giving up and reporting a lower bound instead of an
-// exact count — capping the cost of a large history rather than walking it
-// in full.
+// commitCountLimit bounds how many commits PendingApproval's
+// CommitRange.Commits walk will visit before giving up and reporting a
+// lower bound instead of an exact count — capping the cost of a large
+// history rather than walking it in full.
 const commitCountLimit = 500
 
 // ErrHashMismatch is returned (wrapped) by ApproveIfHash when the task's

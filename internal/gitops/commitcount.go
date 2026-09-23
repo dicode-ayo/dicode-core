@@ -7,20 +7,10 @@ import (
 )
 
 // CommitCountBetween returns the number of commits strictly after fromSHA
-// and up to and including toSHA, walking toSHA's *first-parent* history in
-// the repository that tracks dir (see HeadInfo). Counting reads commit
+// and up to and including toSHA, walking toSHA's first-parent history in the
+// repository that tracks dir (see HeadInfo) — the same commits
+// `git log --first-parent --count` would report. Counting reads commit
 // objects only, never a tree or a blob.
-//
-// First-parent only, deliberately: dicode's git sources each track one
-// branch, and a merge commit's first parent is that branch's own previous
-// tip (the shape every git host's "merge pull request" produces) — so this
-// counts commits that landed on the tracked branch, the same thing
-// `git log --first-parent --count` would report, and never double-counts or
-// walks into a merged-in feature branch's own history. A full ancestry walk
-// (following every parent) would count those side-branch commits too and
-// cannot terminate at a single, well-defined fromSHA the way a first-parent
-// walk can: two branches sharing a fromSHA reach it at different distances
-// depending which parent is followed first.
 //
 // fromSHA == toSHA returns (0, false, nil) without opening the repository:
 // there is nothing between a commit and itself.
@@ -31,12 +21,21 @@ import (
 // history rather than walking all of it. bounded is false when the walk
 // reached fromSHA before the cap, and count is then exact.
 //
-// err is returned when toSHA cannot be resolved to a commit at all (no
-// repository, or the hash is not a valid commit there). Walking off the
-// root of history, or off a first-parent chain that never passes through
-// fromSHA (fromSHA reachable only via a non-first parent, a rewritten
-// history, a divergent branch switch, or fromSHA belonging to a different
-// lineage entirely) without ever reaching it, is reported the same way,
+// A bounded result does not distinguish a first-parent chain that is
+// genuinely longer than limit from one that never reaches fromSHA at all —
+// both look identical within the cap's budget, since confirming the latter
+// would mean walking to the root regardless of limit. Callers that render
+// this as "N+" are making that same "at least" claim, not an exact one.
+//
+// err is returned when fromSHA or toSHA is not a valid commit hash, or
+// toSHA cannot be resolved to a commit in this repository at all (no
+// repository, or the hash is absent from it). fromSHA is resolved the same
+// way, so a fromSHA that no longer exists in the object store at all — e.g.
+// a rewritten history whose old commits were since garbage-collected —
+// fails here rather than risking the ambiguity above. Walking off the root
+// of a first-parent chain without ever reaching a fromSHA that does still
+// exist in the repository (reachable only via a non-first parent, or
+// belonging to a different lineage entirely) is reported the same way,
 // since "some number of commits" would be a claim this walk cannot back.
 // Callers that treat the count as optional decoration should discard the
 // error and omit it, the same as every other "what moved" signal (see
@@ -58,6 +57,12 @@ func CommitCountBetween(dir, fromSHA, toSHA string, limit int) (count int, bound
 		return 0, false, fmt.Errorf("resolve commit %s: %w", toSHA, err)
 	}
 	fromHash := plumbing.NewHash(fromSHA)
+	if fromHash.IsZero() {
+		return 0, false, fmt.Errorf("resolve commit %s: not a valid commit hash", fromSHA)
+	}
+	if _, err := repo.CommitObject(fromHash); err != nil {
+		return 0, false, fmt.Errorf("resolve commit %s: %w", fromSHA, err)
+	}
 
 	n := 0
 	for {

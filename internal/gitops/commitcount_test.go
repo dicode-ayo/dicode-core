@@ -154,16 +154,19 @@ func TestCommitCountBetween_BoundedAtLimit(t *testing.T) {
 	}
 }
 
-func TestCommitCountBetween_FromNotAnAncestorIsAnError(t *testing.T) {
+// TestCommitCountBetween_FromAbsentFromRepoIsAnError covers a fromSHA that
+// is well-formed but not an object this repository holds at all — e.g. a
+// rewritten history whose old commits have since been garbage-collected.
+// This must fail immediately rather than risk the walk hitting its cap
+// before ever confirming fromSHA doesn't exist (see the bounded-vs-unknown
+// note on CommitCountBetween's doc comment).
+func TestCommitCountBetween_FromAbsentFromRepoIsAnError(t *testing.T) {
 	root := t.TempDir()
 	to := seedInitRepo(t, root)
 
-	// A fromSHA that never appears in toSHA's ancestry (here, a commit that
-	// doesn't exist at all) must not report a number — the walk exhausts
-	// history without ever finding it.
-	_, _, err := CommitCountBetween(root, "0000000000000000000000000000000000000000", to, 500)
+	_, _, err := CommitCountBetween(root, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", to, 500)
 	if err == nil {
-		t.Fatal("CommitCountBetween: want error when fromSHA is unreachable from toSHA, got nil")
+		t.Fatal("CommitCountBetween: want error when fromSHA is not an object in the repository, got nil")
 	}
 }
 
@@ -174,6 +177,16 @@ func TestCommitCountBetween_UnresolvableToShaIsAnError(t *testing.T) {
 	_, _, err := CommitCountBetween(root, from, "not-a-valid-sha", 500)
 	if err == nil {
 		t.Fatal("CommitCountBetween: want error for an unresolvable toSHA, got nil")
+	}
+}
+
+func TestCommitCountBetween_UnresolvableFromShaIsAnError(t *testing.T) {
+	root := t.TempDir()
+	to := seedInitRepo(t, root)
+
+	_, _, err := CommitCountBetween(root, "not-a-valid-sha", to, 500)
+	if err == nil {
+		t.Fatal("CommitCountBetween: want error for an unresolvable fromSHA, got nil")
 	}
 }
 
