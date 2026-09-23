@@ -23,6 +23,10 @@ import (
 type ApprovalGate interface {
 	IsPending(id string) bool
 	PendingSnapshot(id string) (approval.PendingView, bool)
+	// PendingApproval is PendingSnapshot's counterpart for a caller that
+	// actually renders CommitRange.Commits — see handleApproveLinkPage. It
+	// costs a git walk PendingSnapshot deliberately does not pay.
+	PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
@@ -334,20 +338,22 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// The link must only ever approve what it was minted for: if the task is
 	// no longer pending at that exact hash, say so up front. One locked read
-	// for both, so a concurrent Admit cannot leave the rendered range
-	// describing a different generation than the hash matched here.
-	v, ok := s.approvalGate.PendingSnapshot(info.TaskID)
-	if !ok || v.Hash != info.Hash {
+	// for both (via PendingApproval, not PendingSnapshot: this page is the
+	// one place that renders the commit count), so a concurrent Admit
+	// cannot leave the rendered range describing a different generation
+	// than the hash matched here.
+	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
+	if !ok || hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
 	s.renderApprovePage(w, http.StatusOK, approvePageData{
 		TaskID:       info.TaskID,
 		Hash:         shortHash(info.Hash),
-		CommitFrom:   shortCommit(v.CommitRange.From),
-		CommitTo:     shortCommit(v.CommitRange.To),
-		CompareURL:   v.CommitRange.CompareURL,
-		CommitsLabel: commitsLabel(v.CommitRange.Commits, v.CommitRange.CommitsBounded),
+		CommitFrom:   shortCommit(cr.From),
+		CommitTo:     shortCommit(cr.To),
+		CompareURL:   cr.CompareURL,
+		CommitsLabel: commitsLabel(cr.Commits, cr.CommitsBounded),
 	})
 }
 

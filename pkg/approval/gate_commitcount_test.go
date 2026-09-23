@@ -139,3 +139,37 @@ func TestPendingApproval_CommitsWalkedOncePerGeneration(t *testing.T) {
 		t.Errorf("commitCountFn called %d times, want exactly 1 — PendingApproval must never re-walk", calls)
 	}
 }
+
+// TestPendingSnapshot_NeverComputesCommitCount pins the cost split between
+// PendingSnapshot and PendingApproval: PendingSnapshot backs daemon.go's
+// "dicode list" / "dicode task pending" status query and MintApproveLink,
+// neither of which reads CommitRange.Commits, so it must never trigger the
+// git walk — only PendingApproval, the /approve/{token} confirm page's own
+// accessor, does.
+func TestPendingSnapshot_NeverComputesCommitCount(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	first, second := fakeCommit("a"), fakeCommit("b")
+	approveThenRepend(t, g, lock, first, second, "")
+
+	called := false
+	g.SetCommitCountFunc(func(dir, from, to string, limit int) (int, bool, error) {
+		called = true
+		return 3, false, nil
+	})
+
+	v, ok := g.PendingSnapshot("repo/deploy")
+	if !ok {
+		t.Fatal("PendingSnapshot: ok = false, want true")
+	}
+	if called {
+		t.Error("PendingSnapshot triggered a commit-count walk — only PendingApproval should")
+	}
+	if v.CommitRange.Commits != -1 || v.CommitRange.CommitsBounded {
+		t.Errorf("CommitRange = %+v, want Commits=-1 CommitsBounded=false", v.CommitRange)
+	}
+	// From/To/CompareURL are cheap, in-memory decoration and must still be
+	// there — only Commits is deferred to PendingApproval.
+	if v.CommitRange.From != first || v.CommitRange.To != second {
+		t.Errorf("CommitRange = %+v, want From=%q To=%q", v.CommitRange, first, second)
+	}
+}

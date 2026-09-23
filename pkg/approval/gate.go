@@ -592,12 +592,21 @@ type PendingView struct {
 // generation: an Approve or Forget landing mid-call changes what the NEXT
 // pend will render, never the view this one returns.
 //
-// PendingHash, PendingEnabled, PendingInfo, and PendingApproval are thin
-// wrappers over this for callers that only ever needed one shape.
+// PendingHash, PendingEnabled and PendingInfo are thin wrappers over this
+// for callers that only ever needed one shape. PendingApproval deliberately
+// is NOT: it needs CommitRange.Commits, the one field here that costs a git
+// walk rather than reading already-resolved in-memory state, so it does its
+// own locked read via pendingEntryFor instead of paying that cost on every
+// caller of this method — see PendingApproval's doc comment.
+//
+// CommitRange.Commits/CommitsBounded on the value returned here are always
+// -1/false (unresolved), never computed: this method backs the "dicode
+// list" / "dicode task pending" status path (daemon.SetPendingApprovals)
+// and MintApproveLink, neither of which reads them, and a git-log walk on
+// every status query for every pending task would make a cheap, purely
+// in-memory operation pay for decoration nothing asked for.
 func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
-	g.mu.Lock()
-	ent, ok := g.pending[id]
-	g.mu.Unlock()
+	ent, ok := g.pendingEntryFor(id)
 	if !ok {
 		return PendingView{}, false
 	}
@@ -608,15 +617,25 @@ func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
 	from, to := approvalRange(ent)
-	commits, bounded := g.commitCount(taskDirOf(ent.kinded), from, to, ent.commits)
 	return PendingView{
 		Hash:    ent.hash,
 		Enabled: ent.enabled,
 		CommitRange: CommitRange{
 			From: from, To: to, CompareURL: compareURL(ent.remote, from, to),
-			Commits: commits, CommitsBounded: bounded,
+			Commits: -1, CommitsBounded: false,
 		},
 	}, true
+}
+
+// pendingEntryFor is the one locked map read PendingSnapshot and
+// PendingApproval are each built from, so a caller can never observe fields
+// straddling two different generations the way two separate locked reads
+// could — the same guarantee PendingSnapshot's doc comment describes.
+func (g *Gate) pendingEntryFor(id string) (pendingEntry, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ent, ok := g.pending[id]
+	return ent, ok
 }
 
 // commitCount resolves the "commits since approval" decoration for dir
@@ -674,11 +693,23 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 }
 
 // PendingApproval returns the content hash observed when id was held pending
-// together with its "what moved" commit-range decoration. See
-// PendingSnapshot.
+// together with its full "what moved" commit-range decoration, Commits
+// included — unlike PendingSnapshot, which leaves Commits unresolved. This
+// is the one accessor that actually renders the count (the /approve/{token}
+// confirm page), so it is the one that pays for it: its own locked read via
+// pendingEntryFor, not a call through PendingSnapshot, so no other
+// PendingSnapshot caller pays for a git walk it never asked for.
 func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
-	v, ok := g.PendingSnapshot(id)
-	return v.Hash, v.CommitRange, ok
+	ent, ok := g.pendingEntryFor(id)
+	if !ok {
+		return "", CommitRange{}, false
+	}
+	from, to := approvalRange(ent)
+	commits, bounded := g.commitCount(taskDirOf(ent.kinded), from, to, ent.commits)
+	return ent.hash, CommitRange{
+		From: from, To: to, CompareURL: compareURL(ent.remote, from, to),
+		Commits: commits, CommitsBounded: bounded,
+	}, true
 }
 
 // approvalRange resolves the From/To commit pair for a pending entry: From

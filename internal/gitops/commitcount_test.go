@@ -61,10 +61,6 @@ func commitWithParents(t *testing.T, root, msg string, n int, parents []plumbing
 // the walk follows the merge commit's first parent (the mainline) and never
 // the side branch: the count must reflect only the commits that landed on
 // the tracked branch itself, not every commit reachable through the merge.
-// Before this test's fix (walking every parent via repo.Log's default
-// order), a merge in the range could make the walk reach fromSHA through a
-// path that skipped commits reachable only via the other parent, silently
-// under-reporting an "exact" count instead of the documented behavior.
 func TestCommitCountBetween_MergeCommitCountsFirstParentOnly(t *testing.T) {
 	root := t.TempDir()
 	from := seedInitRepo(t, root)

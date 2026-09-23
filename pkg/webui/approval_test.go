@@ -111,6 +111,19 @@ func (g *fakeApprovalGate) PendingSnapshot(id string) (approval.PendingView, boo
 	return approval.PendingView{Hash: hash, CommitRange: g.commitRanges[id]}, true
 }
 
+// PendingApproval is PendingSnapshot's counterpart on the real Gate; this
+// fake makes no cost distinction between the two, so it returns the same
+// canned range.
+func (g *fakeApprovalGate) PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	hash, ok = g.pending[id]
+	if !ok {
+		return "", approval.CommitRange{}, false
+	}
+	return hash, g.commitRanges[id], true
+}
+
 func (g *fakeApprovalGate) Approve(id string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
