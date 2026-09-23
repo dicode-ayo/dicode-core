@@ -917,7 +917,9 @@ truncation banner and no "too large to display" state to design.
   the task ID and its short hash, nothing about the task's contents, and —
   when resolvable — the "what moved" decoration: the commit range from the
   previously-approved commit to the one the pending content was observed at,
-  how many commits fall in that range, and a link to the git host's compare
+  how many commits fall in that range (first-parent history — the commits
+  that landed on the tracked branch itself, not every commit pulled in
+  through a merge), and a link to the git host's compare
   view (`Gate.PendingSnapshot`, `pkg/approval/comparelink.go`). The count is
   capped (`internal/gitops.CommitCountBetween`, `pkg/approval/gate.go`): a walk
   that reaches the cap before finding the baseline commit renders "N+ commits"

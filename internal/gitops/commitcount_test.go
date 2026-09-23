@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
+
+	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // seedInitRepo initializes a repo at root with one committed file, returning
@@ -21,6 +26,90 @@ func nextChange(t *testing.T, root string, n int) string {
 	t.Helper()
 	writeFile(t, filepath.Join(root, "f.txt"), fmt.Sprintf("%d", n))
 	return commitChange(t, root, fmt.Sprintf("change %d", n))
+}
+
+// commitWithParents overwrites root/f.txt with distinct content, stages it,
+// and commits with an explicit parent list — bypassing whatever HEAD would
+// otherwise supply — so a test can build a merge commit or a side-branch
+// commit that Worktree.Commit's default single-parent behavior cannot.
+func commitWithParents(t *testing.T, root, msg string, n int, parents []plumbing.Hash) string {
+	t.Helper()
+	writeFile(t, filepath.Join(root, "f.txt"), fmt.Sprintf("%d", n))
+	repo, err := gogit.PlainOpen(root)
+	if err != nil {
+		t.Fatalf("PlainOpen: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+	if err := wt.AddGlob("."); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	h, err := wt.Commit(msg, &gogit.CommitOptions{
+		Author:  &object.Signature{Name: "t", Email: "t@t", When: time.Now()},
+		Parents: parents,
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return h.String()
+}
+
+// TestCommitCountBetween_MergeCommitCountsFirstParentOnly builds a mainline
+// with a merge commit pulling in an independent side branch, and pins that
+// the walk follows the merge commit's first parent (the mainline) and never
+// the side branch: the count must reflect only the commits that landed on
+// the tracked branch itself, not every commit reachable through the merge.
+// Before this test's fix (walking every parent via repo.Log's default
+// order), a merge in the range could make the walk reach fromSHA through a
+// path that skipped commits reachable only via the other parent, silently
+// under-reporting an "exact" count instead of the documented behavior.
+func TestCommitCountBetween_MergeCommitCountsFirstParentOnly(t *testing.T) {
+	root := t.TempDir()
+	from := seedInitRepo(t, root)
+	fromHash := plumbing.NewHash(from)
+
+	nextChange(t, root, 1)
+	m2 := nextChange(t, root, 2)
+
+	side := commitWithParents(t, root, "side branch commit", 100, []plumbing.Hash{fromHash})
+
+	merge := commitWithParents(t, root, "merge side into mainline", 200,
+		[]plumbing.Hash{plumbing.NewHash(m2), plumbing.NewHash(side)})
+
+	// First-parent chain from merge: merge -> m2 -> m1 -> from. Three
+	// commits after from, none of them the side-branch commit.
+	count, bounded, err := CommitCountBetween(root, from, merge, 500)
+	if err != nil {
+		t.Fatalf("CommitCountBetween: %v", err)
+	}
+	if count != 3 || bounded {
+		t.Errorf("got (%d, %v), want (3, false) — merge, m2, m1 only, never the side-branch commit", count, bounded)
+	}
+}
+
+// TestCommitCountBetween_FromOnlyReachableViaSideBranchIsAnError covers the
+// other half of first-parent-only semantics: a fromSHA that the merge pulled
+// in through its *second* parent, and that the first-parent chain never
+// passes through, must not be silently reported as some count — there is no
+// well-defined "number of commits" for a baseline the tracked branch's own
+// history doesn't contain.
+func TestCommitCountBetween_FromOnlyReachableViaSideBranchIsAnError(t *testing.T) {
+	root := t.TempDir()
+	from := seedInitRepo(t, root)
+	fromHash := plumbing.NewHash(from)
+
+	nextChange(t, root, 1)
+	m2 := nextChange(t, root, 2)
+	side := commitWithParents(t, root, "side branch commit", 100, []plumbing.Hash{fromHash})
+	merge := commitWithParents(t, root, "merge side into mainline", 200,
+		[]plumbing.Hash{plumbing.NewHash(m2), plumbing.NewHash(side)})
+
+	_, _, err := CommitCountBetween(root, side, merge, 500)
+	if err == nil {
+		t.Fatal("CommitCountBetween: want error when fromSHA is reachable only via a non-first parent, got nil")
+	}
 }
 
 func TestCommitCountBetween_SameCommitIsZero(t *testing.T) {

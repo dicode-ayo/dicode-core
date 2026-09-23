@@ -26,8 +26,8 @@ var ErrPending = errors.New("task pending approval")
 
 // commitCountLimit bounds how many commits PendingSnapshot's CommitRange.Commits
 // walk will visit before giving up and reporting a lower bound instead of an
-// exact count (#670) — capping the cost of a large history rather than
-// walking it in full.
+// exact count — capping the cost of a large history rather than walking it
+// in full.
 const commitCountLimit = 500
 
 // ErrHashMismatch is returned (wrapped) by ApproveIfHash when the task's
@@ -64,7 +64,7 @@ type Gate struct {
 	hashFn     func(task.Kinded) (string, error)
 	commitFn   func(task.Kinded) (commit, remote string)
 	treeDiffFn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)
-	// commitCountFn resolves the #670 commit-count decoration — see
+	// commitCountFn resolves the "commits since approval" decoration — see
 	// PendingSnapshot's use of it via commitCount.
 	commitCountFn func(dir, from, to string, limit int) (count int, bounded bool, err error)
 	log           *zap.Logger
@@ -158,14 +158,14 @@ type pendingEntry struct {
 	// generation change. See fileStatusCache's own doc comment for the
 	// sync.Once mechanics this relies on to need no second g.mu acquisition.
 	status *fileStatusCache
-	// commits caches the once-computed "commits since approval" walk (#670)
-	// for this pending generation, the same way status caches the per-file
+	// commits caches the once-computed "commits since approval" walk for
+	// this pending generation, the same way status caches the per-file
 	// tree-diff — see commitCountCache's doc comment.
 	commits *commitCountCache
 }
 
-// commitCountCache holds the once-computed commit-count walk result (#670)
-// for one pending generation, mirroring fileStatusCache: /approve/{token} is
+// commitCountCache holds the once-computed commit-count walk result for one
+// pending generation, mirroring fileStatusCache: /approve/{token} is
 // prefetched by mail clients and chat unfurlers, so any number of renders of
 // the same generation must cost at most one git walk, not one per render.
 type commitCountCache struct {
@@ -225,9 +225,9 @@ func (g *Gate) SetTreeDiffFunc(fn func(dir, from, to string, absPaths []string) 
 	g.treeDiffFn = fn
 }
 
-// SetCommitCountFunc overrides the commit-count resolver used to compute
-// #670's "commits since approval" decoration (tests) — e.g. to fake a large
-// or diverged history without building a real git fixture for it.
+// SetCommitCountFunc overrides the commit-count resolver used to compute the
+// "commits since approval" decoration (tests) — e.g. to fake a large or
+// diverged history without building a real git fixture for it.
 func (g *Gate) SetCommitCountFunc(fn func(dir, from, to string, limit int) (count int, bounded bool, err error)) {
 	g.commitCountFn = fn
 }

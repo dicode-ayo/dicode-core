@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// ── Commit-count decoration (#670) ──────────────────────────────────────────
+// ── Commit-count decoration ──────────────────────────────────────────────────
 //
 // PendingApproval/PendingSnapshot's CommitRange.Commits/CommitsBounded are
 // resolved via g.commitCountFn, capped and cached the same way the per-file

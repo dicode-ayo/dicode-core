@@ -300,7 +300,7 @@ test.describe('Approval review surface', () => {
         new RegExp(`href="https://github\\.com/dicode-ayo/e2e-fixture/compare/[0-9a-f]{40}\\.\\.\\.${head}"`),
       );
 
-      // #670's commit-count decoration: the exact count is not asserted
+      // The commit-count decoration: the exact count is not asserted
       // (the approved-at baseline is shared with, and can be moved by,
       // other tests in this file), but this test just landed one commit
       // since the last approval, so it must report at least one — and, per
