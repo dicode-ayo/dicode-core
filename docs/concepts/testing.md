@@ -355,8 +355,12 @@ runs the resulting image (`docker run --rm` / `podman run --rm`), capturing
 combined stdout+stderr and the container's exit code — the same pass/fail
 signal a shell script's own exit code would give. There is no per-test count
 to parse out of arbitrary container output, so `Passed`/`Failed` stay `0`
-even on success; a non-zero exit code (from either the build or the run) is
-the only failure signal, surfaced via `ExitCode` and `Error`.
+regardless of outcome; `ExitCode` is the pass/fail signal for both build and
+run. `Error` is set only when the *build* fails (nothing could even be
+attempted); a container that built fine and ran to a non-zero exit is a
+legitimate failure, not a crash, and leaves `Error` empty — the same
+distinction `runDeno`/`runPython` draw for an unparseable crash versus a
+cleanly parsed failure.
 
 A task with no `Dockerfile`, or a `Dockerfile` with no stage named `test`,
 gets `ErrNoTestFile` — the same signal a missing `task.test.*` gives for

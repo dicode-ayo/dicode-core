@@ -353,8 +353,9 @@ FROM alpine:3.21 AS build
 `
 
 // TestRun_DockerFailure asserts a container that exits non-zero is reported
-// as a failure via ExitCode + Error, since there is no per-test count to
-// parse from a container's own output.
+// as a failure via ExitCode alone, since there is no per-test count to
+// parse from a container's own output — Error stays empty, since a
+// container that ran and failed is a legitimate result, not a crash.
 func TestRun_DockerFailure(t *testing.T) {
 	dockerBinary(t)
 	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture-fail", failingDockerfile)
@@ -366,8 +367,8 @@ func TestRun_DockerFailure(t *testing.T) {
 	if res.ExitCode != 3 {
 		t.Errorf("ExitCode = %d, want 3\noutput:\n%s", res.ExitCode, res.Output)
 	}
-	if res.Error == "" {
-		t.Error("Error is empty, want non-empty for a non-zero container exit")
+	if res.Error != "" {
+		t.Errorf("Error = %q, want empty — a run that exited non-zero is not a crash", res.Error)
 	}
 	if res.Passed != 0 || res.Failed != 0 {
 		t.Errorf("Passed=%d Failed=%d; want 0/0 — docker/podman are pass/fail-by-exit-code only", res.Passed, res.Failed)
@@ -399,7 +400,7 @@ FROM alpine:3.21 AS build
 
 func TestFindDockerTestStage_NoDockerConfig(t *testing.T) {
 	spec := &task.Spec{TaskDir: t.TempDir(), Runtime: task.RuntimeDocker}
-	_, err := findDockerTestStage(spec)
+	_, _, err := readDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -411,7 +412,7 @@ func TestFindDockerTestStage_NoDockerfile(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findDockerTestStage(spec)
+	_, _, err := readDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -428,7 +429,7 @@ func TestFindDockerTestStage_NoTestStage(t *testing.T) {
 		Runtime: task.RuntimePodman,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findDockerTestStage(spec)
+	_, _, err := readDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -447,9 +448,9 @@ func TestFindDockerTestStage_Found(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	got, err := findDockerTestStage(spec)
+	got, _, err := readDockerTestStage(spec)
 	if err != nil {
-		t.Fatalf("findDockerTestStage: %v", err)
+		t.Fatalf("readDockerTestStage: %v", err)
 	}
 	if filepath.Base(got) != "Dockerfile" {
 		t.Errorf("got %q, want Dockerfile", got)
@@ -470,7 +471,7 @@ func TestFindDockerTestStage_PrefixNameNotMatched(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findDockerTestStage(spec)
+	_, _, err := readDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -490,7 +491,7 @@ func TestFindDockerTestStage_TestStageLast_Rejected(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findDockerTestStage(spec)
+	_, _, err := readDockerTestStage(spec)
 	if err != ErrTestStageLast {
 		t.Errorf("err = %v, want ErrTestStageLast", err)
 	}
@@ -510,9 +511,9 @@ func TestFindDockerTestStage_UnnamedFinalStageNotLast(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	got, err := findDockerTestStage(spec)
+	got, _, err := readDockerTestStage(spec)
 	if err != nil {
-		t.Fatalf("findDockerTestStage: %v", err)
+		t.Fatalf("readDockerTestStage: %v", err)
 	}
 	if filepath.Base(got) != "Dockerfile" {
 		t.Errorf("got %q, want Dockerfile", got)

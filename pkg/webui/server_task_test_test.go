@@ -276,7 +276,7 @@ func TestAPI_TestTask_Timeout(t *testing.T) {
 
 // TestAPI_TestTask_ErroredStatus covers the buildTestTaskResponse "errored"
 // branch. Registers a docker-runtime task with no docker.build config —
-// tasktest.Run's findTestFile has nothing to look for and returns
+// tasktest.Run's readDockerTestStage has nothing to look for and returns
 // ErrNoTestFile, which surfaces as a non-nil runErr with res.ExitCode == 0
 // (no subprocess ran). The handler must return 200 (per #208: 200 on
 // completion regardless) with status set to "errored" and the error message

@@ -107,7 +107,7 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 
 // findTestFile locates the sibling task.test.* for a Deno- or
 // Python-runtime spec. Docker/Podman specs have no such file — callers
-// route those through findDockerTestStage instead.
+// route those through readDockerTestStage instead.
 func findTestFile(spec *task.Spec) (string, error) {
 	// For a Python-runtime spec, only .py is considered — otherwise a stale
 	// task.test.ts left behind in a task dir that was converted to
@@ -179,20 +179,12 @@ func dockerfileHasTestStage(content []byte) bool {
 // the real one.
 var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must not be its last stage")
 
-// findDockerTestStage returns spec's resolved Dockerfile path if it exists
-// and declares a "test" build stage, ErrNoTestFile otherwise (no
+// readDockerTestStage returns spec's resolved Dockerfile path and bytes if
+// it exists and declares a "test" build stage, ErrNoTestFile otherwise (no
 // docker.build config, no Dockerfile, symlinked Dockerfile, or a Dockerfile
 // with no test stage) — the Docker/Podman equivalent of a missing
 // task.test.*. ErrTestStageLast instead if a test stage exists but is the
 // last one declared.
-func findDockerTestStage(spec *task.Spec) (string, error) {
-	path, _, err := readDockerTestStage(spec)
-	return path, err
-}
-
-// readDockerTestStage is findDockerTestStage plus the Dockerfile's bytes,
-// for callers (runContainerTest) that need both and shouldn't re-read the
-// file to get them.
 func readDockerTestStage(spec *task.Spec) (path string, content []byte, err error) {
 	if spec.Docker == nil || spec.Docker.Build == nil {
 		return "", nil, ErrNoTestFile
@@ -459,17 +451,17 @@ func runContainerTest(ctx context.Context, binary string, spec *task.Spec, docke
 		}, nil
 	}
 
+	// A non-zero exit here is a legitimate test failure, not a crash —
+	// Error stays empty, matching runDeno/runPython leaving Error unset for
+	// a cleanly parsed failure. Only a build failure above (nothing could
+	// even be attempted) sets Error.
 	runOutput, runExit, _ := runCaptured(ctx, binPath, "run", "--rm", tag)
-	res := Result{
+	return Result{
 		TaskID:   spec.ID,
 		Runtime:  binary,
 		TestFile: dockerfilePath,
 		Duration: time.Since(start),
 		ExitCode: runExit,
 		Output:   buildOutput + "\n" + runOutput,
-	}
-	if runExit != 0 {
-		res.Error = fmt.Sprintf("%s run exited %d", binary, runExit)
-	}
-	return res, nil
+	}, nil
 }
