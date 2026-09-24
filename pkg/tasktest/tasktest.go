@@ -135,26 +135,45 @@ func findTestFile(spec *task.Spec) (string, error) {
 }
 
 // dockerFromAsRe captures each Dockerfile stage name declared via
-// `FROM <base> AS <name>`.
-var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+\S+\s+AS\s+([A-Za-z0-9_.-]+)`)
+// `FROM [flags] <base> AS <name>` — `.+?` (not `\S+`) so a base image
+// preceded by flag tokens like `--platform=...` still matches.
+var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+.+?\s+AS\s+([A-Za-z0-9_.-]+)`)
+
+// dockerStageNames returns every stage name content declares, in file order.
+func dockerStageNames(content []byte) []string {
+	matches := dockerFromAsRe.FindAllSubmatch(content, -1)
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		names[i] = string(m[1])
+	}
+	return names
+}
 
 // dockerfileHasTestStage reports whether content declares a stage named
 // exactly "test" (case-insensitive) — a stage merely prefixed with it, like
 // "test-utils", doesn't count.
 func dockerfileHasTestStage(content []byte) bool {
-	for _, m := range dockerFromAsRe.FindAllSubmatch(content, -1) {
-		if strings.EqualFold(string(m[1]), "test") {
+	for _, n := range dockerStageNames(content) {
+		if strings.EqualFold(n, "test") {
 			return true
 		}
 	}
 	return false
 }
 
+// ErrTestStageLast signals a Dockerfile whose "test" stage is its last —
+// a plain `docker`/`podman build` with no `--target` (what the production
+// docker and podman runtimes always run) builds the last stage, so a
+// trailing test stage would silently become the deployed image instead of
+// the real one.
+var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must not be its last stage")
+
 // findDockerTestStage returns spec's resolved Dockerfile path if it exists
 // and declares a "test" build stage, ErrNoTestFile otherwise (no
 // docker.build config, no Dockerfile, symlinked Dockerfile, or a Dockerfile
 // with no test stage) — the Docker/Podman equivalent of a missing
-// task.test.*.
+// task.test.*. ErrTestStageLast instead if a test stage exists but is the
+// last one declared.
 func findDockerTestStage(spec *task.Spec) (string, error) {
 	path, _, err := readDockerTestStage(spec)
 	return path, err
@@ -173,8 +192,15 @@ func readDockerTestStage(spec *task.Spec) (path string, content []byte, err erro
 		return "", nil, ErrNoTestFile
 	}
 	b, readErr := os.ReadFile(dockerfilePath)
-	if readErr != nil || !dockerfileHasTestStage(b) {
+	if readErr != nil {
 		return "", nil, ErrNoTestFile
+	}
+	if !dockerfileHasTestStage(b) {
+		return "", nil, ErrNoTestFile
+	}
+	names := dockerStageNames(b)
+	if strings.EqualFold(names[len(names)-1], "test") {
+		return "", nil, ErrTestStageLast
 	}
 	return dockerfilePath, b, nil
 }

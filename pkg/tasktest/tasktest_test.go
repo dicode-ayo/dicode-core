@@ -316,10 +316,10 @@ func dockerBinary(t *testing.T) string {
 	return path
 }
 
-const passingDockerfile = `FROM alpine:3.21 AS build
-
-FROM build AS test
+const passingDockerfile = `FROM alpine:3.21 AS test
 CMD ["sh", "-c", "echo dicode tasktest ok"]
+
+FROM alpine:3.21 AS build
 `
 
 // TestRun_Docker builds a minimal two-stage Dockerfile's "test" stage and
@@ -346,10 +346,10 @@ func TestRun_Docker(t *testing.T) {
 	}
 }
 
-const failingDockerfile = `FROM alpine:3.21 AS build
-
-FROM build AS test
+const failingDockerfile = `FROM alpine:3.21 AS test
 CMD ["sh", "-c", "echo failing on purpose; exit 3"]
+
+FROM alpine:3.21 AS build
 `
 
 // TestRun_DockerFailure asserts a container that exits non-zero is reported
@@ -379,10 +379,10 @@ func TestRun_DockerFailure(t *testing.T) {
 // ExitCode + Error, without attempting to run anything.
 func TestRun_DockerBuildFailure(t *testing.T) {
 	dockerBinary(t)
-	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture-buildfail", `FROM alpine:3.21 AS build
-
-FROM build AS test
+	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture-buildfail", `FROM alpine:3.21 AS test
 RUN this-command-does-not-exist
+
+FROM alpine:3.21 AS build
 `)
 
 	res, err := Run(context.Background(), spec)
@@ -436,7 +436,7 @@ func TestFindDockerTestStage_NoTestStage(t *testing.T) {
 
 func TestFindDockerTestStage_Found(t *testing.T) {
 	dir := t.TempDir()
-	content := "FROM alpine:3.21 as build\n\nFROM build as test\nCMD [\"true\"]\n"
+	content := "FROM alpine:3.21 as test\nCMD [\"true\"]\n\nFROM alpine:3.21 as build\n"
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +473,35 @@ func TestFindDockerTestStage_PrefixNameNotMatched(t *testing.T) {
 	_, err := findTestFile(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+// TestFindDockerTestStage_TestStageLast_Rejected: a Dockerfile whose "test"
+// stage is its last is rejected with ErrTestStageLast, not accepted — a
+// plain production build with no --target would default to it.
+func TestFindDockerTestStage_TestStageLast_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM alpine:3.21 AS build\n\nFROM build AS test\nCMD [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, err := findTestFile(spec)
+	if err != ErrTestStageLast {
+		t.Errorf("err = %v, want ErrTestStageLast", err)
+	}
+}
+
+// TestDockerfileHasTestStage_PlatformFlag asserts a FROM clause with a
+// --platform flag before the base image is still recognised.
+func TestDockerfileHasTestStage_PlatformFlag(t *testing.T) {
+	content := []byte("FROM --platform=linux/amd64 golang:1.22 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a FROM clause with a --platform flag")
 	}
 }
 

@@ -1,11 +1,8 @@
-# dicode task test builds and runs this stage explicitly (--target test).
-# It comes before `build` in this file so a build with no --target — the
-# production runtime's own build — still gets `build`, the file's last
-# stage, as the default; a test stage placed last would silently become the
-# production image instead. Built separately rather than FROM build, so it
-# needs no package install: curl isn't installed here, so greet.sh's
-# curl-version line reports "not found" in the captured output — expected,
-# and only the greeting line below is asserted on.
+# Built and run by dicode task test (--target test). A plain build (no
+# --target, what production uses) defaults to the file's last stage, so
+# this stage must not be last. curl isn't installed here, so greet.sh's
+# curl-version line reports "not found" in the output — only the greeting
+# text below is checked.
 FROM alpine:3.21 AS test
 COPY greet.sh /greet.sh
 RUN chmod +x /greet.sh
