@@ -322,10 +322,8 @@ FROM build AS test
 CMD ["sh", "-c", "echo dicode tasktest ok"]
 `
 
-// TestRun_Docker is the regression-coverage test for #159 Phase 3: before
-// this change, a docker-runtime spec always returned ErrUnsupportedRuntime.
-// It builds a minimal two-stage Dockerfile's "test" stage and runs it
-// through the real docker binary end-to-end.
+// TestRun_Docker builds a minimal two-stage Dockerfile's "test" stage and
+// runs it through the real docker binary end-to-end.
 func TestRun_Docker(t *testing.T) {
 	dockerBinary(t)
 	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture", passingDockerfile)
@@ -458,6 +456,26 @@ func TestFindDockerTestStage_Found(t *testing.T) {
 	}
 }
 
+// TestFindDockerTestStage_PrefixNameNotMatched asserts a stage merely
+// prefixed with "test" (e.g. "test-utils") doesn't count as the required
+// test stage.
+func TestFindDockerTestStage_PrefixNameNotMatched(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM golang:1.21 AS test-utils\nCMD [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, err := findTestFile(spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
 // TestRun_Docker_NoTestStage pins the Run()-level behavior (not just the
 // finder's): a docker-runtime task whose Dockerfile has no test stage
 // reports ErrNoTestFile, the same signal a missing task.test.* gives for
@@ -472,10 +490,7 @@ func TestRun_Docker_NoTestStage(t *testing.T) {
 }
 
 // TestRun_Docker_HelloDockerExample drives the real
-// tasks/examples/hello-docker task through tasktest.Run — the buildin
-// example this package's Docker harness is exercised against (#159 Phase 3
-// acceptance: at least one buildin task with a passing test through the
-// Docker harness).
+// tasks/examples/hello-docker task through tasktest.Run.
 func TestRun_Docker_HelloDockerExample(t *testing.T) {
 	dockerBinary(t)
 	spec, err := task.LoadDir("../../tasks/examples/hello-docker")

@@ -69,6 +69,22 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return Result{}, fmt.Errorf("tasktest: spec or TaskDir is empty")
 	}
 
+	// Docker/Podman are handled up front: runContainerTest needs the
+	// Dockerfile's bytes (for the image tag hash), and readDockerTestStage
+	// already reads them while checking for the test stage — routing through
+	// the generic findTestFile below would mean reading the file twice.
+	if spec.Runtime == task.RuntimeDocker || spec.Runtime == task.RuntimePodman {
+		dockerfilePath, content, err := readDockerTestStage(spec)
+		if err != nil {
+			return Result{TaskID: spec.ID}, err
+		}
+		binary := "docker"
+		if spec.Runtime == task.RuntimePodman {
+			binary = "podman"
+		}
+		return runContainerTest(ctx, binary, spec, dockerfilePath, content)
+	}
+
 	testFile, err := findTestFile(spec)
 	if err != nil {
 		return Result{TaskID: spec.ID}, err
@@ -84,10 +100,6 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return runDeno(ctx, spec, testFile)
 	case runtimePython:
 		return runPython(ctx, spec, testFile)
-	case task.RuntimeDocker:
-		return runContainerTest(ctx, "docker", spec, testFile)
-	case task.RuntimePodman:
-		return runContainerTest(ctx, "podman", spec, testFile)
 	default:
 		return Result{TaskID: spec.ID, Runtime: string(spec.Runtime), TestFile: testFile},
 			&ErrUnsupportedRuntime{Runtime: string(spec.Runtime)}
@@ -122,9 +134,21 @@ func findTestFile(spec *task.Spec) (string, error) {
 	return "", ErrNoTestFile
 }
 
-// dockerTestStageRe matches a Dockerfile build stage named "test"
-// (`FROM <base> AS test`), the convention findDockerTestStage requires.
-var dockerTestStageRe = regexp.MustCompile(`(?im)^\s*FROM\s+\S+\s+AS\s+test\b`)
+// dockerFromAsRe captures each Dockerfile stage name declared via
+// `FROM <base> AS <name>`.
+var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+\S+\s+AS\s+([A-Za-z0-9_.-]+)`)
+
+// dockerfileHasTestStage reports whether content declares a stage named
+// exactly "test" (case-insensitive) — a stage merely prefixed with it, like
+// "test-utils", doesn't count.
+func dockerfileHasTestStage(content []byte) bool {
+	for _, m := range dockerFromAsRe.FindAllSubmatch(content, -1) {
+		if strings.EqualFold(string(m[1]), "test") {
+			return true
+		}
+	}
+	return false
+}
 
 // findDockerTestStage returns spec's resolved Dockerfile path if it exists
 // and declares a "test" build stage, ErrNoTestFile otherwise (no
@@ -132,19 +156,27 @@ var dockerTestStageRe = regexp.MustCompile(`(?im)^\s*FROM\s+\S+\s+AS\s+test\b`)
 // with no test stage) — the Docker/Podman equivalent of a missing
 // task.test.*.
 func findDockerTestStage(spec *task.Spec) (string, error) {
+	path, _, err := readDockerTestStage(spec)
+	return path, err
+}
+
+// readDockerTestStage is findDockerTestStage plus the Dockerfile's bytes,
+// for callers (runContainerTest) that need both and shouldn't re-read the
+// file to get them.
+func readDockerTestStage(spec *task.Spec) (path string, content []byte, err error) {
 	if spec.Docker == nil || spec.Docker.Build == nil {
-		return "", ErrNoTestFile
+		return "", nil, ErrNoTestFile
 	}
 	dockerfilePath, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
-	fi, err := os.Lstat(dockerfilePath)
-	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
-		return "", ErrNoTestFile
+	fi, statErr := os.Lstat(dockerfilePath)
+	if statErr != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return "", nil, ErrNoTestFile
 	}
-	content, err := os.ReadFile(dockerfilePath)
-	if err != nil || !dockerTestStageRe.Match(content) {
-		return "", ErrNoTestFile
+	b, readErr := os.ReadFile(dockerfilePath)
+	if readErr != nil || !dockerfileHasTestStage(b) {
+		return "", nil, ErrNoTestFile
 	}
-	return dockerfilePath, nil
+	return dockerfilePath, b, nil
 }
 
 // denoSummaryRe matches Deno 2.x's summary line:
@@ -366,18 +398,13 @@ func parsePytestSummary(output string) (passed, failed, skipped int) {
 // The test container gets none of docker.*'s host config (ports, volumes,
 // caps, network mode) — this isn't a fire path, and a test image built from
 // the "test" stage isn't expected to need them.
-func runContainerTest(ctx context.Context, binary string, spec *task.Spec, dockerfilePath string) (Result, error) {
+func runContainerTest(ctx context.Context, binary string, spec *task.Spec, dockerfilePath string, content []byte) (Result, error) {
 	binPath, err := exec.LookPath(binary)
 	if err != nil {
 		return Result{TaskID: spec.ID, Runtime: binary, TestFile: dockerfilePath, Error: err.Error()},
 			fmt.Errorf("tasktest: %s not found in PATH: %w", binary, err)
 	}
 
-	content, err := os.ReadFile(dockerfilePath)
-	if err != nil {
-		return Result{TaskID: spec.ID, Runtime: binary, TestFile: dockerfilePath, Error: err.Error()},
-			fmt.Errorf("tasktest: read Dockerfile: %w", err)
-	}
 	_, contextDir := spec.Docker.Build.ResolvePaths(spec.TaskDir)
 	// "test-" prefixed tag keeps a test build's image distinct from the
 	// production image imagegc.Tag would compute for the same Dockerfile

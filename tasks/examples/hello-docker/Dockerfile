@@ -8,8 +8,9 @@ RUN chmod +x /greet.sh
 ENTRYPOINT ["/greet.sh"]
 
 # dicode task test builds and runs this stage. Built separately rather than
-# FROM build: it only checks greet.sh's own output, which needs no package
-# install to build or run, unlike the build stage's apk add.
+# FROM build, so it needs no package install: curl isn't installed here, so
+# greet.sh's curl-version line reports "not found" in the captured output —
+# expected, and only the greeting line below is asserted on.
 FROM alpine:3.21 AS test
 COPY greet.sh /greet.sh
 RUN chmod +x /greet.sh
