@@ -69,10 +69,9 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return Result{}, fmt.Errorf("tasktest: spec or TaskDir is empty")
 	}
 
-	// Docker/Podman are handled up front: runContainerTest needs the
-	// Dockerfile's bytes (for the image tag hash), and readDockerTestStage
-	// already reads them while checking for the test stage — routing through
-	// the generic findTestFile below would mean reading the file twice.
+	// Docker/Podman go through readDockerTestStage, not findTestFile below:
+	// it returns both the Dockerfile path and its already-read bytes, which
+	// runContainerTest needs for the image tag hash.
 	if spec.Runtime == task.RuntimeDocker || spec.Runtime == task.RuntimePodman {
 		dockerfilePath, content, err := readDockerTestStage(spec)
 		if err != nil {
@@ -106,13 +105,10 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 	}
 }
 
-// findTestFile locates spec's test: a sibling task.test.* for Deno/Python,
-// or the Dockerfile itself for Docker/Podman (see findDockerTestStage).
+// findTestFile locates the sibling task.test.* for a Deno- or
+// Python-runtime spec. Docker/Podman specs have no such file — callers
+// route those through findDockerTestStage instead.
 func findTestFile(spec *task.Spec) (string, error) {
-	if spec.Runtime == task.RuntimeDocker || spec.Runtime == task.RuntimePodman {
-		return findDockerTestStage(spec)
-	}
-
 	// For a Python-runtime spec, only .py is considered — otherwise a stale
 	// task.test.ts left behind in a task dir that was converted to
 	// runtime: python would silently shadow the real task.test.py and get run
@@ -134,10 +130,14 @@ func findTestFile(spec *task.Spec) (string, error) {
 	return "", ErrNoTestFile
 }
 
-// dockerFromAsRe captures each Dockerfile stage name declared via
-// `FROM [flags] <base> AS <name>` — `.+?` (not `\S+`) so a base image
-// preceded by flag tokens like `--platform=...` still matches.
-var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+.+?\s+AS\s+([A-Za-z0-9_.-]+)`)
+// dockerFromRe matches every Dockerfile FROM instruction line, capturing
+// its remainder (base image reference, plus an optional trailing
+// `AS <name>`).
+var dockerFromRe = regexp.MustCompile(`(?im)^\s*FROM\s+(.+?)\s*$`)
+
+// dockerStageAsRe extracts a trailing `AS <name>` from a FROM line's
+// remainder.
+var dockerStageAsRe = regexp.MustCompile(`(?i)\s+AS\s+([A-Za-z0-9_.-]+)$`)
 
 // dockerLineContinuationRe matches a Dockerfile backslash-newline
 // continuation, joining a directive written across multiple physical lines
@@ -145,13 +145,17 @@ var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+.+?\s+AS\s+([A-Za-z0-9_
 // parser itself does.
 var dockerLineContinuationRe = regexp.MustCompile(`\\\r?\n[ \t]*`)
 
-// dockerStageNames returns every stage name content declares, in file order.
+// dockerStageNames returns the name of every stage content declares, in
+// file order — "" for a stage with no `AS <name>` (an unnamed final stage
+// is ordinary and still counts as a stage for ordering purposes).
 func dockerStageNames(content []byte) []string {
 	joined := dockerLineContinuationRe.ReplaceAll(content, []byte(" "))
-	matches := dockerFromAsRe.FindAllSubmatch(joined, -1)
-	names := make([]string, len(matches))
-	for i, m := range matches {
-		names[i] = string(m[1])
+	lines := dockerFromRe.FindAllSubmatch(joined, -1)
+	names := make([]string, len(lines))
+	for i, l := range lines {
+		if m := dockerStageAsRe.FindSubmatch(l[1]); m != nil {
+			names[i] = string(m[1])
+		}
 	}
 	return names
 }

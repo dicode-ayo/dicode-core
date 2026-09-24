@@ -399,7 +399,7 @@ FROM alpine:3.21 AS build
 
 func TestFindDockerTestStage_NoDockerConfig(t *testing.T) {
 	spec := &task.Spec{TaskDir: t.TempDir(), Runtime: task.RuntimeDocker}
-	_, err := findTestFile(spec)
+	_, err := findDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -411,7 +411,7 @@ func TestFindDockerTestStage_NoDockerfile(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findTestFile(spec)
+	_, err := findDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -428,7 +428,7 @@ func TestFindDockerTestStage_NoTestStage(t *testing.T) {
 		Runtime: task.RuntimePodman,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findTestFile(spec)
+	_, err := findDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -447,9 +447,9 @@ func TestFindDockerTestStage_Found(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	got, err := findTestFile(spec)
+	got, err := findDockerTestStage(spec)
 	if err != nil {
-		t.Fatalf("findTestFile: %v", err)
+		t.Fatalf("findDockerTestStage: %v", err)
 	}
 	if filepath.Base(got) != "Dockerfile" {
 		t.Errorf("got %q, want Dockerfile", got)
@@ -470,7 +470,7 @@ func TestFindDockerTestStage_PrefixNameNotMatched(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findTestFile(spec)
+	_, err := findDockerTestStage(spec)
 	if err != ErrNoTestFile {
 		t.Errorf("err = %v, want ErrNoTestFile", err)
 	}
@@ -490,9 +490,32 @@ func TestFindDockerTestStage_TestStageLast_Rejected(t *testing.T) {
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
 	}
-	_, err := findTestFile(spec)
+	_, err := findDockerTestStage(spec)
 	if err != ErrTestStageLast {
 		t.Errorf("err = %v, want ErrTestStageLast", err)
+	}
+}
+
+// TestFindDockerTestStage_UnnamedFinalStageNotLast asserts a "test" stage
+// followed by an unnamed final stage isn't flagged as last — an unnamed
+// stage still counts for ordering purposes.
+func TestFindDockerTestStage_UnnamedFinalStageNotLast(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM alpine:3.21 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21\nRUN echo prod\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	got, err := findDockerTestStage(spec)
+	if err != nil {
+		t.Fatalf("findDockerTestStage: %v", err)
+	}
+	if filepath.Base(got) != "Dockerfile" {
+		t.Errorf("got %q, want Dockerfile", got)
 	}
 }
 
