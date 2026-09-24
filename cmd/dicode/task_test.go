@@ -780,3 +780,24 @@ func (r *recordingAuthoring) EditTask(ctx context.Context, sessionID, taskID str
 	r.editSession, r.editTask = sessionID, taskID
 	return r.fakeAuthoring.EditTask(ctx, sessionID, taskID)
 }
+
+func TestTaskTestExitNote(t *testing.T) {
+	cases := []struct {
+		name                     string
+		passed, failed, exitCode int
+		want                     string
+	}{
+		{"docker failure, no summary", 0, 0, 3, ", exit code 3"},
+		{"docker success, no summary", 0, 0, 0, ""},
+		{"deno failure, parsed summary", 2, 1, 1, ""},
+		{"deno crash, no summary", 0, 0, 1, ", exit code 1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := taskTestExitNote(tc.passed, tc.failed, tc.exitCode)
+			if got != tc.want {
+				t.Errorf("taskTestExitNote(%d,%d,%d) = %q, want %q", tc.passed, tc.failed, tc.exitCode, got, tc.want)
+			}
+		})
+	}
+}

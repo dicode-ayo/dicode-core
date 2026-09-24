@@ -346,7 +346,9 @@ test` appended at the bottom) would make the production runtime silently
 build and run the test stage instead of the real one, so `pkg/tasktest`
 rejects it outright (`ErrTestStageLast`) rather than treating it as a valid
 test stage. Put `test` before whichever stage the production runtime should
-build.
+build. Avoid building a later stage `FROM test`, too — it inherits `test`'s
+`CMD`/`ENTRYPOINT`, so a stage that's merely *named* something other than
+`test` can still end up running the test payload in production.
 
 `dicode task test` builds the `test` stage explicitly (`docker build
 --target test` / `podman build --target test`, scoped to the same build context the runtime
