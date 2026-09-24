@@ -338,14 +338,15 @@ RUN chmod +x /app.sh
 ENTRYPOINT ["/app.sh"]
 ```
 
-**Stage order matters.** Neither the Docker nor the Podman production
-runtime ever passes `--target` when it builds a task's image — a plain
-`docker build`/`podman build` always builds the *last* stage in the file. If
-`test` were the last stage (e.g. `FROM build AS test` appended at the
-bottom), the production runtime would silently start building and running
-the test stage instead of the real one. Put `test` before whichever stage
-the production runtime should build, or make sure that stage stays last
-regardless of where `test` is declared.
+**`test` must not be the Dockerfile's last stage.** Neither the Docker nor
+the Podman production runtime ever passes `--target` when it builds a
+task's image — a plain `docker build`/`podman build` always builds the
+*last* stage in the file. A `test` stage declared last (e.g. `FROM build AS
+test` appended at the bottom) would make the production runtime silently
+build and run the test stage instead of the real one, so `pkg/tasktest`
+rejects it outright (`ErrTestStageLast`) rather than treating it as a valid
+test stage. Put `test` before whichever stage the production runtime should
+build.
 
 `dicode task test` builds the `test` stage explicitly (`docker build
 --target test` / `podman build --target test`, scoped to the same build context the runtime
