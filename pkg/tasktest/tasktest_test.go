@@ -539,6 +539,15 @@ func TestDockerfileHasTestStage_LineContinuation(t *testing.T) {
 	}
 }
 
+// TestDockerfileHasTestStage_TrailingComment asserts a FROM...AS line
+// followed by a "# comment" still resolves the stage name correctly.
+func TestDockerfileHasTestStage_TrailingComment(t *testing.T) {
+	content := []byte("FROM alpine:3.21 AS test  # runs assertions\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a FROM...AS line with a trailing comment")
+	}
+}
+
 // TestRun_Docker_NoTestStage pins the Run()-level behavior (not just the
 // finder's): a docker-runtime task whose Dockerfile has no test stage
 // reports ErrNoTestFile, the same signal a missing task.test.* gives for

@@ -136,8 +136,8 @@ func findTestFile(spec *task.Spec) (string, error) {
 var dockerFromRe = regexp.MustCompile(`(?im)^\s*FROM\s+(.+?)\s*$`)
 
 // dockerStageAsRe extracts a trailing `AS <name>` from a FROM line's
-// remainder.
-var dockerStageAsRe = regexp.MustCompile(`(?i)\s+AS\s+([A-Za-z0-9_.-]+)$`)
+// remainder, tolerating a trailing `# comment`.
+var dockerStageAsRe = regexp.MustCompile(`(?i)\s+AS\s+([A-Za-z0-9_.-]+)\s*(?:#.*)?$`)
 
 // dockerLineContinuationRe matches a Dockerfile backslash-newline
 // continuation, joining a directive written across multiple physical lines
