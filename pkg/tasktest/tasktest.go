@@ -139,9 +139,16 @@ func findTestFile(spec *task.Spec) (string, error) {
 // preceded by flag tokens like `--platform=...` still matches.
 var dockerFromAsRe = regexp.MustCompile(`(?im)^\s*FROM\s+.+?\s+AS\s+([A-Za-z0-9_.-]+)`)
 
+// dockerLineContinuationRe matches a Dockerfile backslash-newline
+// continuation, joining a directive written across multiple physical lines
+// back into one before stage parsing — the same joining the Dockerfile
+// parser itself does.
+var dockerLineContinuationRe = regexp.MustCompile(`\\\r?\n[ \t]*`)
+
 // dockerStageNames returns every stage name content declares, in file order.
 func dockerStageNames(content []byte) []string {
-	matches := dockerFromAsRe.FindAllSubmatch(content, -1)
+	joined := dockerLineContinuationRe.ReplaceAll(content, []byte(" "))
+	matches := dockerFromAsRe.FindAllSubmatch(joined, -1)
 	names := make([]string, len(matches))
 	for i, m := range matches {
 		names[i] = string(m[1])

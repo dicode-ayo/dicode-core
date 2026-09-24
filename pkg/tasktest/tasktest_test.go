@@ -505,6 +505,16 @@ func TestDockerfileHasTestStage_PlatformFlag(t *testing.T) {
 	}
 }
 
+// TestDockerfileHasTestStage_LineContinuation asserts a FROM clause
+// wrapped across multiple physical lines with backslash continuations is
+// still recognised as declaring a test stage.
+func TestDockerfileHasTestStage_LineContinuation(t *testing.T) {
+	content := []byte("FROM --platform=linux/amd64 \\\n    golang:1.22 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a line-continued FROM clause")
+	}
+}
+
 // TestRun_Docker_NoTestStage pins the Run()-level behavior (not just the
 // finder's): a docker-runtime task whose Dockerfile has no test stage
 // reports ErrNoTestFile, the same signal a missing task.test.* gives for
