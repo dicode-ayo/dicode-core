@@ -1,9 +1,7 @@
-// Package tasktest runs a task's sibling test file (task.test.ts / .js /
-// .mjs / .py) through the appropriate runtime and returns a structured
-// result.
-//
-// Phase 2 (#159) adds Python (via uv + pytest) alongside the Phase 1 Deno
-// support. Docker and Podman remain unsupported — see issue #159 Phase 3.
+// Package tasktest runs a task's test through the appropriate runtime and
+// returns a structured result: a sibling task.test.ts/.js/.mjs/.py for Deno
+// and Python, or the task's own Dockerfile "test" build stage for Docker
+// and Podman.
 package tasktest
 
 import (
@@ -20,6 +18,7 @@ import (
 
 	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/deno"
+	"github.com/dicode/dicode/pkg/runtime/imagegc"
 	"github.com/dicode/dicode/pkg/task"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
 )
@@ -54,8 +53,7 @@ type Result struct {
 var ErrNoTestFile = fmt.Errorf("task has no test file")
 
 // ErrUnsupportedRuntime signals a task whose runtime this package doesn't
-// yet cover. Phase 2 handles Deno and Python; Docker and Podman remain
-// unsupported (#159 Phase 3).
+// cover: Deno, Python, Docker and Podman are the only ones it knows.
 type ErrUnsupportedRuntime struct{ Runtime string }
 
 func (e *ErrUnsupportedRuntime) Error() string {
@@ -86,22 +84,31 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return runDeno(ctx, spec, testFile)
 	case runtimePython:
 		return runPython(ctx, spec, testFile)
+	case task.RuntimeDocker:
+		return runContainerTest(ctx, "docker", spec, testFile)
+	case task.RuntimePodman:
+		return runContainerTest(ctx, "podman", spec, testFile)
 	default:
 		return Result{TaskID: spec.ID, Runtime: string(spec.Runtime), TestFile: testFile},
 			&ErrUnsupportedRuntime{Runtime: string(spec.Runtime)}
 	}
 }
 
-// findTestFile picks the first task.test.* that exists in the task dir.
-// For a Python-runtime spec, only .py is considered — otherwise a stale
-// task.test.ts left behind in a task dir that was converted to
-// runtime: python would silently shadow the real task.test.py and get run
-// through the wrong runtime. For every other runtime (including unset/""),
-// the Deno/TS extensions are checked first (matching the priority order used
-// by pkg/task.ScriptPath, ts-preferred-over-js), with .py checked last as a
-// defensive fallback for hand-constructed specs. Symlinks are rejected to
-// stay consistent with the production script-path policy.
+// findTestFile locates spec's test: a sibling task.test.* for Deno/Python,
+// or the Dockerfile itself for Docker/Podman (see findDockerTestStage).
 func findTestFile(spec *task.Spec) (string, error) {
+	if spec.Runtime == task.RuntimeDocker || spec.Runtime == task.RuntimePodman {
+		return findDockerTestStage(spec)
+	}
+
+	// For a Python-runtime spec, only .py is considered — otherwise a stale
+	// task.test.ts left behind in a task dir that was converted to
+	// runtime: python would silently shadow the real task.test.py and get run
+	// through the wrong runtime. For every other runtime (including unset/""),
+	// the Deno/TS extensions are checked first (matching the priority order used
+	// by pkg/task.ScriptPath, ts-preferred-over-js), with .py checked last as a
+	// defensive fallback for hand-constructed specs. Symlinks are rejected to
+	// stay consistent with the production script-path policy.
 	exts := []string{".ts", ".js", ".mjs", ".py"}
 	if spec.Runtime == runtimePython {
 		exts = []string{".py"}
@@ -113,6 +120,31 @@ func findTestFile(spec *task.Spec) (string, error) {
 		}
 	}
 	return "", ErrNoTestFile
+}
+
+// dockerTestStageRe matches a Dockerfile build stage named "test"
+// (`FROM <base> AS test`), the convention findDockerTestStage requires.
+var dockerTestStageRe = regexp.MustCompile(`(?im)^\s*FROM\s+\S+\s+AS\s+test\b`)
+
+// findDockerTestStage returns spec's resolved Dockerfile path if it exists
+// and declares a "test" build stage, ErrNoTestFile otherwise (no
+// docker.build config, no Dockerfile, symlinked Dockerfile, or a Dockerfile
+// with no test stage) — the Docker/Podman equivalent of a missing
+// task.test.*.
+func findDockerTestStage(spec *task.Spec) (string, error) {
+	if spec.Docker == nil || spec.Docker.Build == nil {
+		return "", ErrNoTestFile
+	}
+	dockerfilePath, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
+	fi, err := os.Lstat(dockerfilePath)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return "", ErrNoTestFile
+	}
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil || !dockerTestStageRe.Match(content) {
+		return "", ErrNoTestFile
+	}
+	return dockerfilePath, nil
 }
 
 // denoSummaryRe matches Deno 2.x's summary line:
@@ -322,4 +354,62 @@ func parsePytestSummary(output string) (passed, failed, skipped int) {
 		return
 	}
 	return
+}
+
+// runContainerTest builds dockerfilePath's "test" stage and runs the
+// resulting image via the docker or podman CLI (binary picks which),
+// capturing combined stdout+stderr and the exit code the same way
+// runCaptured does for Deno/Python. Neither engine's CLI output carries a
+// parseable per-test summary, so Passed/Failed/Skipped stay zero — ExitCode
+// and Output (plus Error on a non-zero exit) are the only signal.
+//
+// The test container gets none of docker.*'s host config (ports, volumes,
+// caps, network mode) — this isn't a fire path, and a test image built from
+// the "test" stage isn't expected to need them.
+func runContainerTest(ctx context.Context, binary string, spec *task.Spec, dockerfilePath string) (Result, error) {
+	binPath, err := exec.LookPath(binary)
+	if err != nil {
+		return Result{TaskID: spec.ID, Runtime: binary, TestFile: dockerfilePath, Error: err.Error()},
+			fmt.Errorf("tasktest: %s not found in PATH: %w", binary, err)
+	}
+
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		return Result{TaskID: spec.ID, Runtime: binary, TestFile: dockerfilePath, Error: err.Error()},
+			fmt.Errorf("tasktest: read Dockerfile: %w", err)
+	}
+	_, contextDir := spec.Docker.Build.ResolvePaths(spec.TaskDir)
+	// "test-" prefixed tag keeps a test build's image distinct from the
+	// production image imagegc.Tag would compute for the same Dockerfile
+	// (different --target, same content hash); both share the "dicode-<id>"
+	// repository so imagegc still reclaims orphaned test images.
+	tag := imagegc.Repository(spec.ID) + ":test-" + imagegc.TagSuffix(content)
+
+	start := time.Now()
+	buildOutput, buildExit, _ := runCaptured(ctx, binPath, "build", "--target", "test", "-t", tag, "-f", dockerfilePath, contextDir)
+	if buildExit != 0 {
+		return Result{
+			TaskID:   spec.ID,
+			Runtime:  binary,
+			TestFile: dockerfilePath,
+			Duration: time.Since(start),
+			ExitCode: buildExit,
+			Output:   buildOutput,
+			Error:    fmt.Sprintf("%s build --target test exited %d", binary, buildExit),
+		}, nil
+	}
+
+	runOutput, runExit, _ := runCaptured(ctx, binPath, "run", "--rm", tag)
+	res := Result{
+		TaskID:   spec.ID,
+		Runtime:  binary,
+		TestFile: dockerfilePath,
+		Duration: time.Since(start),
+		ExitCode: runExit,
+		Output:   buildOutput + "\n" + runOutput,
+	}
+	if runExit != 0 {
+		res.Error = fmt.Sprintf("%s run exited %d", binary, runExit)
+	}
+	return res, nil
 }
