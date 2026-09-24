@@ -406,11 +406,7 @@ func runContainerTest(ctx context.Context, binary string, spec *task.Spec, docke
 	}
 
 	_, contextDir := spec.Docker.Build.ResolvePaths(spec.TaskDir)
-	// "test-" prefixed tag keeps a test build's image distinct from the
-	// production image imagegc.Tag would compute for the same Dockerfile
-	// (different --target, same content hash); both share the "dicode-<id>"
-	// repository so imagegc still reclaims orphaned test images.
-	tag := imagegc.Repository(spec.ID) + ":test-" + imagegc.TagSuffix(content)
+	tag := imagegc.TestTag(spec.ID, content)
 
 	start := time.Now()
 	buildOutput, buildExit, _ := runCaptured(ctx, binPath, "build", "--target", "test", "-t", tag, "-f", dockerfilePath, contextDir)

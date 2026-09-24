@@ -327,17 +327,28 @@ mock harness — a container test runs the actual built image, so mocking
 Instead, the task's own `Dockerfile` declares a build stage named `test`:
 
 ```dockerfile
+FROM alpine:3.21 AS test
+COPY app.sh /app.sh
+RUN chmod +x /app.sh
+CMD ["sh", "-c", "/app.sh | grep -q 'expected output'"]
+
 FROM alpine:3.21 AS build
 COPY app.sh /app.sh
 RUN chmod +x /app.sh
 ENTRYPOINT ["/app.sh"]
-
-FROM build AS test
-CMD ["sh", "-c", "/app.sh | grep -q 'expected output'"]
 ```
 
-`dicode task test` builds this stage (`docker build --target test` /
-`podman build --target test`, scoped to the same build context the runtime
+**Stage order matters.** Neither the Docker nor the Podman production
+runtime ever passes `--target` when it builds a task's image — a plain
+`docker build`/`podman build` always builds the *last* stage in the file. If
+`test` were the last stage (e.g. `FROM build AS test` appended at the
+bottom), the production runtime would silently start building and running
+the test stage instead of the real one. Put `test` before whichever stage
+the production runtime should build, or make sure that stage stays last
+regardless of where `test` is declared.
+
+`dicode task test` builds the `test` stage explicitly (`docker build
+--target test` / `podman build --target test`, scoped to the same build context the runtime
 itself resolves via `docker.build.dockerfile`/`docker.build.context`) and
 runs the resulting image (`docker run --rm` / `podman run --rm`), capturing
 combined stdout+stderr and the container's exit code — the same pass/fail
