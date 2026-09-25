@@ -1,21 +1,23 @@
 # Testing & Validation
 
 > **Status**: This document describes the testing and validation system. Layer 2
-> (`dicode task test`) is implemented for the Deno and Python runtimes:
-> `pkg/tasktest` drives `deno test` (Deno) or `uv run` + pytest (Python) and
-> parses each runtime's summary output. `tasks/sdk-test.ts` (Deno) and
-> `tasks/sdk_test.py` (Python) provide real (opt-in) mock harnesses —
-> `params`/`env`/`kv`/HTTP mocking/`runTask()`|`run_task()` — used by this
-> repo's built-in and example tasks. Docker and Podman are **not yet
-> supported** (tracked as Phase 3 of [#159](https://github.com/dicode-ayo/dicode-core/issues/159)).
-> Layer 1 (`dicode task validate`), Layer 3 (`dicode run --dry-run`), and
-> `dicode ci init` remain planned.
+> (`dicode task test`) is implemented for all four runtimes: `pkg/tasktest`
+> drives `deno test` (Deno), `uv run` + pytest (Python), or a
+> `docker build --target test` + `docker run` / `podman build --target test`
+> + `podman run` (Docker/Podman) and reports the result. `tasks/sdk-test.ts`
+> (Deno) and `tasks/sdk_test.py` (Python) provide real (opt-in) mock
+> harnesses — `params`/`env`/`kv`/HTTP mocking/`runTask()`|`run_task()` —
+> used by this repo's built-in and example tasks; Docker/Podman have no
+> mocking layer, since a container test runs the built image itself (see
+> [Docker & Podman](#docker--podman) below). Layer 1 (`dicode task
+> validate`), Layer 3 (`dicode run --dry-run`), and `dicode ci init` remain
+> planned.
 
 Dicode is designed with four validation layers, each catching different classes of problems.
 
 ```text
 Layer 1: Static validation     — schema + syntax, zero execution, instant        [planned]
-Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno, Python]
+Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno, Python, Docker, Podman]
 Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects  [planned]
 Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe           [partial: see CI job below]
 ```
@@ -56,13 +58,16 @@ dicode task test --all                      # planned — <id> is currently requ
 dicode task test <id> --watch               # planned — re-run on file save
 ```
 
-Runs the task's sibling `task.test.*` through its runtime's test runner:
-`task.test.ts`/`.js`/`.mjs` (Deno runtime) through `deno test`, or
-`task.test.py` (Python runtime) through `uv run` + pytest. `pkg/tasktest`
-captures aggregate passed/failed/skipped counts from each runtime's own
-summary output — Deno's `ok | N passed | N failed (Nms)` line, or pytest's
-`N passed, N failed in N.NNs` line. Docker and Podman tasks cannot ship a
-test file yet (#159 Phase 3).
+Runs the task's test through its runtime's test runner: `task.test.ts`/`.js`/
+`.mjs` (Deno runtime) through `deno test`, `task.test.py` (Python runtime)
+through `uv run` + pytest, or — for `runtime: docker`/`podman` — the task's
+own `Dockerfile` built and run (see [Docker & Podman](#docker--podman)
+below). `pkg/tasktest` captures aggregate passed/failed/skipped counts from
+Deno's and pytest's own summary output — Deno's `ok | N passed | N failed
+(Nms)` line, or pytest's `N passed, N failed in N.NNs` line. Docker/Podman
+have no such summary to parse: `Passed`/`Failed` stay `0` and the container's
+exit code is the only pass/fail signal (`ExitCode` and `Output` still carry
+the full build+run log either way).
 
 ### Output formats
 
@@ -85,8 +90,12 @@ repo — `task.test.ts` only mocks `Deno.Command`, so it never exercises the
 script that actually deletes branches/worktrees). `make test-tasks` runs the
 same commands locally. Only `runtime: deno` tasks can ship a
 `task.test.ts` — `runtime: python` tasks ship a `task.test.py` instead (see
-[Python](#python) below); Docker/Podman tasks can't ship a test file at all
-yet (#159 Phase 3).
+[Python](#python) below); `runtime: docker`/`podman` tasks ship a `test`
+build stage in their `Dockerfile` instead (see
+[Docker & Podman](#docker--podman) below). `tasks/examples/hello-docker`'s
+`Dockerfile` ships one such stage, exercised by `pkg/tasktest`'s own Go
+tests rather than by this CI job (which only runs `deno test`/`uv run`
+directly, no daemon).
 
 ### Daemon-backed task tests
 
@@ -310,6 +319,58 @@ daily-backup
 2 passed, 1 failed
 ```
 
+## Docker & Podman
+
+`runtime: docker`/`podman` tasks have no `task.test.*` sibling file and no
+mock harness — a container test runs the actual built image, so mocking
+`params`/`env`/`kv`/HTTP the way the Deno/Python harnesses do doesn't apply.
+Instead, the task's own `Dockerfile` declares a build stage named `test`:
+
+```dockerfile
+FROM alpine:3.21 AS test
+COPY app.sh /app.sh
+RUN chmod +x /app.sh
+CMD ["sh", "-c", "/app.sh | grep -q 'expected output'"]
+
+FROM alpine:3.21 AS build
+COPY app.sh /app.sh
+RUN chmod +x /app.sh
+ENTRYPOINT ["/app.sh"]
+```
+
+**`test` must not be the Dockerfile's last stage.** Neither the Docker nor
+the Podman production runtime ever passes `--target` when it builds a
+task's image — a plain `docker build`/`podman build` always builds the
+*last* stage in the file. A `test` stage declared last (e.g. `FROM build AS
+test` appended at the bottom) would make the production runtime silently
+build and run the test stage instead of the real one, so `pkg/tasktest`
+rejects it outright (`ErrTestStageLast`) rather than treating it as a valid
+test stage. Put `test` before whichever stage the production runtime should
+build. Avoid building a later stage `FROM test`, too — it inherits `test`'s
+`CMD`/`ENTRYPOINT`, so a stage that's merely *named* something other than
+`test` can still end up running the test payload in production.
+
+`dicode task test` builds the `test` stage explicitly (`docker build
+--target test` / `podman build --target test`, scoped to the same build context the runtime
+itself resolves via `docker.build.dockerfile`/`docker.build.context`) and
+runs the resulting image (`docker run --rm` / `podman run --rm`), capturing
+combined stdout+stderr and the container's exit code — the same pass/fail
+signal a shell script's own exit code would give. There is no per-test count
+to parse out of arbitrary container output, so `Passed`/`Failed` stay `0`
+regardless of outcome; `ExitCode` is the pass/fail signal for both build and
+run. `Error` is set only when the *build* fails (nothing could even be
+attempted); a container that built fine and ran to a non-zero exit is a
+legitimate failure, not a crash, and leaves `Error` empty — the same
+distinction `runDeno`/`runPython` draw for an unparseable crash versus a
+cleanly parsed failure.
+
+A task with no `Dockerfile`, or a `Dockerfile` with no stage named `test`,
+gets `ErrNoTestFile` — the same signal a missing `task.test.*` gives for
+Deno/Python — rather than an attempted build.
+
+See [tasks/examples/hello-docker/Dockerfile](../../tasks/examples/hello-docker/Dockerfile)
+for a working example.
+
 ---
 
 ## Layer 3 — Dry run (planned design — not implemented)
@@ -392,6 +453,6 @@ Rule of thumb: if the AI can't generate passing tests for a task it just wrote, 
 | Command | What it checks | Needs secrets? | Needs network? | Status |
 |---|---|---|---|---|
 | `dicode task validate` | Schema, syntax, cycles | ⚠️ warns if missing | No | Planned |
-| `dicode task test <id>` | Unit tests, mocks via `tasks/sdk-test.ts` / `tasks/sdk_test.py` | No | No | Implemented (Deno, Python); Docker/Podman tracked as #159 Phase 3 |
+| `dicode task test <id>` | Unit tests (Deno/Python, mocks via `tasks/sdk-test.ts` / `tasks/sdk_test.py`); build+run of the `Dockerfile`'s `test` stage (Docker/Podman) | No | No | Implemented (Deno, Python, Docker, Podman) |
 | `dicode run <id> --dry-run` | End-to-end with intercepted HTTP | Yes | No | Planned |
 | `dicode run <id>` | Live execution | Yes | Yes | Implemented |

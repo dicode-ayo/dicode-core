@@ -275,20 +275,17 @@ func TestAPI_TestTask_Timeout(t *testing.T) {
 }
 
 // TestAPI_TestTask_ErroredStatus covers the buildTestTaskResponse "errored"
-// branch. Registers a task whose runtime is "docker" — tasktest.Run rejects
-// non-deno runtimes with *ErrUnsupportedRuntime today, which surfaces as a
-// non-nil runErr with res.ExitCode == 0 (no subprocess ran). The handler
-// must return 200 (per #208: 200 on completion regardless) with status set
-// to "errored" and the error message in the body.
+// branch. Registers a docker-runtime task with no docker.build config —
+// tasktest.Run's readDockerTestStage has nothing to look for and returns
+// ErrNoTestFile, which surfaces as a non-nil runErr with res.ExitCode == 0
+// (no subprocess ran). The handler must return 200 (per #208: 200 on
+// completion regardless) with status set to "errored" and the error message
+// in the body.
 func TestAPI_TestTask_ErroredStatus(t *testing.T) {
 	srv, reg := newTestServer(t)
 	dir := t.TempDir()
 	td := filepath.Join(dir, "docker-task")
 	if err := os.MkdirAll(td, 0755); err != nil {
-		t.Fatal(err)
-	}
-	// Test file presence is required so we don't trip ErrNoTestFile first.
-	if err := os.WriteFile(filepath.Join(td, "task.test.ts"), []byte(passingTest), 0644); err != nil {
 		t.Fatal(err)
 	}
 	spec := &task.Spec{

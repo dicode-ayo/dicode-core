@@ -1475,7 +1475,7 @@ permissions:
 - `task.yaml` is always required. A folder without it is ignored.
 - The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker` or `runtime: podman`.
 - Container tasks using `docker.build` need a `Dockerfile` in the task folder (or at the path set in `docker.build.dockerfile`).
-- `task.test.js` / `task.test.ts` / `task.test.py` is optional. `dicode task test` skips tasks without it.
+- `task.test.js` / `task.test.ts` / `task.test.py` is optional. `dicode task test` skips tasks without it. For `runtime: docker`/`podman` there is no separate test file — a `Dockerfile` build stage named `test` serves the same role (see [Testing & Validation](testing.md#docker--podman)); a task with no such stage is skipped the same way.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
 

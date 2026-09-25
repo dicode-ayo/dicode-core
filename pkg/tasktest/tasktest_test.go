@@ -3,8 +3,11 @@ package tasktest
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
@@ -75,7 +78,7 @@ func TestFindTestFile_NoTest(t *testing.T) {
 }
 
 func TestRun_UnsupportedRuntime(t *testing.T) {
-	spec := &task.Spec{ID: "foo", TaskDir: t.TempDir(), Runtime: task.RuntimeDocker}
+	spec := &task.Spec{ID: "foo", TaskDir: t.TempDir(), Runtime: task.Runtime("cobol")}
 	_ = os.WriteFile(filepath.Join(spec.TaskDir, "task.test.ts"), []byte(""), 0644)
 
 	_, err := Run(context.Background(), spec)
@@ -273,5 +276,325 @@ if __name__ == "__main__":
 	}
 	if res.Error != "" {
 		t.Errorf("Error = %q, want empty — a parsed failing summary is not a crash", res.Error)
+	}
+}
+
+// dockerFixtureSpec writes dockerfile to a fresh temp dir and returns a
+// Docker-runtime spec over it with a bare docker.build config (default
+// Dockerfile path, default context).
+func dockerFixtureSpec(t *testing.T, id, dockerfile string) *task.Spec {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return &task.Spec{
+		ID:      id,
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+}
+
+// dockerBinary skips (via t.Skip) unless the docker CLI is on PATH and a
+// daemon answers `docker info`, mirroring runPythonFixture's uv-provisioning
+// skip and the repo's "deno not available" skip idiom.
+func dockerBinary(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("requires docker subprocess")
+	}
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skipf("docker not on PATH: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, path, "info").Run(); err != nil {
+		t.Skipf("docker daemon not reachable: %v", err)
+	}
+	return path
+}
+
+const passingDockerfile = `FROM alpine:3.21 AS test
+CMD ["sh", "-c", "echo dicode tasktest ok"]
+
+FROM alpine:3.21 AS build
+`
+
+// TestRun_Docker builds a minimal two-stage Dockerfile's "test" stage and
+// runs it through the real docker binary end-to-end.
+func TestRun_Docker(t *testing.T) {
+	dockerBinary(t)
+	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture", passingDockerfile)
+
+	res, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
+	}
+	if res.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want %q", res.Runtime, "docker")
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0\noutput:\n%s", res.ExitCode, res.Output)
+	}
+	if res.Error != "" {
+		t.Errorf("Error = %q, want empty", res.Error)
+	}
+	if !strings.Contains(res.Output, "dicode tasktest ok") {
+		t.Errorf("Output missing container stdout:\n%s", res.Output)
+	}
+}
+
+const failingDockerfile = `FROM alpine:3.21 AS test
+CMD ["sh", "-c", "echo failing on purpose; exit 3"]
+
+FROM alpine:3.21 AS build
+`
+
+// TestRun_DockerFailure asserts a container that exits non-zero is reported
+// as a failure via ExitCode alone, since there is no per-test count to
+// parse from a container's own output — Error stays empty, since a
+// container that ran and failed is a legitimate result, not a crash.
+func TestRun_DockerFailure(t *testing.T) {
+	dockerBinary(t)
+	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture-fail", failingDockerfile)
+
+	res, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
+	}
+	if res.ExitCode != 3 {
+		t.Errorf("ExitCode = %d, want 3\noutput:\n%s", res.ExitCode, res.Output)
+	}
+	if res.Error != "" {
+		t.Errorf("Error = %q, want empty — a run that exited non-zero is not a crash", res.Error)
+	}
+	if res.Passed != 0 || res.Failed != 0 {
+		t.Errorf("Passed=%d Failed=%d; want 0/0 — docker/podman are pass/fail-by-exit-code only", res.Passed, res.Failed)
+	}
+}
+
+// TestRun_DockerBuildFailure asserts a Dockerfile whose test stage fails to
+// build (as opposed to running and exiting non-zero) is also reported via
+// ExitCode + Error, without attempting to run anything.
+func TestRun_DockerBuildFailure(t *testing.T) {
+	dockerBinary(t)
+	spec := dockerFixtureSpec(t, "examples/docker-tasktest-fixture-buildfail", `FROM alpine:3.21 AS test
+RUN this-command-does-not-exist
+
+FROM alpine:3.21 AS build
+`)
+
+	res, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
+	}
+	if res.ExitCode == 0 {
+		t.Error("ExitCode = 0, want non-zero for a failed build")
+	}
+	if res.Error == "" {
+		t.Error("Error is empty, want non-empty for a failed build")
+	}
+}
+
+func TestFindDockerTestStage_NoDockerConfig(t *testing.T) {
+	spec := &task.Spec{TaskDir: t.TempDir(), Runtime: task.RuntimeDocker}
+	_, _, err := readDockerTestStage(spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+func TestFindDockerTestStage_NoDockerfile(t *testing.T) {
+	spec := &task.Spec{
+		TaskDir: t.TempDir(),
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, _, err := readDockerTestStage(spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+func TestFindDockerTestStage_NoTestStage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine:3.21\nCMD [\"true\"]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Runtime: podman here — the same finder backs both runtimes.
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimePodman,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, _, err := readDockerTestStage(spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+func TestFindDockerTestStage_Found(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM alpine:3.21 as test\nCMD [\"true\"]\n\nFROM alpine:3.21 as build\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Lowercase "as" must still match — Dockerfile stage keywords are
+	// case-insensitive.
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	got, _, err := readDockerTestStage(spec)
+	if err != nil {
+		t.Fatalf("readDockerTestStage: %v", err)
+	}
+	if filepath.Base(got) != "Dockerfile" {
+		t.Errorf("got %q, want Dockerfile", got)
+	}
+}
+
+// TestFindDockerTestStage_PrefixNameNotMatched asserts a stage merely
+// prefixed with "test" (e.g. "test-utils") doesn't count as the required
+// test stage.
+func TestFindDockerTestStage_PrefixNameNotMatched(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM golang:1.21 AS test-utils\nCMD [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, _, err := readDockerTestStage(spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+// TestFindDockerTestStage_TestStageLast_Rejected: a Dockerfile whose "test"
+// stage is its last is rejected with ErrTestStageLast, not accepted — a
+// plain production build with no --target would default to it.
+func TestFindDockerTestStage_TestStageLast_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM alpine:3.21 AS build\n\nFROM build AS test\nCMD [\"true\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	_, _, err := readDockerTestStage(spec)
+	if err != ErrTestStageLast {
+		t.Errorf("err = %v, want ErrTestStageLast", err)
+	}
+}
+
+// TestFindDockerTestStage_UnnamedFinalStageNotLast asserts a "test" stage
+// followed by an unnamed final stage isn't flagged as last — an unnamed
+// stage still counts for ordering purposes.
+func TestFindDockerTestStage_UnnamedFinalStageNotLast(t *testing.T) {
+	dir := t.TempDir()
+	content := "FROM alpine:3.21 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21\nRUN echo prod\n"
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		TaskDir: dir,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+	got, _, err := readDockerTestStage(spec)
+	if err != nil {
+		t.Fatalf("readDockerTestStage: %v", err)
+	}
+	if filepath.Base(got) != "Dockerfile" {
+		t.Errorf("got %q, want Dockerfile", got)
+	}
+}
+
+// TestDockerfileHasTestStage_PlatformFlag asserts a FROM clause with a
+// --platform flag before the base image is still recognised.
+func TestDockerfileHasTestStage_PlatformFlag(t *testing.T) {
+	content := []byte("FROM --platform=linux/amd64 golang:1.22 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a FROM clause with a --platform flag")
+	}
+}
+
+// TestDockerfileHasTestStage_LineContinuation asserts a FROM clause
+// wrapped across multiple physical lines with backslash continuations is
+// still recognised as declaring a test stage.
+func TestDockerfileHasTestStage_LineContinuation(t *testing.T) {
+	content := []byte("FROM --platform=linux/amd64 \\\n    golang:1.22 AS test\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a line-continued FROM clause")
+	}
+}
+
+// TestDockerfileHasTestStage_TrailingComment asserts a FROM...AS line
+// followed by a "# comment" still resolves the stage name correctly.
+func TestDockerfileHasTestStage_TrailingComment(t *testing.T) {
+	content := []byte("FROM alpine:3.21 AS test  # runs assertions\nCMD [\"true\"]\n\nFROM alpine:3.21 AS build\n")
+	if !dockerfileHasTestStage(content) {
+		t.Error("dockerfileHasTestStage = false, want true for a FROM...AS line with a trailing comment")
+	}
+}
+
+// TestRun_Docker_NoTestStage pins the Run()-level behavior (not just the
+// finder's): a docker-runtime task whose Dockerfile has no test stage
+// reports ErrNoTestFile, the same signal a missing task.test.* gives for
+// Deno/Python, rather than attempting a build.
+func TestRun_Docker_NoTestStage(t *testing.T) {
+	spec := dockerFixtureSpec(t, "examples/docker-no-test-stage", "FROM alpine:3.21\nCMD [\"true\"]\n")
+
+	_, err := Run(context.Background(), spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+}
+
+// TestRun_Docker_HelloDockerExample drives the real
+// tasks/examples/hello-docker task through tasktest.Run.
+func TestRun_Docker_HelloDockerExample(t *testing.T) {
+	dockerBinary(t)
+	spec, err := task.LoadDir("../../tasks/examples/hello-docker")
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+
+	res, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0\noutput:\n%s", res.ExitCode, res.Output)
+	}
+	if res.Error != "" {
+		t.Errorf("Error = %q, want empty\noutput:\n%s", res.Error, res.Output)
+	}
+}
+
+// TestRun_Podman_MissingBinary exercises runContainerTest's LookPath-failure
+// path for real: podman is not installed in this repo's CI or dev sandbox
+// (only docker is). A machine that does have podman installed skips instead
+// of asserting a false failure.
+func TestRun_Podman_MissingBinary(t *testing.T) {
+	if _, err := exec.LookPath("podman"); err == nil {
+		t.Skip("podman is installed; nothing to assert about its absence")
+	}
+	spec := dockerFixtureSpec(t, "examples/podman-tasktest-fixture", passingDockerfile)
+	spec.Runtime = task.RuntimePodman
+
+	_, err := Run(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected an error when podman is not on PATH")
 	}
 }

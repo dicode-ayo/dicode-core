@@ -32,9 +32,9 @@ func TestTag_Format(t *testing.T) {
 }
 
 func TestSelectOrphans(t *testing.T) {
-	current := map[string]string{
-		"dicode-alive":   "aaaaaaaaaaaa",
-		"dicode-rotated": "bbbbbbbbbbbb",
+	current := map[string]map[string]bool{
+		"dicode-alive":   {"aaaaaaaaaaaa": true},
+		"dicode-rotated": {"bbbbbbbbbbbb": true},
 	}
 	skip := map[string]bool{
 		"dicode-unreadable": true,
@@ -69,7 +69,7 @@ func TestSelectOrphans_EmptyInputs(t *testing.T) {
 		t.Errorf("expected no orphans for empty input, got %v", got)
 	}
 	// No registered tasks at all: every dicode-* image is orphaned.
-	got := SelectOrphans([]Candidate{{Repository: "dicode-x", Tag: "abc"}}, map[string]string{}, map[string]bool{})
+	got := SelectOrphans([]Candidate{{Repository: "dicode-x", Tag: "abc"}}, map[string]map[string]bool{}, map[string]bool{})
 	if len(got) != 1 || got[0] != "dicode-x:abc" {
 		t.Errorf("expected dicode-x:abc orphaned, got %v", got)
 	}
@@ -114,8 +114,12 @@ func TestCurrentTags(t *testing.T) {
 
 	current, skip := CurrentTags(specs)
 
-	if got, want := current["dicode-buildtask"], TagSuffix(dockerfile); got != want {
-		t.Errorf("current[dicode-buildtask] = %q, want %q", got, want)
+	suffix := TagSuffix(dockerfile)
+	if !current["dicode-buildtask"][suffix] {
+		t.Errorf("current[dicode-buildtask] missing production tag %q: %v", suffix, current["dicode-buildtask"])
+	}
+	if !current["dicode-buildtask"]["test-"+suffix] {
+		t.Errorf("current[dicode-buildtask] missing test tag %q: %v", "test-"+suffix, current["dicode-buildtask"])
 	}
 	if !skip["dicode-broken"] {
 		t.Errorf("unreadable Dockerfile must land in skip; skip=%v", skip)
@@ -154,5 +158,31 @@ func TestCurrentTags_SelectOrphans_EndToEnd(t *testing.T) {
 	want := []string{"localhost/dicode-web:" + oldTag}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("SelectOrphans = %v, want %v", got, want)
+	}
+}
+
+// TestCurrentTags_TestTagNotOrphaned guards against a GC sweep reclaiming a
+// dicode task test image (TestTag) out from under a build/run in progress —
+// its tag must be current for the same task/Dockerfile as the production
+// tag, not just the production one.
+func TestCurrentTags_TestTagNotOrphaned(t *testing.T) {
+	dir := t.TempDir()
+	dockerfile := []byte("FROM alpine:3.21 AS build\n\nFROM build AS test\nCMD [\"true\"]\n")
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), dockerfile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		ID:      "web",
+		Runtime: task.RuntimeDocker,
+		TaskDir: dir,
+		Docker:  &task.DockerConfig{Build: &task.DockerBuild{}},
+	}
+
+	current, skip := CurrentTags([]*task.Spec{spec})
+	images := []Candidate{{Repository: "dicode-web", Tag: "test-" + TagSuffix(dockerfile)}}
+
+	got := SelectOrphans(images, current, skip)
+	if len(got) != 0 {
+		t.Errorf("SelectOrphans reclaimed the in-use test image: %v", got)
 	}
 }

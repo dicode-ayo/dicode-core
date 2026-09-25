@@ -61,6 +61,25 @@ func TestFormatJUnit_Empty(t *testing.T) {
 	}
 }
 
+func TestFormatJUnit_ExitCodeOnlyFailure(t *testing.T) {
+	r := Result{
+		TaskID:   "examples/hello-docker",
+		Runtime:  "docker",
+		ExitCode: 3,
+		Output:   "test script failed\n",
+	}
+	out := FormatJUnit(r)
+	if !strings.Contains(out, `tests="1"`) {
+		t.Errorf("expected tests=1 (synthetic failure), got:\n%s", out)
+	}
+	if !strings.Contains(out, `failures="1"`) {
+		t.Errorf("expected failures=1, got:\n%s", out)
+	}
+	if !strings.Contains(out, "<failure") {
+		t.Errorf("expected a <failure> element so JUnit consumers see the failure, got:\n%s", out)
+	}
+}
+
 func TestFormatGHSummary_Pass(t *testing.T) {
 	r := Result{
 		TaskID:   "buildin/webui",

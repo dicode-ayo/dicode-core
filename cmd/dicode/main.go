@@ -703,6 +703,19 @@ func approveMessage(taskID string, enabled bool) string {
 	return fmt.Sprintf("Task %q approved — triggers armed, hash recorded in dicode.lock.\n", taskID)
 }
 
+// taskTestExitNote returns a ", exit code N" suffix for the passed/failed
+// summary line when passed and failed are both zero but the run still
+// exited non-zero — the case where nothing was parsed (Docker/Podman have
+// no summary to parse at all; Deno/Python hit this on a crash before any
+// summary line) and the exit code is the only signal, so a bare "0 passed,
+// 0 failed" would read as a no-op rather than a failure.
+func taskTestExitNote(passed, failed, exitCode int) string {
+	if passed == 0 && failed == 0 && exitCode != 0 {
+		return fmt.Sprintf(", exit code %d", exitCode)
+	}
+	return ""
+}
+
 func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 	format := "text"
 	var taskID string
@@ -766,6 +779,8 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		Output:   r.Output,
 	}
 
+	exitNote := taskTestExitNote(r.Passed, r.Failed, r.ExitCode)
+
 	switch format {
 	case "junit":
 		// JUnit XML → stdout; human-readable → stderr so CI logs stay readable.
@@ -776,8 +791,8 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		if r.Error != "" {
 			fmt.Fprintf(os.Stderr, "error: %s\n", r.Error)
 		}
-		fmt.Fprintf(os.Stderr, "%s: %d passed, %d failed (runtime=%s, %dms)\n",
-			r.TaskID, r.Passed, r.Failed, r.Runtime, r.DurMs)
+		fmt.Fprintf(os.Stderr, "%s: %d passed, %d failed%s (runtime=%s, %dms)\n",
+			r.TaskID, r.Passed, r.Failed, exitNote, r.Runtime, r.DurMs)
 		fmt.Print(tasktest.FormatJUnit(result))
 		writeGHStepSummary(tasktest.FormatGHSummary(result))
 	case "gh-summary":
@@ -792,15 +807,18 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		if !strings.HasSuffix(r.Output, "\n") {
 			fmt.Println()
 		}
-		fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
+		fmt.Printf("%s: %d passed, %d failed%s", r.TaskID, r.Passed, r.Failed, exitNote)
 		if r.Skipped > 0 {
 			fmt.Printf(", %d skipped", r.Skipped)
 		}
 		fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
 	}
 
-	if r.Failed > 0 || r.ExitCode != 0 {
+	switch {
+	case r.Failed > 0:
 		return fmt.Errorf("%d test(s) failed", r.Failed)
+	case r.ExitCode != 0:
+		return fmt.Errorf("exited %d", r.ExitCode)
 	}
 	return nil
 }
