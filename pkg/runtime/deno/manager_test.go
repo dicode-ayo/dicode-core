@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -112,6 +113,33 @@ func TestManagerRuntime_EffectiveInputStore_NilParent(t *testing.T) {
 
 	if got := rt.effectiveInputStore(); got != is {
 		t.Errorf("manager runtime: effectiveInputStore() = %v, want %v", got, is)
+	}
+}
+
+// TestVersionFromBinaryPath covers the well-shaped .../deno/<version>/deno
+// layout that denopkg.BinaryPath/EnsureDeno always produce, the degenerate
+// paths whose parent directory is empty, ".", or a bare separator, and a
+// path (like a hand-substituted test binary) whose parent directory exists
+// but doesn't look like a version string — all of which must fall back to
+// denopkg.DefaultVersion rather than returning a non-version string.
+func TestVersionFromBinaryPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"well-shaped version dir", "/cache/deno/2.9.6/deno", "2.9.6"},
+		{"empty path", "", denopkg.DefaultVersion},
+		{"dot path", ".", denopkg.DefaultVersion},
+		{"bare separator", "/", denopkg.DefaultVersion},
+		{"non-version parent dir", "/usr/bin/deno", denopkg.DefaultVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionFromBinaryPath(tt.path); got != tt.want {
+				t.Errorf("versionFromBinaryPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 

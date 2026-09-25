@@ -119,6 +119,11 @@ type Runtime struct {
 
 	denoPath string
 
+	// denoVersion is the Deno release at denoPath, used to gate
+	// version-conditional argv (e.g. the "unix:<path>" --allow-net scope —
+	// see denopkg.RequiresUnixNetScope).
+	denoVersion string
+
 	// cryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
 	// declare permissions.dicode.crypto. Wired at daemon boot via
 	// SetCryptoHandler; reads through parent in per-version executors.
@@ -170,8 +175,9 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 		return nil, fmt.Errorf("ipc secret: %w", err)
 	}
 	return &Runtime{
-		BridgeDeps: pkgruntime.BridgeDeps{Registry: r, SecretsChain: sc, DB: database, Log: log, IPCSecret: secret},
-		denoPath:   path,
+		BridgeDeps:  pkgruntime.BridgeDeps{Registry: r, SecretsChain: sc, DB: database, Log: log, IPCSecret: secret},
+		denoPath:    path,
+		denoVersion: denopkg.DefaultVersion,
 	}, nil
 }
 
@@ -403,7 +409,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	runnerFile.Close()
 
-	args := buildDenoArgs(spec, ipcAddr, shimPath, runnerPath, rt.effectiveProtectedPaths())
+	args := buildDenoArgs(spec, ipcAddr, shimPath, runnerPath, rt.effectiveProtectedPaths(), rt.denoVersion)
 
 	// runOnce spawns the Deno subprocess, streams its output, and records the
 	// outcome on result. It reports whether the run failed with the stale-lock
@@ -603,12 +609,15 @@ func findDenoLockFile(dir string, maxParents int) string {
 	return path
 }
 
-func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protectedPaths []string) []string {
+func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protectedPaths []string, version string) []string {
 	args := []string{"run"}
 
-	// How the task reaches the IPC endpoint depends on its transport: a Unix
-	// socket is a file (--allow-read/--allow-write), a loopback endpoint is a
-	// host:port (--allow-net). See pkg/ipc.IsLoopbackAddr.
+	// How the task reaches the IPC endpoint depends on its transport: a
+	// loopback endpoint is a host:port, granted via --allow-net alone; a Unix
+	// socket is both a file (--allow-read/--allow-write) and, on Deno
+	// releases that gate Deno.connect({transport:"unix"}) behind net
+	// permission, a "unix:<path>" --allow-net scope (see
+	// denopkg.RequiresUnixNetScope). See pkg/ipc.IsLoopbackAddr.
 	loopbackIPC := ipc.IsLoopbackAddr(ipcAddr)
 
 	// Enforce the lockfile when a deno.lock is found at or near the task directory.
@@ -626,16 +635,26 @@ func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protec
 	// host:port entry prepended — the narrowest grant Deno's permission
 	// vocabulary has — so a task that declared no network still reaches the
 	// daemon and nothing else. A bare --allow-net already covers it.
+	//
+	// A Unix-socket endpoint needs the analogous narrow grant on Deno
+	// releases that gate Deno.connect({transport:"unix"}): a "unix:<path>"
+	// entry scoped to the daemon's own socket path, prepended the same way.
+	// This is NOT general network access — it does not widen what hosts the
+	// task can reach, only lets it open this one local socket.
 	net := spec.Permissions.Net
+	needsUnixScope := !loopbackIPC && denopkg.RequiresUnixNetScope(version)
 	switch {
 	case len(net) == 1 && net[0] == "*":
 		args = append(args, "--allow-net")
 	case loopbackIPC:
 		args = append(args, "--allow-net="+strings.Join(append([]string{ipcAddr}, net...), ","))
+	case needsUnixScope:
+		args = append(args, "--allow-net="+strings.Join(append([]string{"unix:" + ipcAddr}, net...), ","))
 	case len(net) > 0:
 		args = append(args, "--allow-net="+strings.Join(net, ","))
 	}
-	// nil or explicit empty list → no --allow-net flag → network denied
+	// nil or explicit empty list, loopback/unix-scope not needed → no
+	// --allow-net flag → network denied
 
 	// EnvReadExposed grants bare --allow-env (read any var). The blast radius is
 	// bounded by runtime.SubprocessEnv, which forwards only an allowlist

@@ -4,6 +4,21 @@ Behaviour changes that a release's `CHANGELOG.md` entry does not make obvious. `
 
 Newest release first.
 
+## Unreleased
+
+### Bundled Deno version bumped to 2.9.6
+
+The Deno binary dicode downloads and runs tasks with moves from 2.3.3 to
+2.9.6. Deno 2.9 gates `Deno.connect({ transport: "unix" })` — which every
+Deno task uses to reach the daemon's control socket — behind net permission,
+scoped as `unix:<path>`. The runtime now grants that one socket path
+automatically; it is a narrow addition scoped to the daemon's own IPC socket,
+not general network access, and does not change what hosts a task can reach.
+
+An operator pinned to an older Deno release via `runtimes.deno.version` is
+unaffected: the grant is version-conditional and is omitted below Deno 2.9.0,
+which does not understand the `unix:` scope syntax.
+
 ## 0.4.1
 
 ### Git remotes on internal hosts are refused
