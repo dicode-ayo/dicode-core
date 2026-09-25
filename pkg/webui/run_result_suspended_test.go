@@ -20,7 +20,7 @@ func TestRunResult_SuspendedRedirectsToResumeForm(t *testing.T) {
 		t.Fatalf("StartRun: %v", err)
 	}
 	schema := []byte(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`)
-	ok, err := reg.SuspendRun(ctx, runID, []byte(`{}`), schema, "tok-1", 1, 0, nil)
+	ok, err := reg.SuspendRun(ctx, runID, []byte(`{}`), schema, "tok-1", 1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}

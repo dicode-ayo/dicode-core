@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/secrets"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -28,6 +32,12 @@ type resumeCarry struct {
 // did not specify its own deadline. After it, the sweep cancels the run with
 // ReasonResumeTimeout.
 const defaultResumeTTL = 24 * time.Hour
+
+// secretResolveTimeout bounds each secrets-chain lookup during resume-param
+// redaction/restoration, the same way ifMissingPrereqTimeout bounds the
+// secrets-chain check in resolveIfMissing: a network-backed provider (Vault,
+// AWS SM, …) that hangs must not block a suspend or resume indefinitely.
+const secretResolveTimeout = 10 * time.Second
 
 // Resume errors surfaced to callers (webui/CLI in later PRs).
 var (
@@ -55,7 +65,7 @@ var (
 // Reports whether the run was actually suspended: false (with nil error) means
 // a concurrent finalize already moved it out of `running`, so no resume state
 // was persisted and the caller must not report it as suspended.
-func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunResult) (bool, error) {
+func (e *Engine) suspendRun(spec *task.Spec, opts *pkgruntime.RunOptions, result *pkgruntime.RunResult) (bool, error) {
 	token, err := newResumeToken()
 	if err != nil {
 		return false, fmt.Errorf("mint resume token: %w", err)
@@ -66,16 +76,142 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 		deadlineMs = time.Now().Add(defaultResumeTTL).UnixMilli()
 	}
 	// Persist the run's fire-time params and chain depth so the continuation
-	// resumes with the same ctx.params and the same chain-depth ceiling.
+	// resumes with the same ctx.params and the same chain-depth ceiling. Any
+	// param value that matches a live secrets-chain entry the task's own
+	// permissions.env declares under that same name is redacted first —
+	// ResumeRun restores it from the chain rather than trusting the stored
+	// value.
+	redactedParams, redactedFields, err := e.redactSecretBackedParams(context.Background(), spec, opts.RunID, opts.Params)
+	if err != nil {
+		return false, fmt.Errorf("redact resume params: %w", err)
+	}
 	var carryJSON []byte
-	carry := resumeCarry{Params: opts.Params, ChainDepth: e.chainDepth(opts.RunID)}
+	carry := resumeCarry{Params: redactedParams, ChainDepth: e.chainDepth(opts.RunID)}
 	if len(carry.Params) > 0 || carry.ChainDepth > 0 {
 		if carryJSON, err = json.Marshal(carry); err != nil {
 			return false, fmt.Errorf("marshal resume params: %w", err)
 		}
 	}
 	return e.registry.SuspendRun(context.Background(), opts.RunID,
-		result.ResumeState, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON)
+		result.ResumeState, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON, redactedFields)
+}
+
+// secretBackedParamNames returns the set of param names spec's own
+// permissions.env grants as secrets store keys (EnvEntry.Secret) — the only
+// names redactSecretBackedParams/restoreSecretBackedParams may ever treat as
+// secret-backed. A task with no such grant for a name has no standing to
+// have that name resolved against the global secrets chain, regardless of
+// how the name looks or what value it happens to carry.
+func secretBackedParamNames(spec *task.Spec) map[string]struct{} {
+	allowed := make(map[string]struct{})
+	if spec == nil {
+		return allowed
+	}
+	for _, entry := range spec.Permissions.Env {
+		if entry.Secret == "" {
+			continue
+		}
+		allowed[entry.Secret] = struct{}{}
+	}
+	return allowed
+}
+
+// redactSecretBackedParams returns a copy of params (never mutated) with any
+// value that exactly matches a live secrets-chain entry under a param name
+// spec's own permissions.env declares as a Secret key, replaced by
+// registry.RedactPlaceholder — the only case restoreSecretBackedParams can
+// recover later, by re-resolving the same key. A param whose name is not
+// among spec's granted secret keys is never resolved against the secrets
+// chain at all. A granted name whose value has no live secrets-chain match
+// is left as-is: dicode has no other way to recover a literal fire-time
+// value that never came from the secrets store, and a resumed run must never
+// see a value it never actually had.
+//
+// A real (non-NotFound) error resolving a granted name aborts the whole pass
+// with an error rather than leaving that param unredacted: the caller cannot
+// tell whether the value matches the secret, and persisting it unredacted on
+// that ambiguity would be the exact disclosure this redaction exists to
+// prevent. Mirrors resolveIfMissing's own hard-fail on a real secrets error.
+//
+// Returns the (possibly copied) params map and the dotted "params.<name>"
+// paths that were actually redacted, sorted for determinism.
+func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, runID string, params map[string]string) (map[string]string, []string, error) {
+	if len(params) == 0 || e.secrets == nil {
+		return params, nil, nil
+	}
+	allowed := secretBackedParamNames(spec)
+	out := make(map[string]string, len(params))
+	names := make([]string, 0, len(params))
+	for k, v := range params {
+		out[k] = v
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if len(allowed) == 0 {
+		return out, nil, nil
+	}
+	var redacted []string
+	for _, name := range names {
+		if _, granted := allowed[name]; !granted {
+			continue
+		}
+		resolveCtx, cancel := context.WithTimeout(ctx, secretResolveTimeout)
+		secretVal, err := e.secrets.Resolve(resolveCtx, name)
+		cancel()
+		if err != nil {
+			var notFound *secrets.NotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("resume: redaction check for param %q (run %s, task %q): %w", name, runID, spec.ID, err)
+		}
+		if secretVal != params[name] {
+			continue
+		}
+		out[name] = registry.RedactPlaceholder
+		redacted = append(redacted, "params."+name)
+	}
+	return out, redacted, nil
+}
+
+// restoreSecretBackedParams reverses redactSecretBackedParams on the resume
+// path: for each dotted "params.<name>" path in redactedFields it re-resolves
+// name from the secrets chain — the same source the value came from at
+// suspend time — instead of trusting the redaction placeholder left in the
+// stored blob. params is never mutated. Errors if a redacted field can't be
+// restored — including when spec's current permissions.env no longer grants
+// that name (e.g. the task was edited between suspend and resume) — because a
+// resumed run must never silently run with the literal placeholder, or a
+// value it is no longer entitled to, standing in for a real param value.
+func (e *Engine) restoreSecretBackedParams(ctx context.Context, spec *task.Spec, params map[string]string, redactedFields []string) (map[string]string, error) {
+	if len(redactedFields) == 0 {
+		return params, nil
+	}
+	if e.secrets == nil {
+		return nil, fmt.Errorf("resume: %d redacted param(s) but no secrets chain is configured to restore them", len(redactedFields))
+	}
+	allowed := secretBackedParamNames(spec)
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	for _, field := range redactedFields {
+		name, ok := strings.CutPrefix(field, "params.")
+		if !ok {
+			continue
+		}
+		if _, granted := allowed[name]; !granted {
+			return nil, fmt.Errorf("resume: redacted param %q is no longer granted by task %q's permissions.env; refusing to restore", name, spec.ID)
+		}
+		resolveCtx, cancel := context.WithTimeout(ctx, secretResolveTimeout)
+		v, err := e.secrets.Resolve(resolveCtx, name)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("resume: restore redacted param %q from secrets chain: %w", name, err)
+		}
+		out[name] = v
+	}
+	return out, nil
 }
 
 // newResumeToken returns a 32-byte crypto/rand token, hex-encoded. Long and
@@ -138,6 +274,28 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		return "", fmt.Errorf("%w: %w", ErrResumePending, gerr)
 	}
 
+	// Restore the original run's fire-time params and chain depth so the
+	// continuation sees the same ctx.params (not spec defaults) and stays under
+	// the chain-depth ceiling. Done BEFORE consuming the resume token, same as
+	// checkFireGuard above: restoration can fail (secrets-chain error, or a
+	// redacted field no longer covered by spec's current permissions.env), and
+	// a failure after the token is consumed would strand the run resumed with
+	// no continuation ever spawned and no way to retry.
+	var restoredParams map[string]string
+	var chainDepth int
+	if len(run.ResumeParams) > 0 {
+		var carry resumeCarry
+		if err := json.Unmarshal(run.ResumeParams, &carry); err != nil {
+			return "", fmt.Errorf("resume: decode carried run params: %w", err)
+		}
+		restored, err := e.restoreSecretBackedParams(ctx, spec, carry.Params, run.ResumeParamsRedactedFields)
+		if err != nil {
+			return "", err
+		}
+		restoredParams = restored
+		chainDepth = carry.ChainDepth
+	}
+
 	// Consume the token atomically. This is the single-use guard: a second
 	// ResumeRun for the same token finds the run already resumed and fails.
 	if err := e.registry.MarkRunResumed(ctx, run.ID); err != nil {
@@ -152,17 +310,8 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		Resumed:     true,
 		ResumeState: run.ResumeState,
 		ResumeInput: input,
-	}
-	// Restore the original run's fire-time params and chain depth so the
-	// continuation sees the same ctx.params (not spec defaults) and stays under
-	// the chain-depth ceiling.
-	if len(run.ResumeParams) > 0 {
-		var carry resumeCarry
-		if err := json.Unmarshal(run.ResumeParams, &carry); err != nil {
-			return "", fmt.Errorf("resume: decode carried run params: %w", err)
-		}
-		opts.Params = carry.Params
-		opts.ChainDepth = carry.ChainDepth
+		Params:      restoredParams,
+		ChainDepth:  chainDepth,
 	}
 
 	// A daemon body's continuation must re-enter the #470 slot accounting: it

@@ -110,6 +110,12 @@ type PartMeta struct {
 // redactPlaceholder is the value substituted for any redacted scalar.
 const redactPlaceholder = "<redacted>"
 
+// RedactPlaceholder is redactPlaceholder, exported for callers outside this
+// package that redact a value themselves instead of going through
+// BuildPersistedInputFromRunOpts — e.g. pkg/trigger's suspend-time
+// resume-param redaction, which must substitute the identical placeholder.
+const RedactPlaceholder = redactPlaceholder
+
 // denyListExact is the case-insensitive set of header/key names that are
 // always redacted. Compared lowercased against the lowercased input name.
 var denyListExact = map[string]struct{}{
