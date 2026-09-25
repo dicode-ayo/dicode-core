@@ -917,14 +917,22 @@ truncation banner and no "too large to display" state to design.
   the task ID and its short hash, nothing about the task's contents, and —
   when resolvable — the "what moved" decoration: the commit range from the
   previously-approved commit to the one the pending content was observed at,
-  and a link to the git host's compare view (`Gate.PendingSnapshot`,
-  `pkg/approval/comparelink.go`). Every piece of that degrades to simply not
-  rendering rather than an error or a broken link — no prior approval, no git
-  history, or an unrecognized remote host all just omit it (ADR-0001). Both
-  ends of that range are fixed when the task is held pending: the baseline is
-  the commit the lock recorded at that moment, so an approval or removal
-  landing while the link is in someone's inbox changes what the next pend
-  shows, never what this one links to.
+  how many commits fall in that range (first-parent history — the commits
+  that landed on the tracked branch itself, not every commit pulled in
+  through a merge), and a link to the git host's compare
+  view (`Gate.PendingSnapshot`, `pkg/approval/comparelink.go`). The count is
+  capped (`internal/gitops.CommitCountBetween`, `pkg/approval/gate.go`): a walk
+  that reaches the cap before finding the baseline commit renders "N+ commits"
+  — a lower bound, never a wrong exact number — instead of paying the cost of
+  walking a large or divergent history in full. Every piece of that decoration
+  degrades to simply not rendering rather than an error or a broken link — no
+  prior approval, no git history, an unresolvable commit, or an unrecognized
+  remote host all just omit it (ADR-0001). Both ends of that range are fixed
+  when the task is held pending: the baseline is the commit the lock recorded
+  at that moment, so an approval or removal landing while the link is in
+  someone's inbox changes what the next pend shows, never what this one links
+  to — and the count, like the range, is resolved once per pending generation
+  and cached, so any number of prefetches or re-renders never repeat the walk.
 
 **Approval binds to the reviewed hash.** The panel sends
 `State.PendingHash` back with the approve request (#645). Between the panel

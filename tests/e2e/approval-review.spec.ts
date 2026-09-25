@@ -299,6 +299,16 @@ test.describe('Approval review surface', () => {
       expect(body).toMatch(
         new RegExp(`href="https://github\\.com/dicode-ayo/e2e-fixture/compare/[0-9a-f]{40}\\.\\.\\.${head}"`),
       );
+
+      // The commit-count decoration: the exact count is not asserted
+      // (the approved-at baseline is shared with, and can be moved by,
+      // other tests in this file), but this test just landed one commit
+      // since the last approval, so it must report at least one — and, per
+      // ADR-0001, only ever as a real number, never silently absent once a
+      // baseline exists.
+      const commits = body.match(/\((\d+)(\+?) commits?\)/);
+      expect(commits, `no commit count in: ${body}`).toBeTruthy();
+      expect(Number(commits![1])).toBeGreaterThanOrEqual(1);
     });
   });
 
