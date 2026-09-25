@@ -94,26 +94,6 @@ func TestHeadInfo_StripsCredentials(t *testing.T) {
 	}
 }
 
-func TestStripCredentials(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"no credentials", "https://github.com/o/r.git", "https://github.com/o/r.git"},
-		{"user and password", "https://user:pass@github.com/o/r.git", "https://github.com/o/r.git"},
-		{"token as password", "https://x-access-token:ghp_abc@github.com/o/r.git", "https://github.com/o/r.git"},
-		{"scp-like, unparseable as a URL scheme", "git@github.com:o/r.git", "git@github.com:o/r.git"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := StripURLCredentials(tc.in); got != tc.want {
-				t.Errorf("StripURLCredentials(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestParseRemote(t *testing.T) {
 	cases := []struct {
 		name           string

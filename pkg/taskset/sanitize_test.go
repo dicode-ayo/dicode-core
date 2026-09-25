@@ -2,29 +2,17 @@ package taskset
 
 import "testing"
 
-// The regex is duplicated from pkg/relay — keep these tests parallel to
-// pkg/relay/sanitize_test.go so a future tightening in one place gets
-// caught by a failing assertion in the other (as long as the fix is
-// applied to both copies).
+// The full case table lives in internal/gitops (TestStripURLCredentials),
+// which owns the actual stripping logic. These are smoke tests confirming
+// SanitizeURL / sanitizeErrorString correctly delegate to it under this
+// package's own public names.
 func TestSanitizeErrorString_StripsUserinfo(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
 		{
-			in:   `pull https://github.com/org/repo@branch:main: authentication required`,
-			want: `pull https://github.com/org/repo@branch:main: authentication required`,
-		},
-		{
-			in:   `pull https://github.com/org/repo@tag:v1.0.0: authentication required`,
-			want: `pull https://github.com/org/repo@tag:v1.0.0: authentication required`,
-		},
-		{
 			in:   `git clone failed: https://oauth2:ghp_abc123@github.com/org/repo.git`,
 			want: `git clone failed: https://github.com/org/repo.git`,
-		},
-		{
-			in:   `fetch https://user:p%40ss@example.com/r.git: ok`,
-			want: `fetch https://example.com/r.git: ok`,
 		},
 		{
 			in:   `no URL here`,
@@ -39,5 +27,13 @@ func TestSanitizeErrorString_StripsUserinfo(t *testing.T) {
 		if got := sanitizeErrorString(tc.in); got != tc.want {
 			t.Errorf("sanitizeErrorString(%q) = %q; want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestSanitizeURL_StripsUserinfo(t *testing.T) {
+	in := "https://user:pass@github.com/o/r.git"
+	want := "https://github.com/o/r.git"
+	if got := SanitizeURL(in); got != want {
+		t.Errorf("SanitizeURL(%q) = %q; want %q", in, got, want)
 	}
 }
