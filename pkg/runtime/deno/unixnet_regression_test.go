@@ -18,12 +18,9 @@ import (
 // and runs a real Deno 2.9.6 binary against the exact argv buildDenoArgs
 // produces for a Unix-socket IPC transport, proving
 // Deno.connect({transport:"unix"}) actually succeeds under the emitted
-// --allow-net=unix:<path> grant. This is the gap that let 318 green
-// (mocked-SDK) tests hide the bug: none of them opened a real socket.
-//
-// Before the fix (no "unix:" scope emitted for a version that gates it),
-// this test fails with a NotCapable permission error. After the fix, it
-// passes.
+// --allow-net=unix:<path> grant. The rest of this package's suite mocks the
+// SDK and never opens a real socket, so this is the only test that can
+// catch a regression in the actual net-permission grant.
 func TestUnixNetPermission_Regression(t *testing.T) {
 	denoBin, err := denopkg.EnsureDeno("2.9.6")
 	if err != nil {

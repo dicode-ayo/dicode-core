@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -94,11 +96,12 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 // versionFromBinaryPath recovers the Deno version a cached binary belongs to
 // from its path, which denopkg.BinaryPath/EnsureDeno always shape as
 // .../deno/<version>/deno[.exe] (see pkg/deno's cacheBinPath). Falls back to
-// denopkg.DefaultVersion for a path that doesn't fit that shape (e.g. a
-// hand-substituted binary path in a test).
+// denopkg.DefaultVersion for a path whose parent directory doesn't look like
+// a version string (e.g. a hand-substituted binary path in a test).
 func versionFromBinaryPath(path string) string {
 	v := filepath.Base(filepath.Dir(path))
-	if v == "" || v == "." || v == string(filepath.Separator) {
+	first, _, _ := strings.Cut(v, ".")
+	if _, err := strconv.Atoi(first); err != nil {
 		return denopkg.DefaultVersion
 	}
 	return v
