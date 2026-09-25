@@ -23,11 +23,25 @@ import * as path from 'path';
 export const BUILDIN_URL = 'https://github.com/dicode-ayo/dicode-buildin';
 export const BUILDIN_REF = 'main';
 
+// Resolved once per process and reused: setup() calls this for the shared
+// daemon, and each startIsolatedDaemon() call (helpers/dicode-server.ts,
+// #850) calls it again for its own daemon. Without memoizing, every one of
+// those beyond the first re-fetches the identical ref over the network for
+// no reason — the on-disk cache can't have changed in the seconds between
+// calls in the same test run — turning a transient GitHub hiccup into a
+// spurious beforeAll failure for a checkout that was already correct.
+let cachedDir: string | null = null;
+
 /**
  * Returns the directory holding a dicode-buildin checkout, cloning or
- * refreshing the cache as needed. Honours DICODE_E2E_BUILDIN_DIR.
+ * refreshing the cache as needed. Honours DICODE_E2E_BUILDIN_DIR. Memoized
+ * per process — see cachedDir above.
  */
 export function ensureBuildinCheckout(repoRoot: string): string {
+  if (cachedDir) {
+    return cachedDir;
+  }
+
   const override = process.env.DICODE_E2E_BUILDIN_DIR;
   if (override) {
     if (!fs.existsSync(path.join(override, 'taskset.yaml'))) {
@@ -35,6 +49,7 @@ export function ensureBuildinCheckout(repoRoot: string): string {
         `DICODE_E2E_BUILDIN_DIR=${override} has no taskset.yaml — not a dicode-buildin checkout`,
       );
     }
+    cachedDir = override;
     return override;
   }
 
@@ -54,5 +69,6 @@ export function ensureBuildinCheckout(repoRoot: string): string {
 
   const head = git(['rev-parse', '--short', 'HEAD'], dir).trim();
   console.log(`e2e: dicode-buildin @ ${BUILDIN_REF} (${head}) in ${dir}`);
+  cachedDir = dir;
   return dir;
 }
