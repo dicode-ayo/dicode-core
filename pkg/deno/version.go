@@ -3,7 +3,7 @@ package deno
 import "strconv"
 
 // DefaultVersion is the Deno version downloaded when none is specified.
-const DefaultVersion = "2.3.3"
+const DefaultVersion = "2.9.6"
 
 // unixNetPermissionVersion is the first Deno release whose
 // Deno.connect({transport:"unix"}) is gated behind --allow-net, scoped as
