@@ -248,15 +248,15 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 	// Inject a resumed run's prior state + user input (#95); nil on first run.
 	srv.SetResume(opts.Resumed, opts.ResumeState, opts.ResumeInput)
-	socketPath, token, err := srv.Start(srvCtx)
+	ipcAddr, token, err := srv.Start(srvCtx)
 	if err != nil {
-		result.Error = fmt.Errorf("start socket server: %w", err)
+		result.Error = fmt.Errorf("start IPC server: %w", err)
 		return result, nil
 	}
 	defer srv.Stop()
 
 	// Build the temporary wrapper file.
-	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath, e.parent.ProtectedPaths))
+	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, ipcAddr, e.parent.ProtectedPaths))
 	if err != nil {
 		result.Error = fmt.Errorf("build wrapper: %w", err)
 		return result, nil
@@ -312,7 +312,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		defer cancel()
 
 		cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
-		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, ipcAddr, token)
 		pkgruntime.ConfigureTaskProcess(cmd)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 

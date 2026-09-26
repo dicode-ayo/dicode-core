@@ -62,9 +62,9 @@ type Engine struct {
 	webhookReplayCache *replayCache
 
 	// fireGuard, when set, can veto any run before it starts (approval gate,
-	// #392). Checked in startRun — the chokepoint every kind: Task run passes
-	// through regardless of trigger path — and in fireKinded for an early,
-	// pipeline-covering rejection on manual fires. Tasks held pending never
+	// #392). Checked in beginRun — the chokepoint every run of every kind
+	// passes through regardless of trigger path — and in fireKinded for an
+	// early rejection before a drain slot is reserved. Tasks held pending never
 	// arm cron/webhook/daemon triggers, but manual / chain / replay /
 	// pipeline-stage paths resolve tasks from the registry, so they need
 	// this veto.
@@ -102,15 +102,15 @@ type Engine struct {
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
-	runChainDepth    sync.Map // runID (string) → int; _chain_depth from the run's input
+	runChainDepth    sync.Map // runID (string) → int; chain hops behind the run that started the lap
 
 	// runReturnValue holds JSON-marshalled return values for runs whose task
 	// spec set `run_result.enabled: false`. The value is NOT written to the
 	// `runs.return_value` column in those cases, so WaitRun would otherwise
 	// see an empty value and break the synchronous dicode.run_task contract.
 	//
-	// Entries are added by dispatch right after marshalling and deleted by
-	// startRun's cleanup func via a time.AfterFunc that fires several
+	// Entries are added by dispatch right after marshaling and deleted when
+	// the run handle is released, via a time.AfterFunc that fires several
 	// seconds after the run reaches a terminal state — long enough for any
 	// WaitRun caller woken by the runDone close to scan the map before
 	// the entry disappears.
@@ -221,6 +221,20 @@ type Engine struct {
 	// derived sub-key is available.
 	inputStore *runinput.Store
 
+	// runURLFunc builds a link to a run in the web UI, the same way the
+	// suspend notifier's resumeURL does (daemon.go, wired after the webui
+	// Server exists so it can honor server.public_url). nil when the web UI
+	// isn't available to wire it — buildRunURL then returns "", and the
+	// chain payload's run_url key is simply omitted (see buildChainPayload).
+	// Guarded by runURLMu: a trigger.daemon task can already be running (and
+	// finishing, which fires its own chain edges) before the daemon's boot
+	// sequence reaches the SetRunURLFunc call — registerDaemon fires the
+	// daemon body synchronously from Register, well before the engine's own
+	// Start() — so the write here is genuinely concurrent with reads from
+	// that run's finish path, not just sequenced-before by construction.
+	runURLMu   sync.RWMutex
+	runURLFunc func(runID string) string
+
 	guards *chainGuards
 }
 
@@ -270,6 +284,31 @@ func (e *Engine) SetSecrets(s secrets.Chain) {
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
 func (e *Engine) SetInputStore(s *runinput.Store) { e.inputStore = s }
+
+// SetRunURLFunc wires the function the engine uses to stamp a chained run's
+// completed-run link (the chain payload's run_url key — see
+// buildChainPayload). The daemon wires this after the webui Server exists,
+// mirroring the suspend notifier's resumeURL (daemon.go). Never called by the
+// engine itself before dispatch — pkg/trigger must not import pkg/webui.
+func (e *Engine) SetRunURLFunc(fn func(runID string) string) {
+	e.runURLMu.Lock()
+	e.runURLFunc = fn
+	e.runURLMu.Unlock()
+}
+
+// buildRunURL returns the run URL for runID, or "" when no SetRunURLFunc has
+// been wired (e.g. tests, or a daemon boot path that hasn't reached the webui
+// step yet) — buildChainPayload treats "" as "omit the key", never a broken
+// link.
+func (e *Engine) buildRunURL(runID string) string {
+	e.runURLMu.RLock()
+	fn := e.runURLFunc
+	e.runURLMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(runID)
+}
 
 // SetFireGuard installs a veto consulted before any run starts (see the
 // fireGuard field doc). A nil guard removes the veto.
@@ -524,24 +563,8 @@ func (e *Engine) Register(k task.Kinded) error {
 			return nil
 		}
 
-		// Cycle guard for success-chain edges (Fix 1, #387): before arming
-		// triggers, verify that registering s does not close a cycle in the
-		// trigger.chain graph. A cycle would cause A→B→A→… to loop forever
-		// without the depth-cap that protects on_failure_chain. We do this
-		// check while holding registerMu so a concurrent registration cannot
-		// sneak in a second half of a cycle between our check and our commit.
-		if s.Trigger.Chain != nil {
-			on := s.Trigger.Chain.ChainOn()
-			if on == registry.StatusSuccess || on == chainOnAlways {
-				if e.hasSuccessChainCycle(s.ID, s.Trigger.Chain.From) {
-					e.log.Error("task registration rejected: success-chain cycle detected",
-						zap.String("task", s.ID),
-						zap.String("chains_from", s.Trigger.Chain.From),
-						zap.String("hint", "A→B→A loops in trigger.chain would run forever; break the cycle"),
-					)
-					return fmt.Errorf("task %q: trigger.chain creates a success-chain cycle via %q", s.ID, s.Trigger.Chain.From)
-				}
-			}
+		if err := e.checkSuccessChainCycle(s); err != nil {
+			return err
 		}
 
 		if s.Trigger.Cron != "" {
@@ -784,11 +807,15 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 	now := time.Now().Unix()
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
 
-	// Remove rows for tasks no longer in the registry (deleted while daemon was offline).
-	allSpecs := e.registry.All()
-	knownIDs := make([]any, 0, len(allSpecs))
-	for _, s := range allSpecs {
-		knownIDs = append(knownIDs, s.ID)
+	// Remove rows for tasks no longer in the registry (deleted while daemon was
+	// offline). Over every kind: scheduleCron persists a row for a pipeline's
+	// cron too, so pruning against the kind: Task inventory alone would delete a
+	// live pipeline's row as orphaned and lose the next_run_at this function
+	// exists to read.
+	known := e.registry.AllKinded()
+	knownIDs := make([]any, 0, len(known))
+	for _, k := range known {
+		knownIDs = append(knownIDs, k.TaskID())
 	}
 	if len(knownIDs) > 0 {
 		placeholders := strings.Repeat("?,", len(knownIDs))
@@ -839,7 +866,7 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 		)
 	}
 	for _, m := range missed {
-		spec, ok := e.registry.Get(m.taskID)
+		k, ok := e.registry.GetKinded(m.taskID)
 		if !ok {
 			e.log.Warn("cron catchup: task no longer registered, skipping",
 				zap.String("task", m.taskID),
@@ -851,7 +878,7 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 			zap.String("task", m.taskID),
 			zap.Time("was_due", time.Unix(m.nextAt, 0)),
 		)
-		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, registry.TriggerCronCatchup) //nolint:errcheck
+		e.fireKinded(ctx, k, pkgruntime.RunOptions{}, registry.TriggerCronCatchup) //nolint:errcheck
 	}
 }
 

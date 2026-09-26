@@ -207,6 +207,9 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 		}
 		return err
 	}
+	if err := e.checkSuccessChainCycle(p); err != nil {
+		return err
+	}
 	// Validated cleanly — it must not linger in the deferred set (e.g. a
 	// previously-deferred pipeline whose stages have now arrived, or a
 	// re-registration after an edit). Disabled pipelines already returned above.

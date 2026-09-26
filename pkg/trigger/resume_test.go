@@ -462,7 +462,7 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	if _, err := reg.StartRunWithID(ctx, runID, spec.ID, "", string(registry.TriggerDaemon), registry.RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if _, err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 
@@ -544,7 +544,7 @@ func TestResumeRun_PreservesChainDepth(t *testing.T) {
 	}
 
 	origID, err := eng.fireAsync(context.Background(), spec,
-		pkgruntime.RunOptions{Input: map[string]any{"_chain_depth": 3}}, registry.TriggerChain)
+		pkgruntime.RunOptions{ChainDepth: 3}, registry.TriggerChain)
 	if err != nil {
 		t.Fatalf("fireAsync: %v", err)
 	}

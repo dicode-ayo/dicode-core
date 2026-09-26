@@ -1,7 +1,9 @@
 package deno
 
 import (
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -49,5 +51,33 @@ func TestTempFileNamingEmbedsRunID(t *testing.T) {
 				t.Errorf("parsed run_id = %q, want %q (full name %q)", got, tc.runID, base)
 			}
 		})
+	}
+}
+
+// TestModuleURL_IsAnImportableSpecifier: the runner imports the shim and the
+// task script by embedding their paths in a module specifier, so a raw OS path
+// will not do — a Windows separator is an escape sequence inside the string
+// literal, and a space is invalid in a URL.
+func TestModuleURL_IsAnImportableSpecifier(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dicode shim__x.ts")
+	got := moduleURL(path)
+
+	if !strings.HasPrefix(got, "file:///") {
+		t.Errorf("moduleURL(%q) = %q, want an absolute file: URL", path, got)
+	}
+	if strings.ContainsAny(got, `\ `) {
+		t.Errorf("specifier %q carries a raw separator or space", got)
+	}
+
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	want := filepath.ToSlash(path)
+	if !strings.HasPrefix(want, "/") {
+		want = "/" + want
+	}
+	if u.Path != want {
+		t.Errorf("specifier resolves to %q, want %q", u.Path, want)
 	}
 }

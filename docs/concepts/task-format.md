@@ -72,7 +72,7 @@ permissions:
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
-| `trigger.chain.params` | map | | User-defined keys merged into the downstream `input` map alongside engine-reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`). When omitted, `input` is the upstream's raw output unchanged. See [chain params and per-edge overrides](#chain-params-and-per-edge-overrides). |
+| `trigger.chain.params` | map | | User-defined keys merged into the downstream `input` map alongside engine-reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`, `run_url`). When omitted, `input` is the upstream's raw output unchanged. See [chain params and per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
@@ -272,13 +272,35 @@ input.output        // task-a's return value
 input.taskID        // "task-a"  (engine-reserved)
 input.runID         // upstream run ID
 input.status        // "success"
-input._chain_depth  // 0 on success chains
+input._chain_depth  // hop count: 1 for a directly-fired upstream
+input.run_url       // link to task-a's run in the web UI, or absent
 ```
 
-Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`)
-are rejected at config-load if present in `params`. When `params` is
-empty (the default), `input` stays as the upstream's raw value — no
-wrapping — so existing chains keep working unchanged.
+Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`,
+`run_url`) are rejected at config-load if present in `params`. When
+`params` is empty (the default), `input` stays as the upstream's raw
+value — no wrapping — so existing chains keep working unchanged. The
+engine tracks the hop count separately from this payload, so the depth
+ceiling applies to a bare edge too even though `_chain_depth` is not
+visible to the task there.
+
+`run_url` links to the *upstream* run (`input.runID`) — the one that
+just completed or failed, not the chained task's own run. On a
+`trigger.chain` edge it rides the same params-gate as the other reserved
+keys — present only when the edge declares at least one param; a bare
+edge with no `params` gets the raw output, unwrapped, with none of them.
+`on_failure_chain` has no such gate: every failure-chain fire wraps and
+stamps the full reserved-key set, `run_url` included, whether or not the
+edge declares any params of its own. It is built from `server.public_url`
+the same way an
+approval or suspend notification link is: set `server.public_url` for a
+link a notification recipient outside the daemon's own machine can
+actually open, since without it the link falls back to a `localhost`
+address. `run_url` is present for the whole of the daemon's normal
+operation and is omitted only during the narrow startup window before
+the trigger engine has been wired to build one — a notification task
+should still treat a missing key as "no link available" rather than
+assume the key is always there.
 
 String values in `params` may reference the upstream's runtime state
 via the dispatch-time interpolation grammar — `${input.output}`,
@@ -1250,7 +1272,7 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
 | `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. Sub-keys are derived via HKDF-SHA256 (encrypt always uses this; decrypt falls back to the legacy Argon2id derivation so blobs sealed before this change keep working — see #607). **Daemon-private contexts (currently `dicode/run-inputs/v1` and `dicode/approval-lock/v1`) are always denied even when `["*"]` is granted.** |
 | `runs_list_expired: true` | `dicode.runs.list_expired()` — run IDs whose stored input has passed its retention window |
-| `runs_delete_input: true` | `dicode.runs.delete_input(runID)` — drop a run's stored trigger payload. `dicode.runs.delete_inputs(runIDs)` is the batched form, gated by the same permission: it clears up to 5000 rows per call instead of one IPC round trip per row (#819) |
+| `runs_delete_input: true` | `dicode.runs.delete_input(runID)` — drop a run's stored trigger payload. If the underlying blob delete fails, the run's stored-input metadata is left intact (rather than cleared) and the call returns an error, so the next retention sweep retries it instead of the blob orphaning forever (#845). `dicode.runs.delete_inputs(runIDs)` is the batched form, gated by the same permission: it clears up to 5000 rows per call instead of one IPC round trip per row (#819), applying the same per-row failure handling and reporting failed IDs back in the response |
 | `runs_pin_input: true` / `runs_unpin_input: true` | `dicode.runs.pin_input(runID)` / `unpin_input(runID)` — exempt a run's input from retention cleanup, or release it |
 | `runs_replay: true` | `dicode.runs.replay(runID)` — re-fire a persisted run with its stored input |
 | `runs_get_input: true` | `dicode.runs.get_input(runID)` — read another run's stored input. **Sensitive:** grants cross-task input access, bounded only by write-time redaction |
@@ -1453,7 +1475,7 @@ permissions:
 - `task.yaml` is always required. A folder without it is ignored.
 - The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker` or `runtime: podman`.
 - Container tasks using `docker.build` need a `Dockerfile` in the task folder (or at the path set in `docker.build.dockerfile`).
-- `task.test.js` / `task.test.ts` / `task.test.py` is optional. `dicode task test` skips tasks without it.
+- `task.test.js` / `task.test.ts` / `task.test.py` is optional. `dicode task test` skips tasks without it. For `runtime: docker`/`podman` there is no separate test file — a `Dockerfile` build stage named `test` serves the same role (see [Testing & Validation](testing.md#docker--podman)); a task with no such stage is skipped the same way.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
 

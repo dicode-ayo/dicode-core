@@ -23,11 +23,12 @@ import (
 
 // fakeApprovalGate implements ApprovalGate over an in-memory pending map.
 type fakeApprovalGate struct {
-	mu        sync.Mutex
-	pending   map[string]string // task id → observed hash
-	approved  []string
-	states    map[string]approval.State // task id → canned State to assert against
-	stateErrs map[string]error          // task id → error State should return instead
+	mu           sync.Mutex
+	pending      map[string]string // task id → observed hash
+	approved     []string
+	states       map[string]approval.State       // task id → canned State to assert against
+	stateErrs    map[string]error                // task id → error State should return instead
+	commitRanges map[string]approval.CommitRange // task id → canned CommitRange to assert against
 }
 
 func newFakeGate() *fakeApprovalGate {
@@ -60,6 +61,26 @@ func (g *fakeApprovalGate) State(id string) (approval.State, error) {
 	return approval.State{TaskID: id}, nil
 }
 
+// StateFor mirrors the real Gate.StateFor: the canned state as-is when id is
+// pending (a real, non-empty hash), or with PendingHash forced empty
+// otherwise — a fake that echoed a stashed PendingHash for a non-pending id
+// would hide the exact bug #714's review comment flagged.
+func (g *fakeApprovalGate) StateFor(id string, k task.Kinded) approval.State {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, pending := g.pending[id]
+	if st, ok := g.states[id]; ok {
+		if !pending {
+			st.PendingHash = ""
+		}
+		return st
+	}
+	if pending {
+		return approval.State{TaskID: id, PendingHash: g.pending[id]}
+	}
+	return approval.State{TaskID: id, Kind: k.KindOf(), Enabled: k.IsEnabled()}
+}
+
 func (g *fakeApprovalGate) IsPending(id string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -67,11 +88,40 @@ func (g *fakeApprovalGate) IsPending(id string) bool {
 	return ok
 }
 
-func (g *fakeApprovalGate) PendingHash(id string) (string, bool) {
+// setCommitRange stashes the CommitRange PendingSnapshot(id) should return
+// alongside the hash, for tests that need a populated "what moved" strip.
+func (g *fakeApprovalGate) setCommitRange(id string, cr approval.CommitRange) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	h, ok := g.pending[id]
-	return h, ok
+	if g.commitRanges == nil {
+		g.commitRanges = map[string]approval.CommitRange{}
+	}
+	g.commitRanges[id] = cr
+}
+
+// PendingSnapshot reads the hash and the canned range in one method body,
+// matching the real Gate's single-locked-call shape.
+func (g *fakeApprovalGate) PendingSnapshot(id string) (approval.PendingView, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	hash, ok := g.pending[id]
+	if !ok {
+		return approval.PendingView{}, false
+	}
+	return approval.PendingView{Hash: hash, CommitRange: g.commitRanges[id]}, true
+}
+
+// PendingApproval is PendingSnapshot's counterpart on the real Gate; this
+// fake makes no cost distinction between the two, so it returns the same
+// canned range.
+func (g *fakeApprovalGate) PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	hash, ok = g.pending[id]
+	if !ok {
+		return "", approval.CommitRange{}, false
+	}
+	return hash, g.commitRanges[id], true
 }
 
 func (g *fakeApprovalGate) Approve(id string) error {
@@ -528,7 +578,7 @@ func TestAPI_ApprovalState_HappyPath(t *testing.T) {
 		Runtime:     "deno",
 		Triggers:    []approval.Trigger{{Kind: approval.TriggerCron, Cron: "0 9 * * *"}},
 		Permissions: approval.Permissions{Net: []string{"api.github.com"}},
-		Files:       []task.FileMeta{{Path: "task.js", Kind: task.FileKindRegular, Size: 12, Hash: "abc"}},
+		Files:       []approval.InventoryFile{{FileMeta: task.FileMeta{Path: "task.js", Kind: task.FileKindRegular, Size: 12, Hash: "abc"}}},
 	})
 	srv.SetApprovalGate(gate)
 
@@ -587,6 +637,106 @@ func TestAPI_ApprovalState_NoGate503(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
+// ── /api/tasks/{id}/state (#714) ─────────────────────────────────────────────
+//
+// Unlike /pending-state, this endpoint must answer for an armed task too —
+// that is the whole point of #714.
+
+func TestAPI_TaskState_ArmedTaskRendersWithEmptyPendingHash(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/armed-task")
+	gate := newFakeGate()
+	gate.setState("repo/armed-task", approval.State{
+		TaskID:      "repo/armed-task",
+		PendingHash: "stale-hash-must-not-leak",
+		Runtime:     "deno",
+		Permissions: approval.Permissions{Net: []string{"api.github.com"}},
+	})
+	srv.SetApprovalGate(gate)
+	// Deliberately not pending — gate.pending has no entry for this id.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Farmed-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var st approval.State
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st.PendingHash != "" {
+		t.Errorf("PendingHash = %q, want empty for an armed task", st.PendingHash)
+	}
+	if len(st.Permissions.Net) != 1 || st.Permissions.Net[0] != "api.github.com" {
+		t.Errorf("Permissions.Net = %+v", st.Permissions.Net)
+	}
+}
+
+func TestAPI_TaskState_PendingTaskMatchesPendingState(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	gate.setState("repo/pending-task", approval.State{
+		TaskID:      "repo/pending-task",
+		PendingHash: "hash-1",
+		Runtime:     "deno",
+	})
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var st approval.State
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st.PendingHash != "hash-1" {
+		t.Errorf("PendingHash = %q, want hash-1 — a genuinely pending task's hash is real and must still render", st.PendingHash)
+	}
+}
+
+func TestAPI_TaskState_UnknownTask404(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, false)
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/ghost/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_TaskState_NoGate503(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/x")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fx/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_TaskState_RequiresAuth(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, true)
+	registerMinimalTask(t, reg, "repo/armed-task")
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Farmed-task/state", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -685,7 +835,7 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 		TaskID:      "repo/pending-task",
 		PendingHash: "hash-1",
 		Permissions: approval.Permissions{Net: []string{"exfil.example.com"}},
-		Files:       []task.FileMeta{{Path: "task.yaml", Kind: task.FileKindRegular}},
+		Files:       []approval.InventoryFile{{FileMeta: task.FileMeta{Path: "task.yaml", Kind: task.FileKindRegular}}},
 	})
 	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
 	if err != nil {
@@ -707,6 +857,165 @@ func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 		if strings.Contains(body, leak) {
 			t.Errorf("confirm page leaked %q into a session-less surface: %s", leak, body)
 		}
+	}
+	// No prior lock record, no remote, no resolvable commit — the common
+	// case. ADR-0001 requires the strip be absent entirely rather than
+	// rendered blank or broken.
+	for _, missing := range []string{"Commit range:", "Commit:", "compare"} {
+		if strings.Contains(body, missing) {
+			t.Errorf("confirm page rendered commit-range markup with no CommitRange set: %q in %s", missing, body)
+		}
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersCommitRange is the populated-state
+// counterpart to the zero-value case above: when the gate resolves a commit
+// range, the confirm page renders the shortened SHAs and the compare link.
+func TestApproveLink_ConfirmPageRendersCommitRange(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	compareURL := "https://github.com/o/r/compare/" + from + "..." + to
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{
+		From: from, To: to, CompareURL: compareURL, Commits: 3,
+	})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	token := tokenFromLink(t, link)
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+token, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// The whole rendered range, not just its endpoints: a separator that
+	// duplicates shortCommit's abbreviation is invisible to a test that only
+	// looks for the two SHAs.
+	wantRange := "Commit range: <code>" + from[:12] + "..." + to[:12] + "</code>"
+	if !strings.Contains(body, wantRange) {
+		t.Errorf("confirm page missing the rendered range %q: %s", wantRange, body)
+	}
+	if !strings.Contains(body, `href="`+compareURL+`"`) {
+		t.Errorf("confirm page missing the compare link href %q: %s", compareURL, body)
+	}
+	if !strings.Contains(body, "(3 commits)") {
+		t.Errorf("confirm page missing the commit count %q: %s", "(3 commits)", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersSingularCommit covers the "1 commit"
+// wording: a count of exactly one, unbounded, must not pluralize.
+func TestApproveLink_ConfirmPageRendersSingularCommit(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: 1})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "(1 commit)") {
+		t.Errorf("confirm page missing the singular commit count %q: %s", "(1 commit)", body)
+	}
+	if strings.Contains(body, "(1 commits)") {
+		t.Errorf("confirm page pluralized a count of one: %s", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersBoundedCommits covers a walk that hit
+// its cap: the page must say "N+ commits", a lower bound, never claim an
+// exact count it does not have.
+func TestApproveLink_ConfirmPageRendersBoundedCommits(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: 500, CommitsBounded: true})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// html/template escapes "+" in text content as "&#43;".
+	if !strings.Contains(body, "(500&#43; commits)") {
+		t.Errorf("confirm page missing the bounded commit count %q: %s", "500+ commits", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageOmitsCommitsLabelWhenUnknown covers ADR-0001
+// for this decoration: an unresolvable count (e.g. a rewritten history)
+// must render nothing, never a false number.
+func TestApproveLink_ConfirmPageOmitsCommitsLabelWhenUnknown(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	from := strings.Repeat("a", 40)
+	to := strings.Repeat("b", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: from, To: to, Commits: -1})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "commit)") || strings.Contains(body, "commits)") {
+		t.Errorf("confirm page rendered a commit count it does not have: %s", body)
+	}
+}
+
+// TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne covers a re-pend at
+// the commit already on record: an override changed the resolved hash with no
+// new commit. A range of one implies a diff exists to review when git shows
+// none, so the page states the single commit instead.
+func TestApproveLink_ConfirmPageRendersUnchangedCommitAsOne(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	only := strings.Repeat("a", 40)
+	gate.setCommitRange("repo/pending-task", approval.CommitRange{From: only, To: only, Commits: 0})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+tokenFromLink(t, link), nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	wantSingle := "Commit: <code>" + only[:12] + "</code>"
+	if !strings.Contains(body, wantSingle) {
+		t.Errorf("confirm page missing the single-commit render %q: %s", wantSingle, body)
+	}
+	if strings.Contains(body, "Commit range:") {
+		t.Errorf("confirm page rendered a range for an unmoved commit: %s", body)
+	}
+	if !strings.Contains(body, "(0 commits)") {
+		t.Errorf("confirm page missing the zero-commit count for an unmoved commit: %s", body)
 	}
 }
 

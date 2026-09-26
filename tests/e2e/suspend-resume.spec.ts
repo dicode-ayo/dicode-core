@@ -10,6 +10,7 @@
 
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
+import { Run, runReturnValue } from './helpers/runs';
 
 const TASK_ID = 'e2e-tests/suspend-wizard';
 
@@ -89,7 +90,7 @@ test.describe('suspend/resume webui', () => {
 
     // Continuation succeeds with the submitted value echoed back.
     const done = await waitForStatus(request, continuationId, 'success');
-    expect((done.ReturnValue ?? done.return_value) as string).toContain('webui-e2e');
+    expect(runReturnValue(done as Run)).toContain('webui-e2e');
     expect((done.ParentRunID ?? done.parent_run_id) as string).toBe(runId);
 
     // Original run is now resumed; a second submit is rejected (single-use).

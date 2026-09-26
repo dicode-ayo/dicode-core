@@ -37,6 +37,15 @@ func Tag(taskID string, dockerfile []byte) string {
 	return Repository(taskID) + ":" + TagSuffix(dockerfile)
 }
 
+// TestTag returns the full image reference for a task's locally built test
+// image — the Dockerfile's "test" stage, built by dicode task test (see
+// pkg/tasktest.runContainerTest): "dicode-<taskID>:test-<hash>". Distinct
+// from Tag so a test build never cache-hits or is cache-hit by a production
+// build of the same Dockerfile content.
+func TestTag(taskID string, dockerfile []byte) string {
+	return Repository(taskID) + ":test-" + TagSuffix(dockerfile)
+}
+
 // Candidate is one locally present image, as listed by the container runtime.
 type Candidate struct {
 	Repository string // e.g. "dicode-mytask" or "localhost/dicode-mytask"
@@ -44,13 +53,16 @@ type Candidate struct {
 }
 
 // CurrentTags computes, for every registered task that builds a local image,
-// the repository → expected-tag mapping currently in use.
+// the repository → set of expected tags currently in use — both Tag's
+// production suffix and TestTag's, since a task's most recent `dicode task
+// test` run may have left a cached test image behind and it must not be
+// collected out from under a test that's mid-build/run.
 //
 // Tasks whose Dockerfile cannot be read land in skip instead — their images
 // are never collected (fail safe: a transient read error must not delete an
 // image that may still be in use).
-func CurrentTags(specs []*task.Spec) (current map[string]string, skip map[string]bool) {
-	current = make(map[string]string)
+func CurrentTags(specs []*task.Spec) (current map[string]map[string]bool, skip map[string]bool) {
+	current = make(map[string]map[string]bool)
 	skip = make(map[string]bool)
 	for _, spec := range specs {
 		if spec == nil || spec.Docker == nil || spec.Docker.Build == nil {
@@ -66,7 +78,8 @@ func CurrentTags(specs []*task.Spec) (current map[string]string, skip map[string
 			skip[repo] = true
 			continue
 		}
-		current[repo] = TagSuffix(content)
+		suffix := TagSuffix(content)
+		current[repo] = map[string]bool{suffix: true, "test-" + suffix: true}
 	}
 	return current, skip
 }
@@ -79,10 +92,10 @@ func CurrentTags(specs []*task.Spec) (current map[string]string, skip map[string
 //     basename happens to start with "dicode-";
 //   - the repository is not in skip (Dockerfile unreadable → keep all);
 //   - no registered task currently expects this exact tag — either the task
-//     is gone, or its Dockerfile hash moved on.
+//     is gone, or its Dockerfile hash (production or test) moved on.
 //
 // Untagged ("<none>") images are left for the runtime's own prune tooling.
-func SelectOrphans(images []Candidate, current map[string]string, skip map[string]bool) []string {
+func SelectOrphans(images []Candidate, current map[string]map[string]bool, skip map[string]bool) []string {
 	var orphans []string
 	for _, img := range images {
 		repo := strings.TrimPrefix(img.Repository, "localhost/")
@@ -95,7 +108,7 @@ func SelectOrphans(images []Candidate, current map[string]string, skip map[strin
 		if skip[repo] {
 			continue
 		}
-		if expected, ok := current[repo]; ok && expected == img.Tag {
+		if expected, ok := current[repo]; ok && expected[img.Tag] {
 			continue
 		}
 		orphans = append(orphans, img.Repository+":"+img.Tag)

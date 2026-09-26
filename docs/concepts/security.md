@@ -678,6 +678,49 @@ API route.
 
 ---
 
+## Suspend/Resume Param Redaction
+
+A suspended run's fire-time param overrides are carried forward in
+`runs.resume_params` so the continuation resumes with the same `ctx.params`
+(see [Suspendable Tasks](suspendable-tasks.md)). Before persisting that blob,
+`Registry.SuspendRun` (via `Engine.redactSecretBackedParams` in
+`pkg/trigger/resume.go`) replaces any param value that exactly matches a live
+secrets-chain entry with the redaction placeholder — but only for a param
+name the task's own `permissions.env` declares as a `secret:` key
+(`task.EnvEntry.Secret`). A param whose name isn't among the task's own
+declared secret grants is never resolved against the secrets chain at all,
+regardless of its name or value — the same substitution
+`pkg/registry/inputredact.go` applies to persisted run inputs, scoped the same
+way `resolveIfMissing` scopes secret lookups to a task's own grants. The
+dotted `params.<name>` paths actually redacted are recorded in the sibling
+`resume_params_redacted_fields` column, mirroring `input_redacted_fields`.
+
+`Engine.ResumeRun` restores the real value for each redacted field by
+re-resolving that same name from the secrets chain — never by trusting the
+placeholder left in the stored blob — and only when the task's *current*
+`permissions.env` still grants that name; if the grant was removed between
+suspend and resume, restoration fails and the resume is rejected rather than
+silently dropping or mis-restoring the value. A param whose name isn't among
+the task's declared secret grants, or whose value has no live secrets-chain
+match under that name, is left untouched in `resume_params`: dicode has no
+other way to recover a literal fire-time value later, and a resumed run must
+never run with a value it never actually had or was never granted.
+
+Restoration always re-resolves the secret's *current* value, not the literal
+value the original run fired with — the same live-lookup behavior every other
+`permissions.env` secret already has. If the underlying secret is rotated
+between suspend and resume, the continuation runs with the rotated value, not
+the one redacted at suspend time; there is no mechanism to detect or flag
+this, since the literal fire-time value is never persisted anywhere to
+compare against.
+
+`GET /api/runs/{runID}` (`apiGetRun` in `pkg/webui/server.go`) never returns
+the `ResumeParams` blob itself — same treatment as `ResumeToken`/`ResumeState`
+— but does return `ResumeParamsRedactedFields`, so a caller can see which
+fields were sensitive without seeing values.
+
+---
+
 ## Container Security Floor
 
 Docker and podman tasks accept host configuration from untrusted `task.yaml`
@@ -859,7 +902,15 @@ pending task's parsed spec:
 - **Files** — a per-file inventory: path, size, and a SHA-256 over exactly the
   bytes the content hash folds in for that file (`task.Inventory`). This is the
   one code-shaped fact the spec cannot carry, so a new or edited file is visible
-  without any content being rendered.
+  without any content being rendered. On a pending task's own review
+  (`Gate.State`, not `CurrentState`) each entry may also carry an optional
+  `status` of `new` or `changed` — a per-file "what moved" marker (#670)
+  computed by comparing git blob hashes between the previously-approved commit
+  and the one the pending content was observed at (the same pair
+  `Gate.PendingSnapshot`'s commit-range decoration uses), with no blob content
+  ever read. `status` is simply absent — never a false claim — when there is no
+  prior approval, no git history, or the git lookup itself fails; that omission
+  decorates the listing, it never withholds or invalidates it.
 
 Because it derives from the checkout rather than a baseline, a task with no git
 history, no prior approval and no cached snapshot still gets a complete surface.
@@ -890,6 +941,14 @@ truncation banner and no "too large to display" state to design.
 - `GET /api/tasks/{id}/pending-state` — same auth group as
   `POST /api/tasks/{id}/approve` (`requireSessionOrNonEphemeralAPIKey`). 404
   unknown task, 409 not pending, 503 gate not wired.
+- `GET /api/tasks/{id}/state` — same render, same auth group, but for *any*
+  task regardless of approval status (#714): 200 whether the task is pending
+  or already armed, so "what can this thing reach?" is answerable outside the
+  brief pend/approve window `pending-state` is scoped to. `pending_hash` is
+  only ever non-empty when the task is genuinely pending — an armed task's
+  render always carries an empty one, so it can never be replayed into
+  `POST /api/tasks/{id}/approve` as though it were a real review. 404 unknown
+  task, 503 gate not wired; never 409.
 - **Task detail** (`dc-task-detail.js`) — the panel opens by default for a
   pending task. Approve is armed only while a successfully fetched panel is on
   screen: collapsing it, a failed fetch, or a still-loading fetch all disarm,
@@ -898,7 +957,25 @@ truncation banner and no "too large to display" state to design.
   so it hands off to the detail page.
 - `/approve/{token}` — the session-less link travels through Slack, email or
   ntfy, so whatever it renders is visible to everyone in that channel. It shows
-  the task ID and its short hash, and nothing about the task's contents.
+  the task ID and its short hash, nothing about the task's contents, and —
+  when resolvable — the "what moved" decoration: the commit range from the
+  previously-approved commit to the one the pending content was observed at,
+  how many commits fall in that range (first-parent history — the commits
+  that landed on the tracked branch itself, not every commit pulled in
+  through a merge), and a link to the git host's compare
+  view (`Gate.PendingSnapshot`, `pkg/approval/comparelink.go`). The count is
+  capped (`internal/gitops.CommitCountBetween`, `pkg/approval/gate.go`): a walk
+  that reaches the cap before finding the baseline commit renders "N+ commits"
+  — a lower bound, never a wrong exact number — instead of paying the cost of
+  walking a large or divergent history in full. Every piece of that decoration
+  degrades to simply not rendering rather than an error or a broken link — no
+  prior approval, no git history, an unresolvable commit, or an unrecognized
+  remote host all just omit it (ADR-0001). Both ends of that range are fixed
+  when the task is held pending: the baseline is the commit the lock recorded
+  at that moment, so an approval or removal landing while the link is in
+  someone's inbox changes what the next pend shows, never what this one links
+  to — and the count, like the range, is resolved once per pending generation
+  and cached, so any number of prefetches or re-renders never repeat the walk.
 
 **Approval binds to the reviewed hash.** The panel sends
 `State.PendingHash` back with the approve request (#645). Between the panel
@@ -1050,10 +1127,12 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
 | Passphrase rotation requires current | bcrypt verify on `current` field |
 | Per-task IPC socket in 0700 dir | On Linux/macOS each task run's Unix socket lives inside a per-run directory created `0700` (`/tmp/dicode-<runID>/ipc.sock`). The directory makes the socket unreachable to other local users independent of the socket file's own mode and the process umask. The socket file is also `chmod 0600` as belt-and-suspenders. |
+| Windows IPC endpoint is loopback-only, token-guarded | Windows has no transport both task SDKs can speak — Deno has no Unix-socket support ([denoland/deno#18236](https://github.com/denoland/deno/issues/18236)) and `asyncio.open_unix_connection` is Unix-only — so a run's endpoint there is an ephemeral TCP port bound to `127.0.0.1` (`pkg/ipc/endpoint_windows.go`). It is unreachable off-host, but unlike the Unix socket in a `0700` directory it is reachable by any local process: the run-scoped HMAC handshake token is the only access control, and a run's token grants only that run's capabilities. The task's own sandbox grant is the exact `127.0.0.1:<port>`, so a Deno task declaring no network reaches the daemon and nothing else. The Python guard carries one Windows carve-out: asyncio builds the event loop's self-pipe out of a loopback TCP pair there (`socket.socketpair()` has no AF_UNIX to use), so a loopback connect is allowed when — and only when — a socket in the same process is listening on that port (`SO_ACCEPTCONN`, not a bare port match: a client socket's ephemeral port does not count). `permissions.net: []` therefore still refuses a local database or admin API a task did not open. It does not stop a task that deliberately listens on the port first — Winsock permits rebinding a live port under `SO_REUSEADDR` — and it cannot, because that is the self-pipe's own shape. `pkg/runtime/python/sdk/guard.py` states its own scope: a guardrail on declared intent for a trusted author, escapable by design, not a sandbox. The sandbox that does hold on Windows is Deno's, which is granted the exact `127.0.0.1:<port>` and nothing else. |
 | `dicode.lock` HMAC integrity | Approval records are HMAC-SHA256 signed with a key derived from the master key via Argon2id (`"dicode/approval-lock/v1"` context). v3 format: MAC covers `{bootstrapped, tasks}` so the bootstrap flag cannot be silently cleared. A MAC mismatch on load causes fail-closed: all records discarded, tasks require re-approval. Upgrade path: v1 unsigned and v2 tasks-only locks are accepted once and immediately upgraded to v3 in-place. |
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
+| Suspend/resume params redacted at rest | A fire-time param backed by a live secrets-chain entry AND declared under that same name in the task's own `permissions.env` is replaced with the redaction placeholder in `runs.resume_params` before it's written; `Engine.ResumeRun` restores it by re-resolving the secrets chain — checked again against the task's current `permissions.env` — not by reading the blob |
 | Pending-approval changes are reviewable, not blind | `Gate.State` renders the resolved task a pending change would arm — triggers, effective permissions, env declarations and a per-file inventory — on the dashboard before the operator confirms, without rendering code or dereferencing a secret |
 | Per-run IPC capability tokens require a real signing key | `ipc.IssueToken`/`ipc.VerifyToken` (`pkg/ipc/token.go`) fail closed with an error when handed a nil/empty secret, rather than signing/verifying under an implicit all-zero HMAC key. Both runtimes' per-version executors (`runtimes.deno.version` / `runtimes.python.version` pinned) snapshot the daemon's real `IPCSecret` at construction (`pkg/runtime/deno/manager.go`, `pkg/runtime/python/runtime.go`), and `pkg/daemon/runtimes_test.go` asserts it's non-nil for both — see [#718](https://github.com/dicode-ayo/dicode-core/issues/718). |
 | Task list doesn't misrepresent a pending task as live (#650) | A held task's toggle no longer shows a plain "on" green dot, its trigger column no longer hyperlinks a webhook route that 404s until approved, and `Run` is disabled with a tooltip rather than silently 400ing behind a raw `alert()`. A pending count/filter and a notification-tray entry (wired to the existing `approval:pending` WebSocket event) make held tasks discoverable at a glance instead of requiring a per-row badge scan. |

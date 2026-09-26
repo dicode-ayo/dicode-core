@@ -74,7 +74,7 @@ func TestOnFailureChainSpec_IsZero(t *testing.T) {
 }
 
 func TestOnFailureChainSpec_Validate_ReservedKeyCollision(t *testing.T) {
-	cases := []string{"taskID", "runID", "status", "output", "_chain_depth"}
+	cases := []string{"taskID", "runID", "status", "output", "_chain_depth", "run_url"}
 	for _, key := range cases {
 		t.Run(key, func(t *testing.T) {
 			s := OnFailureChainSpec{

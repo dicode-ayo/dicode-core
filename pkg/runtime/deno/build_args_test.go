@@ -33,7 +33,7 @@ func specWithEnv(env []task.EnvEntry) *task.Spec {
 // TestBuildDenoArgs_Env_List: declared names produce an explicit allowlist that
 // always carries the internal IPC + cache vars plus the declared names.
 func TestBuildDenoArgs_Env_List(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "FOO"}, {Name: "BAR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "FOO"}, {Name: "BAR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -57,7 +57,7 @@ func TestBuildDenoArgs_Env_Wildcard(t *testing.T) {
 	t.Setenv("WILDTEST_SHA", "sha")
 	t.Setenv("DICODE_MASTER_KEY", "root")
 
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "WILDTEST_*"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "WILDTEST_*"}}), "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -78,7 +78,7 @@ func TestBuildDenoArgs_Env_Wildcard(t *testing.T) {
 // TestBuildDenoArgs_Env_Omitted: no declared env still yields the baseline
 // allowlist (never bare --allow-env).
 func TestBuildDenoArgs_Env_Omitted(t *testing.T) {
-	args := buildDenoArgs(specWithEnv(nil), "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(specWithEnv(nil), "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -95,7 +95,7 @@ func TestBuildDenoArgs_Env_Omitted(t *testing.T) {
 func TestBuildDenoArgs_Env_ReadExposed(t *testing.T) {
 	spec := specWithEnv(nil)
 	spec.Permissions.EnvReadExposed = true
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -111,7 +111,7 @@ func TestBuildDenoArgs_Env_ReadExposed(t *testing.T) {
 func TestBuildDenoArgs_Env_ReadExposedWithNamed(t *testing.T) {
 	spec := specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}})
 	spec.Permissions.EnvReadExposed = true
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -124,7 +124,7 @@ func TestBuildDenoArgs_Env_ReadExposedWithNamed(t *testing.T) {
 // TestBuildDenoArgs_Env_NamedOnlyNeverBare: named entries without
 // env_read_exposed must produce an explicit allowlist, never bare --allow-env.
 func TestBuildDenoArgs_Env_NamedOnlyNeverBare(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -234,7 +234,7 @@ func TestBuildDenoArgs_LockFrozen_WithLockfile(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: taskDir,
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 
 	if !hasArgPrefix(args, "--lock=") {
 		t.Error("expected --lock=<path> arg when deno.lock exists")
@@ -258,7 +258,7 @@ func TestBuildDenoArgs_LockFrozen_NoLockfile(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: t.TempDir(),
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 
 	if hasArgPrefix(args, "--lock=") || hasArg(args, "--lock") {
 		t.Error("--lock must not appear when no deno.lock is present")
@@ -290,12 +290,200 @@ func TestBuildDenoArgs_LockFrozen_SkippedWhenDenoJsonPresent(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: taskDir,
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
 
 	if hasArgPrefix(args, "--lock=") || hasArg(args, "--lock") {
 		t.Error("--lock must not appear when task has deno.json")
 	}
 	if hasArg(args, "--frozen") {
 		t.Error("--frozen must not appear when task has deno.json")
+	}
+}
+
+// argValue returns the value of the first arg with the given "--flag=" prefix.
+func argValue(args []string, prefix string) (string, bool) {
+	for _, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return strings.TrimPrefix(a, prefix), true
+		}
+	}
+	return "", false
+}
+
+// loopbackSpec is a task declaring no permissions at all — the case where the
+// endpoint grant is the only thing standing between the task and a failed run.
+func loopbackSpec(perms task.Permissions) *task.Spec {
+	return &task.Spec{
+		ID: "loopback", Name: "loopback", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		TaskDir:     "/tmp/task",
+		Permissions: perms,
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NetGrant: a loopback endpoint is reached over
+// the network, so a task that declared no network must still be granted that
+// one host:port — and nothing wider.
+func TestBuildDenoArgs_LoopbackIPC_NetGrant(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "127.0.0.1:52341", "/shim.ts", "/runner.ts", nil, "2.3.3")
+
+	got, ok := argValue(args, "--allow-net=")
+	if !ok {
+		t.Fatalf("no --allow-net grant for the IPC endpoint: %v", args)
+	}
+	if got != "127.0.0.1:52341" {
+		t.Errorf("--allow-net = %q, want the endpoint alone", got)
+	}
+	if hasArg(args, "--allow-net") {
+		t.Error("bare --allow-net grants the whole network to a task that declared none")
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NetGrantPrependsToDeclared: the endpoint entry
+// is added to what the task declared, never in place of it.
+func TestBuildDenoArgs_LoopbackIPC_NetGrantPrependsToDeclared(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"api.github.com", "example.com:8443"}}),
+		"127.0.0.1:52341", "/shim.ts", "/runner.ts", nil, "2.3.3")
+
+	got, _ := argValue(args, "--allow-net=")
+	if want := "127.0.0.1:52341,api.github.com,example.com:8443"; got != want {
+		t.Errorf("--allow-net = %q, want %q", got, want)
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_WildcardNetUnchanged: ["*"] already covers the
+// endpoint, so it must stay the bare flag rather than collapse to a list.
+func TestBuildDenoArgs_LoopbackIPC_WildcardNetUnchanged(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"*"}}),
+		"127.0.0.1:52341", "/shim.ts", "/runner.ts", nil, "2.3.3")
+
+	if !hasArg(args, "--allow-net") {
+		t.Errorf(`net: ["*"] must stay a bare --allow-net: %v`, args)
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NoFilesystemGrant: an endpoint address is not a
+// path. Handing it to --allow-read/--allow-write would grant a nonsense path,
+// and a task declaring no fs access must get no --allow-write at all.
+func TestBuildDenoArgs_LoopbackIPC_NoFilesystemGrant(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "127.0.0.1:52341", "/shim.ts", "/runner.ts", nil, "2.3.3")
+
+	read, _ := argValue(args, "--allow-read=")
+	if strings.Contains(read, "127.0.0.1") {
+		t.Errorf("--allow-read carries the endpoint address: %q", read)
+	}
+	if hasArgPrefix(args, "--allow-write") {
+		t.Errorf("task declared no writable path, yet --allow-write was emitted: %v", args)
+	}
+}
+
+// TestBuildDenoArgs_UnixIPC_KeepsSocketGrants: a socket-path endpoint is
+// read+write, and a task that declared no network gets no network grant.
+func TestBuildDenoArgs_UnixIPC_KeepsSocketGrants(t *testing.T) {
+	args := buildDenoArgs(loopbackSpec(task.Permissions{}), "/run/dicode-1/ipc.sock", "/shim.ts", "/runner.ts", nil, "2.3.3")
+
+	read, _ := argValue(args, "--allow-read=")
+	if !strings.Contains(read, "/run/dicode-1/ipc.sock") {
+		t.Errorf("--allow-read %q missing the socket path", read)
+	}
+	write, ok := argValue(args, "--allow-write=")
+	if !ok || write != "/run/dicode-1/ipc.sock" {
+		t.Errorf("--allow-write = %q (present=%v), want the socket path alone", write, ok)
+	}
+	if hasArgPrefix(args, "--allow-net") {
+		t.Errorf("Unix socket IPC must not hand the task any network grant: %v", args)
+	}
+}
+
+// TestBuildDenoArgs_UnixIPC_NetGrant_VersionGated: on a Deno release that
+// gates Deno.connect({transport:"unix"}) behind net permission, the socket
+// path must appear as a "unix:<path>" --allow-net entry. Below the
+// threshold, no --allow-net flag is emitted at all — this is the regression
+// guard proving the fix is version-conditional, not unconditional (a version
+// below the threshold rejects "unix:" scope syntax outright).
+func TestBuildDenoArgs_UnixIPC_NetGrant_VersionGated(t *testing.T) {
+	const sock = "/run/dicode-1/ipc.sock"
+
+	cases := []struct {
+		name    string
+		version string
+		want    bool // whether a --allow-net flag should appear at all
+	}{
+		{"below threshold", "2.3.3", false},
+		{"just below threshold", "2.8.9", false},
+		{"at threshold", "2.9.0", true},
+		{"above threshold", "2.9.6", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := buildDenoArgs(loopbackSpec(task.Permissions{}), sock, "/shim.ts", "/runner.ts", nil, c.version)
+			got, ok := argValue(args, "--allow-net=")
+			if hasArg(args, "--allow-net") {
+				t.Fatalf("bare --allow-net must never be emitted for a nil net grant: %v", args)
+			}
+			if !c.want {
+				if ok {
+					t.Errorf("version %s: expected no --allow-net flag, got %q", c.version, got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("version %s: expected --allow-net=unix:%s, got no --allow-net flag: %v", c.version, sock, args)
+			}
+			if got != "unix:"+sock {
+				t.Errorf("version %s: --allow-net = %q, want %q", c.version, got, "unix:"+sock)
+			}
+		})
+	}
+}
+
+// TestBuildDenoArgs_UnixIPC_NetGrant_PrependsToDeclared: the unix: scope
+// entry is added ahead of whatever hosts the task declared, never in place
+// of them.
+func TestBuildDenoArgs_UnixIPC_NetGrant_PrependsToDeclared(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"example.com"}}),
+		"/run/dicode-1/ipc.sock", "/shim.ts", "/runner.ts", nil, "2.9.6")
+
+	got, ok := argValue(args, "--allow-net=")
+	if !ok {
+		t.Fatalf("no --allow-net grant: %v", args)
+	}
+	if want := "unix:/run/dicode-1/ipc.sock,example.com"; got != want {
+		t.Errorf("--allow-net = %q, want %q", got, want)
+	}
+}
+
+// TestBuildDenoArgs_UnixIPC_NetGrant_WildcardUnchanged: net: ["*"] already
+// covers the socket, so a version that gates unix-socket connects must not
+// add a redundant "unix:" entry — it stays the bare flag.
+func TestBuildDenoArgs_UnixIPC_NetGrant_WildcardUnchanged(t *testing.T) {
+	args := buildDenoArgs(
+		loopbackSpec(task.Permissions{Net: []string{"*"}}),
+		"/run/dicode-1/ipc.sock", "/shim.ts", "/runner.ts", nil, "2.9.6")
+
+	if !hasArg(args, "--allow-net") {
+		t.Errorf(`net: ["*"] must stay a bare --allow-net: %v`, args)
+	}
+	if hasArgPrefix(args, "--allow-net=") {
+		t.Errorf("net: [\"*\"] must not also emit a --allow-net= value: %v", args)
+	}
+}
+
+// TestBuildDenoArgs_LoopbackIPC_NeverGetsUnixScope: a loopback (host:port)
+// transport never gets a "unix:" entry, regardless of Deno version — the
+// gate applies only to the Unix-socket transport.
+func TestBuildDenoArgs_LoopbackIPC_NeverGetsUnixScope(t *testing.T) {
+	for _, version := range []string{"2.3.3", "2.9.0", "2.9.6"} {
+		args := buildDenoArgs(loopbackSpec(task.Permissions{}), "127.0.0.1:52341", "/shim.ts", "/runner.ts", nil, version)
+		got, ok := argValue(args, "--allow-net=")
+		if !ok || got != "127.0.0.1:52341" {
+			t.Errorf("version %s: --allow-net = %q (present=%v), want the loopback endpoint alone", version, got, ok)
+		}
+		if strings.Contains(got, "unix:") {
+			t.Errorf("version %s: loopback transport must never get a unix: entry: %q", version, got)
+		}
 	}
 }

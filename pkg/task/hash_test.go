@@ -932,7 +932,7 @@ func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
 // task's hash_include list — via the lightweight readHashInclude parse —
 // or hash_include silently does nothing for any task registered through
 // those source types, even though the same task registered via a taskset.yaml
-// source (pkg/taskset/source.go's snapHash) would correctly honor it.
+// source (pkg/taskset/source.go's contentHashFor) would correctly honor it.
 func TestScanDir_HonorsHashInclude(t *testing.T) {
 	root := t.TempDir()
 	shared := filepath.Join(root, "shared.ts")

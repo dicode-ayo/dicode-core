@@ -78,7 +78,7 @@ return { processed: limit }
 
 ## SDK globals
 
-The Deno runtime injects all globals via a Unix socket bridge. No imports needed — all globals are available at the top level.
+The Deno runtime injects all globals via an IPC bridge — a Unix socket, or a loopback TCP connection on Windows. No imports needed — all globals are available at the top level.
 
 ### Logging
 
@@ -375,7 +375,7 @@ The failure handler receives:
 
 ```typescript
 // input to the failure handler task:
-// { taskID, runID, status, output, _chain_depth, ...params }
+// { taskID, runID, status, output, _chain_depth, run_url, ...params }
 export default async function main({ input }: any) {
   const { taskID, runID, status, _chain_depth } = input
   console.log(`Task ${taskID} failed (depth ${_chain_depth}) — run ${runID}`)
@@ -453,7 +453,7 @@ Permissions are derived from `task.yaml`:
 
 | Permission | Source |
 | --- | --- |
-| `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist |
+| `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist. On Windows the run's IPC endpoint (`127.0.0.1:<port>`) is prepended to the list, since the task reaches it over loopback TCP rather than a Unix socket. On other platforms, the IPC socket is a filesystem path — but on a Deno release that gates `Deno.connect({transport:"unix"})` behind net permission (2.9.0+), a `unix:<path>` entry scoped to that one socket is prepended instead. This is a narrow grant for the daemon's own control socket, not general network access; a version below 2.9.0 gets no such entry (it rejects the `unix:` scope syntax outright) |
 | `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + cache vars + all `env:` vars (a `PREFIX_*` pattern entry expands to its matching host var names, minus the daemon credential denylist). Bare `--allow-env` (read any var) when `env_read_exposed: true` — node-compat / npm escape hatch |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |

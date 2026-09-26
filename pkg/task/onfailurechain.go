@@ -108,12 +108,13 @@ var reservedChainParamKeys = map[string]struct{}{
 	"status":       {},
 	"output":       {},
 	"_chain_depth": {},
+	"run_url":      {},
 }
 
 // IsReservedChainParamKey reports whether name is one of the engine-stamped
 // keys that user-supplied params cannot collide with (taskID, runID, status,
-// output, _chain_depth). Exposed so other packages (pkg/taskset) can enforce
-// the invariant at merge time without duplicating the key list.
+// output, _chain_depth, run_url). Exposed so other packages (pkg/taskset) can
+// enforce the invariant at merge time without duplicating the key list.
 func IsReservedChainParamKey(name string) bool {
 	_, ok := reservedChainParamKeys[name]
 	return ok

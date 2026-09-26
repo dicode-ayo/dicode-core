@@ -41,6 +41,19 @@ A restart that races its own not-yet-exited predecessor will now fail rather tha
 
 `data_dir` unset, `DICODE_DATA_DIR` unset and no home directory now fails at load with `cannot determine the data directory: set data_dir or DICODE_DATA_DIR`. It previously resolved to `/.dicode` and ran from there. A systemd unit with no `User=` (and therefore no `$HOME`) is the way to hit this: set `data_dir` in the config, or `Environment=DICODE_DATA_DIR=...` on the unit.
 
+### Bundled Deno version bumped to 2.9.6
+
+The Deno binary dicode downloads and runs tasks with moves from 2.3.3 to
+2.9.6. Deno 2.9 gates `Deno.connect({ transport: "unix" })` — which every
+Deno task uses to reach the daemon's control socket — behind net permission,
+scoped as `unix:<path>`. The runtime now grants that one socket path
+automatically; it is a narrow addition scoped to the daemon's own IPC socket,
+not general network access, and does not change what hosts a task can reach.
+
+An operator pinned to an older Deno release via `runtimes.deno.version` is
+unaffected: the grant is version-conditional and is omitted below Deno 2.9.0,
+which does not understand the `unix:` scope syntax.
+
 ## 0.4.1
 
 ### Git remotes on internal hosts are refused

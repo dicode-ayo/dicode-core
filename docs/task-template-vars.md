@@ -13,10 +13,17 @@ silently collapsing to `""`.
 | `HOME`          | Home directory of the user running the dicode daemon.                | Always (best-effort — absent on systems where `UserHomeDir` fails). |
 | `TASK_SET_DIR`  | Absolute path of the directory containing the root `taskset.yaml` of the source that loaded this task. | Only when the task is loaded via a TaskSet source. Absent for raw local/git folder sources and unit tests. |
 | `DATADIR`       | Absolute path of the daemon's data directory (`config.DataDir`, e.g. `~/.dicode`). | Always (when loaded by the daemon). |
+| `TEMPDIR`       | Absolute path of the directory the runtimes write their per-run wrapper files into (`os.TempDir()`, resolved to absolute — `$TMPDIR` or `/tmp` on Unix, `GetTempPath` on Windows). | Always (best-effort — absent if the working directory cannot be resolved). |
+| `CACHEDIR`      | Absolute path of the user cache directory (`os.UserCacheDir()`, resolved to absolute — `$XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows). | Always (best-effort — absent on systems where `UserCacheDir` fails). |
 
 There is no `SKILLS_DIR`, `CONFIG_DIR`, or `SOURCE_ROOT` — use `TASK_DIR` and
 `TASK_SET_DIR` to derive the paths you need. For example, a shared `skills/`
 directory one level above a taskset is `${TASK_SET_DIR}/../skills`.
+
+Prefer `${CACHEDIR}` and `${TEMPDIR}` over a literal `~/.cache` or `/tmp` in a
+`permissions.fs[].path`. Both literals name the right directory on Linux only,
+and a grant that points somewhere the task never writes fails as a permission
+error at the far end of a download, not at load time.
 
 ## Fields that accept template expansion
 

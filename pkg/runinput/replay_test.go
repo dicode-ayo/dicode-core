@@ -171,7 +171,7 @@ func TestReplay_SuspendedRunRejected(t *testing.T) {
 	if err := r.SetRunInput(ctx, runID, key, size, storedAt, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 

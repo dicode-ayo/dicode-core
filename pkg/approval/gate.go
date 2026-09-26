@@ -1,9 +1,6 @@
 package approval
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -23,6 +20,12 @@ const BuiltinSource = "buildin"
 // ErrPending is returned (wrapped) by FireGuard when a fire is vetoed because
 // the task is awaiting approval.
 var ErrPending = errors.New("task pending approval")
+
+// commitCountLimit bounds how many commits PendingApproval's
+// CommitRange.Commits walk will visit before giving up and reporting a
+// lower bound instead of an exact count — capping the cost of a large
+// history rather than walking it in full.
+const commitCountLimit = 500
 
 // ErrHashMismatch is returned (wrapped) by ApproveIfHash when the task's
 // currently pending hash no longer matches the hash the caller reviewed —
@@ -52,12 +55,16 @@ type Policy struct {
 // Decoupled from the trigger engine via the arm callback so it can be unit
 // tested with a fake.
 type Gate struct {
-	policy   Policy
-	lock     *Lock
-	arm      func(task.Kinded) error
-	hashFn   func(task.Kinded) (string, error)
-	commitFn func(task.Kinded) string
-	log      *zap.Logger
+	policy     Policy
+	lock       *Lock
+	arm        func(task.Kinded) error
+	hashFn     func(task.Kinded) (string, error)
+	commitFn   func(task.Kinded) (commit, remote string)
+	treeDiffFn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)
+	// commitCountFn resolves the "commits since approval" decoration — see
+	// PendingSnapshot's use of it via commitCount.
+	commitCountFn func(dir, from, to string, limit int) (count int, bounded bool, err error)
+	log           *zap.Logger
 
 	mu          sync.Mutex
 	pending     map[string]pendingEntry
@@ -93,9 +100,9 @@ type Gate struct {
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
-// commit observed alongside it.
+// commit, remote and approval baseline observed alongside it.
 //
-// Both are published in one critical section (see Admit's default case), so a
+// All are published in one critical section (see Admit's default case), so a
 // reader can never observe a hash paired with a commit from a different
 // generation. It does not make the two observations simultaneous: each is read
 // from disk in turn, so a source that syncs mid-Admit can pair a hash with a
@@ -107,6 +114,20 @@ type pendingEntry struct {
 	// commit is the git commit the pending content was observed at, "" when
 	// the source has no git history.
 	commit string
+	// remote is the "origin" remote URL of the repository commit was read
+	// from, "" when there is none. Resolved here so reads of this entry stay
+	// in-memory: /approve/{token} is prefetched by mail clients and chat
+	// unfurlers, and must never walk the filesystem per view.
+	remote string
+	// baseCommit is the commit the lock recorded for this task when the
+	// generation pended — the "from" endpoint of the commit-range
+	// decoration, "" when there is no prior approval or it recorded no
+	// commit. Captured here rather than read off the lock per render so
+	// every field a renderer pairs it with describes the same generation:
+	// an approval or eviction landing while this generation sits pending
+	// changes the lock, never an entry already published, and the next
+	// Admit republishes the entry against the new baseline.
+	baseCommit string
 	// enabled is the resolved enabled flag observed alongside hash, after
 	// previewFn (if any) — the same value State() renders and
 	// PendingInfo/ApproveReporting report to `dicode task pending`/`dicode
@@ -118,6 +139,51 @@ type pendingEntry struct {
 	// from a hold nothing depends on to one that genuinely blocks real
 	// triggers (#822).
 	enabled bool
+	// status caches the per-file git tree-diff status computed by
+	// inventoryOf (the "what moved" markers, #670) for this pending
+	// generation. from/to (and therefore every file's status) are fixed for
+	// the whole lifetime of a pendingEntry value — Admit's default case is
+	// the only place g.pending[id] is ever written to a "still pending"
+	// state, and it always stores a brand new pendingEntry struct literal,
+	// never mutates an existing one's hash/commit/kinded in place — so a
+	// pointer here is shared, unchanged, by every copy of this pendingEntry
+	// read out of the map for as long as this generation lasts, and a
+	// concurrent Admit that replaces the entry (re-pend at a new hash, or
+	// even an unchanged-hash reconcile poll that re-resolves commit — see
+	// Admit's comment on why commit is re-resolved on every pend) always
+	// installs a fresh *fileStatusCache, so stale data can never survive a
+	// generation change. See fileStatusCache's own doc comment for the
+	// sync.Once mechanics this relies on to need no second g.mu acquisition.
+	status *fileStatusCache
+	// commits caches the once-computed "commits since approval" walk for
+	// this pending generation, the same way status caches the per-file
+	// tree-diff — see commitCountCache's doc comment.
+	commits *commitCountCache
+}
+
+// commitCountCache holds the once-computed commit-count walk result for one
+// pending generation, mirroring fileStatusCache: /approve/{token} is
+// prefetched by mail clients and chat unfurlers, so any number of renders of
+// the same generation must cost at most one git walk, not one per render.
+type commitCountCache struct {
+	once    sync.Once
+	count   int
+	bounded bool
+}
+
+// fileStatusCache holds the once-computed git tree-diff status map
+// (inventoryOf's expensive half, #670) for one pending generation.
+// pendingEntry values are copied out of g.pending by value under g.mu and
+// then read lock-free (see pendingEntry's and State's doc comments), so the
+// cache itself has to be reference-shared rather than value-shared: byPath
+// is populated at most once, by whichever concurrent renderer's
+// once.Do(...) wins the race, and every other copy of the same pendingEntry
+// — however many goroutines are mid-render against this exact generation —
+// observes and reuses that same result instead of repeating the git tree
+// walk. No second lock on g.mu is ever needed to populate or read it.
+type fileStatusCache struct {
+	once   sync.Once
+	byPath map[string]string
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -128,22 +194,40 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:   policy,
-		lock:     lock,
-		arm:      arm,
-		hashFn:   ContentHash,
-		commitFn: headCommitOf,
-		log:      log,
-		pending:  map[string]pendingEntry{},
-		admitted: map[string]task.Kinded{},
+		policy:        policy,
+		lock:          lock,
+		arm:           arm,
+		hashFn:        ContentHash,
+		commitFn:      headCommitOf,
+		treeDiffFn:    gitops.TreeBlobHashesForPathsAtTwoCommits,
+		commitCountFn: gitops.CommitCountBetween,
+		log:           log,
+		pending:       map[string]pendingEntry{},
+		admitted:      map[string]task.Kinded{},
 	}
 }
 
 // SetHashFunc overrides the content-hash function (tests).
 func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn }
 
-// SetCommitFunc overrides the commit resolver (tests).
-func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
+// SetCommitFunc overrides the commit/remote resolver (tests).
+func (g *Gate) SetCommitFunc(fn func(task.Kinded) (commit, remote string)) { g.commitFn = fn }
+
+// SetTreeDiffFunc overrides the per-file git tree-diff resolver used to
+// compute #670's "what moved" markers (tests) — e.g. to wrap the real
+// gitops.TreeBlobHashesForPathsAtTwoCommits and count invocations, proving
+// the fileStatusCache above serves a second render from cache rather than
+// re-walking the trees.
+func (g *Gate) SetTreeDiffFunc(fn func(dir, from, to string, absPaths []string) (fromHashes, toHashes map[string]string, err error)) {
+	g.treeDiffFn = fn
+}
+
+// SetCommitCountFunc overrides the commit-count resolver used to compute the
+// "commits since approval" decoration (tests) — e.g. to fake a large or
+// diverged history without building a real git fixture for it.
+func (g *Gate) SetCommitCountFunc(fn func(dir, from, to string, limit int) (count int, bounded bool, err error)) {
+	g.commitCountFn = fn
+}
 
 // SetBuiltinPinned records whether the buildin source is pinned to a tag.
 // Call once at startup, before Admit runs concurrently — it is not
@@ -265,13 +349,26 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// lags behind the last commit this content was seen at yields a range
 		// full of commits that never touched the task. Kept outside the lock —
 		// it opens the repository.
-		commit := g.commitFn(k)
+		commit, remote := g.commitFn(k)
+		// Read outside g.mu, like commit above: the lock guards itself, and
+		// taking it under g.mu would nest the two for a value that is a
+		// snapshot either way.
+		base := ""
+		if rec, ok := g.lock.Get(id); ok {
+			base = rec.Commit
+		}
 
 		g.mu.Lock()
-		// hash and commit are written together in one critical section: a
-		// concurrent Approve/ApproveIfHash can never observe a pending[id]
-		// whose fields disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, enabled: enabled}
+		// hash, commit, remote, and baseCommit are written together in one
+		// critical section: a concurrent Approve/ApproveIfHash can never
+		// observe a pending[id] whose fields disagree on which generation they
+		// describe.
+		// status is always a brand new *fileStatusCache — never carried over
+		// from prev — so a re-pend (even one that only re-resolves commit
+		// with an unchanged hash) can never serve a status computed against
+		// a different generation's from/to (see pendingEntry.status's doc
+		// comment).
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, commit: commit, remote: remote, baseCommit: base, enabled: enabled, status: &fileStatusCache{}, commits: &commitCountCache{}}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -292,7 +389,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// of an unchanged trusted task would open the repository for nothing.
 		commit := ""
 		if !hashUnchanged {
-			commit = g.commitFn(k)
+			commit, _ = g.commitFn(k)
 		}
 		if err := g.lock.Record(id, hash, by, commit); err != nil {
 			// Inventory write failure must not keep a trusted task from
@@ -320,22 +417,23 @@ func taskDirOf(k task.Kinded) string {
 	}
 }
 
-// headCommitOf returns the git commit k's task directory currently sits at, or
-// "" when there is none: a dir-less inline task, a local source outside any
-// repository, or a repository with no commit yet. Every failure degrades to ""
-// rather than surfacing, because the commit is decoration on the approval
-// record — no gate decision reads it — and "outside a repository" is the
+// headCommitOf returns the git commit k's task directory currently sits at
+// and the "origin" remote of the repository holding it, or "" for both when
+// there is none: a dir-less inline task, a local source outside any
+// repository, or a repository with no commit yet. Every failure degrades to
+// "" rather than surfacing, because both are decoration on the approval
+// record — no gate decision reads them — and "outside a repository" is the
 // ordinary state of a local source rather than a fault.
-func headCommitOf(k task.Kinded) string {
+func headCommitOf(k task.Kinded) (commit, remote string) {
 	dir := taskDirOf(k)
 	if dir == "" {
-		return ""
+		return "", ""
 	}
-	commit, err := gitops.HeadCommit(dir)
+	commit, remote, err := gitops.HeadInfo(dir)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return commit
+	return commit, remote
 }
 
 // Approve approves a pending task: records its observed hash in the lock and
@@ -450,38 +548,64 @@ func (g *Gate) IsPending(id string) bool {
 	return ok
 }
 
-// PendingHash returns the content hash observed when id was held pending,
-// and whether id is pending at all. Approval tokens are bound to this hash.
-func (g *Gate) PendingHash(id string) (string, bool) {
-	hash, _, ok := g.PendingInfo(id)
-	return hash, ok
+// PendingView is the snapshot of a pending entry's externally-visible
+// fields, returned by PendingSnapshot. Every field describes one pending
+// generation, atomically.
+type PendingView struct {
+	// Hash is the content hash observed when the task was held pending.
+	// Approval tokens are bound to this hash.
+	Hash string
+	// Enabled is the resolved enabled flag observed when the task was held
+	// pending. False means the task is disabled (task.yaml or a
+	// taskset/dicode.yaml override) — the trigger engine registers it with
+	// zero triggers regardless of approval state (#822), so a pending
+	// listing can surface that instead of implying the hold is blocking
+	// something that would otherwise run.
+	Enabled bool
+	// CommitRange is the "what moved" decoration: From is the commit the
+	// last approval had recorded when this generation pended, To the commit
+	// the currently pending content was observed at — not whatever HEAD has
+	// moved to since, and not whatever the lock holds by render time. A
+	// zero value is the ordinary state for a source with no git history or a
+	// task pending for the first time; its absence is never an error
+	// (ADR-0001). From is recorded without the remote it was resolved
+	// against, so repointing a source at an unrelated repository between two
+	// approvals yields a compare link across two histories, which the host
+	// renders as a dead or empty diff rather than a misleading one.
+	CommitRange CommitRange
 }
 
-// PendingEnabled reports the resolved enabled flag observed when id was held
-// pending, and whether id is pending at all. False means the task is
-// disabled (task.yaml or a taskset/dicode.yaml override) — the trigger
-// engine registers it with zero triggers regardless of approval state
-// (#822), so a pending listing can surface that instead of implying the
-// hold is blocking something that would otherwise run.
-func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
-	_, enabled, ok = g.PendingInfo(id)
-	return enabled, ok
-}
-
-// PendingInfo returns the content hash and resolved enabled flag observed
-// when id was held pending, and whether id is pending at all, all read under
-// one locked call. Callers that need both fields (e.g. `dicode task pending`)
-// must use this rather than PendingHash + PendingEnabled: two separate locked
-// calls can straddle a concurrent Approve/Forget and observe the id pending
-// for one call but not the other, which — since PendingEnabled then reports
-// ok=false and its zero value false — silently mislabels an enabled task as
-// disabled. See PendingHash/PendingEnabled for field semantics.
-func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	ent, ok := g.pending[id]
+// PendingSnapshot returns id's pending hash, resolved enabled flag, and
+// commit range, plus whether id is pending at all. Callers that need more
+// than one of Hash/Enabled must use this rather than two separate accessor
+// calls: two locked reads of the pending map can straddle a concurrent
+// Approve/Forget/Admit and pair fields from different pending generations —
+// e.g. an enabled task reported disabled because the second call's ok came
+// back false and zero-valued. Named PendingSnapshot rather than Pending to
+// avoid colliding with Pending() (the sorted list of pending ids).
+//
+// Every returned field — the whole CommitRange included — comes from the one
+// pending-map entry read under g.mu below, so they always describe the same
+// generation: an Approve or Forget landing mid-call changes what the NEXT
+// pend will render, never the view this one returns.
+//
+// PendingHash, PendingEnabled and PendingInfo are thin wrappers over this
+// for callers that only ever needed one shape. PendingApproval deliberately
+// is NOT: it needs CommitRange.Commits, the one field here that costs a git
+// walk rather than reading already-resolved in-memory state, so it does its
+// own locked read via pendingEntryFor instead of paying that cost on every
+// caller of this method — see PendingApproval's doc comment.
+//
+// CommitRange.Commits/CommitsBounded on the value returned here are always
+// -1/false (unresolved), never computed: this method backs the "dicode
+// list" / "dicode task pending" status path (daemon.SetPendingApprovals)
+// and MintApproveLink, neither of which reads them, and a git-log walk on
+// every status query for every pending task would make a cheap, purely
+// in-memory operation pay for decoration nothing asked for.
+func (g *Gate) PendingSnapshot(id string) (PendingView, bool) {
+	ent, ok := g.pendingEntryFor(id)
 	if !ok {
-		return "", false, false
+		return PendingView{}, false
 	}
 	// ent.enabled — the resolved-enabled snapshot recorded alongside hash in
 	// the same critical section (see pendingEntry's doc comment) — not
@@ -489,7 +613,114 @@ func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
 	// mutation from a different generation than the one hash describes,
 	// exactly the cross-generation mismatch this method's contract promises
 	// callers it won't return.
-	return ent.hash, ent.enabled, true
+	from, to := approvalRange(ent)
+	return PendingView{
+		Hash:    ent.hash,
+		Enabled: ent.enabled,
+		CommitRange: CommitRange{
+			From: from, To: to, CompareURL: compareURL(ent.remote, from, to),
+			Commits: -1, CommitsBounded: false,
+		},
+	}, true
+}
+
+// pendingEntryFor is the one locked map read PendingSnapshot and
+// PendingApproval are each built from, so a caller can never observe fields
+// straddling two different generations the way two separate locked reads
+// could — the same guarantee PendingSnapshot's doc comment describes.
+func (g *Gate) pendingEntryFor(id string) (pendingEntry, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ent, ok := g.pending[id]
+	return ent, ok
+}
+
+// commitCount resolves the "commits since approval" decoration for dir
+// between from and to via g.commitCountFn, degrading to (-1, false) — never
+// a false claim — whenever from, to or dir is unknown, or the walk cannot
+// resolve one of them at all. Mirrors compareURL's early return for the same
+// "nothing to report" conditions.
+//
+// cache is non-nil for a genuinely pending generation (see
+// commitCountCache's doc comment): the walk runs at most once no matter how
+// many times this generation is rendered, the same guarantee
+// fileStatusesOf's cache gives the per-file markers and for the same reason
+// (/approve/{token} prefetch). nil degrades to "always recompute", mirroring
+// fileStatusesOf's own nil branch.
+func (g *Gate) commitCount(dir, from, to string, cache *commitCountCache) (count int, bounded bool) {
+	if dir == "" || from == "" || to == "" {
+		return -1, false
+	}
+	compute := func() (int, bool) {
+		n, b, err := g.commitCountFn(dir, from, to, commitCountLimit)
+		if err != nil {
+			return -1, false
+		}
+		return n, b
+	}
+	if cache == nil {
+		return compute()
+	}
+	cache.once.Do(func() {
+		cache.count, cache.bounded = compute()
+	})
+	return cache.count, cache.bounded
+}
+
+// PendingHash returns the content hash observed when id was held pending,
+// and whether id is pending at all. See PendingSnapshot.
+func (g *Gate) PendingHash(id string) (string, bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Hash, ok
+}
+
+// PendingEnabled reports the resolved enabled flag observed when id was held
+// pending, and whether id is pending at all. See PendingSnapshot.
+func (g *Gate) PendingEnabled(id string) (enabled, ok bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Enabled, ok
+}
+
+// PendingInfo returns the content hash and resolved enabled flag observed
+// when id was held pending, and whether id is pending at all. See
+// PendingSnapshot.
+func (g *Gate) PendingInfo(id string) (hash string, enabled bool, ok bool) {
+	v, ok := g.PendingSnapshot(id)
+	return v.Hash, v.Enabled, ok
+}
+
+// PendingApproval returns the content hash observed when id was held pending
+// together with its full "what moved" commit-range decoration, Commits
+// included — unlike PendingSnapshot, which leaves Commits unresolved. This
+// is the one accessor that actually renders the count (the /approve/{token}
+// confirm page), so it is the one that pays for it: its own locked read via
+// pendingEntryFor, not a call through PendingSnapshot, so no other
+// PendingSnapshot caller pays for a git walk it never asked for.
+func (g *Gate) PendingApproval(id string) (hash string, cr CommitRange, ok bool) {
+	ent, ok := g.pendingEntryFor(id)
+	if !ok {
+		return "", CommitRange{}, false
+	}
+	from, to := approvalRange(ent)
+	commits, bounded := g.commitCount(taskDirOf(ent.kinded), from, to, ent.commits)
+	return ent.hash, CommitRange{
+		From: from, To: to, CompareURL: compareURL(ent.remote, from, to),
+		Commits: commits, CommitsBounded: bounded,
+	}, true
+}
+
+// approvalRange resolves the From/To commit pair for a pending entry: From
+// is the commit the last approval recorded before this generation pended
+// (empty when the task had never been approved), To is the commit ent's
+// content was observed at. Shared by PendingApproval (the commit-range
+// decoration) and State/StateFor (the per-file "what moved" markers) so the
+// rule is defined exactly once.
+//
+// Both endpoints come off ent alone: no lock of any kind is taken here, so
+// the range can never pair a baseline with a To from a different generation,
+// however long a renderer holds the entry it read under g.mu.
+func approvalRange(ent pendingEntry) (from, to string) {
+	return ent.baseCommit, ent.commit
 }
 
 // FireGuard vetoes any fire of a task whose current on-disk content is not
@@ -684,28 +915,6 @@ type resolvedPipelineSecurityFields struct {
 	Chain       *task.ChainTrigger   `json:"chain,omitempty"`
 }
 
-// hashDirResolved combines the task-dir hash with the canonical JSON of the
-// resolved security fields under the versioned domain prefix, NUL-delimited.
-// hashInclude is forwarded to task.Hash unchanged — see task.Spec.HashInclude
-// (#585) for why a task may need its content hash to cover files outside dir.
-func hashDirResolved(taskID, dir string, resolved any, hashInclude ...string) (string, error) {
-	dirHash, err := task.Hash(dir, hashInclude...)
-	if err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(resolved)
-	if err != nil {
-		return "", fmt.Errorf("hash %s: marshal resolved fields: %w", taskID, err)
-	}
-	h := sha256.New()
-	h.Write([]byte(contentHashDomain))
-	h.Write([]byte{0})
-	h.Write([]byte(dirHash))
-	h.Write([]byte{0})
-	h.Write(b)
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // ContentHash computes the gate's content hash for a task.
 //
 // For a *task.Spec with a task directory, the hash covers task.Hash over the
@@ -787,28 +996,22 @@ func ContentHash(k task.Kinded) (string, error) {
 	switch s := k.(type) {
 	case *task.Spec:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
+			h, err := task.ComputeContentHash(contentHashDomain, k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
+			return string(h), err
 		}
 		// Dir-less fallback: hash a shallow copy with secrets stripped so the
 		// committable lock never embeds a digest over secret material.
 		c := *s
 		c.Trigger.WebhookSecret = ""
 		c.Permissions = sanitizePermissions(c.Permissions)
-		return hashJSON(k.TaskID(), &c)
+		h, err := task.ComputeSpecHash(k.TaskID(), &c)
+		return string(h), err
 	case *task.PipelineTask:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
+			h, err := task.ComputeContentHash(contentHashDomain, k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
+			return string(h), err
 		}
 	}
-	return hashJSON(k.TaskID(), k)
-}
-
-// hashJSON is the dir-less fallback: SHA-256 over the JSON encoding of v.
-func hashJSON(taskID string, v any) (string, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "", fmt.Errorf("hash %s: %w", taskID, err)
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+	h, err := task.ComputeSpecHash(k.TaskID(), k)
+	return string(h), err
 }

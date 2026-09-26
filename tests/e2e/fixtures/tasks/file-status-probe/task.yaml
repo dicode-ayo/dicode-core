@@ -1,0 +1,11 @@
+apiVersion: dicode/v1
+kind: Task
+name: File Status Probe
+description: >-
+  #670 fixture — a manual task whose files are mutated and committed by
+  file-status.spec.ts to exercise the per-file "what moved" new/changed
+  markers on /api/tasks/{id}/pending-state against a real git history.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

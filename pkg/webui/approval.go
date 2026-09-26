@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/dicode/dicode/pkg/approval"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -21,10 +22,15 @@ import (
 // SecretsManager.
 type ApprovalGate interface {
 	IsPending(id string) bool
-	PendingHash(id string) (string, bool)
+	PendingSnapshot(id string) (approval.PendingView, bool)
+	// PendingApproval is PendingSnapshot's counterpart for a caller that
+	// actually renders CommitRange.Commits — see handleApproveLinkPage. It
+	// costs a git walk PendingSnapshot deliberately does not pay.
+	PendingApproval(id string) (hash string, cr approval.CommitRange, ok bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
 	State(id string) (approval.State, error)
+	StateFor(id string, k task.Kinded) approval.State
 }
 
 // SetApprovalGate wires the approval gate. Call after New and before Start.
@@ -61,10 +67,11 @@ func (s *Server) MintApproveLink(ctx context.Context, taskID string) (string, er
 	if s.approvalGate == nil || s.approvalTokens == nil {
 		return "", errors.New("approval gate not configured")
 	}
-	hash, ok := s.approvalGate.PendingHash(taskID)
+	v, ok := s.approvalGate.PendingSnapshot(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q is not pending approval", taskID)
 	}
+	hash := v.Hash
 	if hash == "" {
 		return "", fmt.Errorf("task %q has no computable content hash", taskID)
 	}
@@ -194,6 +201,44 @@ func (s *Server) apiApprovalPendingState(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, state)
 }
 
+// apiTaskState handles GET /api/tasks/{id}/state: the resolved review
+// surface for a task regardless of its approval status — what will run if
+// armed, or what is already running if the task is armed. Unlike
+// /pending-state, this never 409s on a task that isn't pending: that is the
+// whole point of it (#714), a task's sandbox surface should stay readable at
+// any time an operator wants to ask "what can this thing reach?", not only
+// during the pend/approve window.
+//
+// For a pending task this renders identically to /pending-state, including
+// PendingHash. For an armed task, PendingHash is always empty — see
+// approval.State.PendingHash's doc comment for why that must never be fed
+// back into ApproveIfHash. Auth mirrors apiApproveTask (same route group).
+//
+// Uses Gate.StateFor rather than a separate IsPending check followed by
+// State or CurrentState: two separate calls would leave a window where id
+// transitions from not-pending to pending in between, and this handler would
+// then render CurrentState's empty PendingHash for a task that actually is
+// pending by the time the response is read. StateFor decides pending-vs-not
+// and reads the data it renders from together, under one lock.
+//
+// Status codes:
+//   - 200 — the State body.
+//   - 404 — no such task.
+//   - 503 — approval gate not wired.
+func (s *Server) apiTaskState(w http.ResponseWriter, r *http.Request) {
+	id := taskIDParam(r)
+	if s.approvalGate == nil {
+		jsonErr(w, "approval gate not available", http.StatusServiceUnavailable)
+		return
+	}
+	kinded, ok := s.registry.GetKinded(id)
+	if !ok {
+		jsonErr(w, "task not found: "+id, http.StatusNotFound)
+		return
+	}
+	jsonOK(w, s.approvalGate.StateFor(id, kinded))
+}
+
 // approvePageTmpl renders the token-link confirm / result pages. Bare HTML on
 // purpose: the page must work from a notification click with no session, no
 // app shell, and no JS.
@@ -217,6 +262,13 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
 {{else}}
   <h1>Approve task?</h1>
   <p>This will approve task <code>{{.TaskID}}</code> at content hash <code>{{.Hash}}</code> and arm its triggers.</p>
+  {{if .CommitTo}}
+  <p class="meta">
+    {{if and .CommitFrom (ne .CommitFrom .CommitTo)}}Commit range: <code>{{.CommitFrom}}...{{.CommitTo}}</code>{{else}}Commit: <code>{{.CommitTo}}</code>{{end}}
+    {{if .CommitsLabel}} ({{.CommitsLabel}}){{end}}
+    {{if .CompareURL}} &mdash; <a href="{{.CompareURL}}">compare</a>{{end}}
+  </p>
+  {{end}}
   <p class="meta">Only approve if you reviewed this task change. The link is single-use.</p>
   <form method="post"><button type="submit">Approve task</button></form>
 {{end}}
@@ -227,6 +279,35 @@ type approvePageData struct {
 	Hash     string
 	Approved bool
 	Error    string
+
+	// CommitFrom, CommitTo, CompareURL and CommitsLabel carry the "what
+	// moved" decoration. Each is "" whenever it cannot be resolved, and the
+	// template renders nothing at all rather than a blank range when
+	// CommitTo is empty.
+	CommitFrom string
+	CommitTo   string
+	CompareURL string
+	// CommitsLabel is a pre-formatted "N commit(s)" / "N+ commits" string —
+	// see commitsLabel — or "" when the count could not be determined.
+	CommitsLabel string
+}
+
+// commitsLabel formats a approval.CommitRange's Commits/CommitsBounded pair
+// for the approve page: "" when count is unknown (< 0), "1 commit" /
+// "N commits" for an exact count, or "N+ commits" when the walk hit its cap
+// (bounded) and N is a lower bound rather than an exact count.
+func commitsLabel(count int, bounded bool) string {
+	if count < 0 {
+		return ""
+	}
+	unit := "commits"
+	if count == 1 && !bounded {
+		unit = "commit"
+	}
+	if bounded {
+		return fmt.Sprintf("%d+ %s", count, unit)
+	}
+	return fmt.Sprintf("%d %s", count, unit)
 }
 
 func (s *Server) renderApprovePage(w http.ResponseWriter, status int, data approvePageData) {
@@ -256,12 +337,24 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The link must only ever approve what it was minted for: if the task is
-	// no longer pending at that exact hash, say so up front.
-	if hash, ok := s.approvalGate.PendingHash(info.TaskID); !ok || hash != info.Hash {
+	// no longer pending at that exact hash, say so up front. One locked read
+	// for both (via PendingApproval, not PendingSnapshot: this page is the
+	// one place that renders the commit count), so a concurrent Admit
+	// cannot leave the rendered range describing a different generation
+	// than the hash matched here.
+	hash, cr, ok := s.approvalGate.PendingApproval(info.TaskID)
+	if !ok || hash != info.Hash {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
-	s.renderApprovePage(w, http.StatusOK, approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)})
+	s.renderApprovePage(w, http.StatusOK, approvePageData{
+		TaskID:       info.TaskID,
+		Hash:         shortHash(info.Hash),
+		CommitFrom:   shortCommit(cr.From),
+		CommitTo:     shortCommit(cr.To),
+		CompareURL:   cr.CompareURL,
+		CommitsLabel: commitsLabel(cr.Commits, cr.CommitsBounded),
+	})
 }
 
 // handleApproveLinkRedeem serves POST /approve/{token}: consumes the token
@@ -295,4 +388,14 @@ func shortHash(h string) string {
 		return h[:12] + "…"
 	}
 	return h
+}
+
+// shortCommit abbreviates a git commit SHA for display. Unlike a content
+// hash it takes no ellipsis: a bare prefix is git's own abbreviation, and the
+// page pairs two of them with the "..." range separator the compare link uses.
+func shortCommit(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

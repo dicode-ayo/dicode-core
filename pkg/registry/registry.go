@@ -105,7 +105,13 @@ type Run struct {
 	// ResumeParams is a JSON envelope of the original run's fire-time param
 	// overrides and chain depth, preserved so the continuation resumes with the
 	// same ctx.params and honors the same chain-depth ceiling. nil when absent.
+	// Any param redacted per ResumeParamsRedactedFields carries the redaction
+	// placeholder here, not its real value.
 	ResumeParams []byte
+	// ResumeParamsRedactedFields lists the dotted "params.<name>" paths redacted
+	// out of ResumeParams — mirrors InputRedactedFields. nil when nothing was
+	// redacted.
+	ResumeParamsRedactedFields []string
 }
 
 // LogEntry is one log line from a run.
@@ -357,14 +363,23 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 // shutdown drain that already moved the run to cancelled/failure) is not
 // clobbered back to suspended. Reports whether the row changed: false means the
 // run left `running` before the suspend landed, so no resume state was written.
-func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte) (bool, error) {
+//
+// resumeParamsRedactedFields lists the dotted "params.<name>" paths the caller
+// already redacted out of resumeParams before calling — this only records that
+// metadata (mirroring SetRunInput's redactedFields); it does not itself redact
+// anything.
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte, resumeParamsRedactedFields []string) (bool, error) {
 	var deadlineArg any
 	if deadline > 0 {
 		deadlineArg = deadline
 	}
+	rfJSON, err := json.Marshal(resumeParamsRedactedFields)
+	if err != nil {
+		return false, fmt.Errorf("marshal resume_params_redacted_fields: %w", err)
+	}
 	affected, err := r.db.ExecResult(ctx,
-		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ? WHERE id = ? AND status = ?`,
-		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, runID, StatusRunning,
+		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ?, resume_params_redacted_fields = ? WHERE id = ? AND status = ?`,
+		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, string(rfJSON), runID, StatusRunning,
 	)
 	if err != nil {
 		return false, err
@@ -469,7 +484,8 @@ const runInputColumns = `,
 // COALESCE so a NULL reads back as the zero value.
 const runResumeColumns = `,
         resume_state, resume_form, COALESCE(resume_token, ''),
-        COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0), resume_params`
+        COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0), resume_params,
+        COALESCE(resume_params_redacted_fields, '')`
 
 // scanRun decodes one row selected with runColumns (plus runInputColumns when
 // withInput is true, plus runResumeColumns when withResume is true) into a Run,
@@ -482,7 +498,8 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	var finishedMs *int64
 	var parentID *string
 	var tsStr string
-	var redactedFieldsJSON string
+	var inputRedactedJSON string
+	var resumeParamsRedactedJSON string
 	dest := []any{
 		&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID,
 		&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
@@ -490,12 +507,12 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	}
 	if withInput {
 		dest = append(dest,
-			&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned)
+			&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &inputRedactedJSON, &run.InputPinned)
 	}
 	if withResume {
 		dest = append(dest,
 			&run.ResumeState, &run.ResumeSchema, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline,
-			&run.ResumeParams)
+			&run.ResumeParams, &resumeParamsRedactedJSON)
 	}
 	if err := rows.Scan(dest...); err != nil {
 		return nil, err
@@ -509,15 +526,29 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	if parentID != nil {
 		run.ParentRunID = *parentID
 	}
-	if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
-		// input_redacted_fields is daemon-written json.Marshal([]string); a
-		// malformed value signals data corruption, so surface it rather than
-		// silently returning empty (potentially misleading) redaction metadata.
-		if err := json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields); err != nil {
-			return nil, fmt.Errorf("decode input_redacted_fields for run %s: %w", run.ID, err)
-		}
+	var err error
+	if run.InputRedactedFields, err = decodeRedactedFields(inputRedactedJSON, "input_redacted_fields", run.ID); err != nil {
+		return nil, err
+	}
+	if run.ResumeParamsRedactedFields, err = decodeRedactedFields(resumeParamsRedactedJSON, "resume_params_redacted_fields", run.ID); err != nil {
+		return nil, err
 	}
 	return run, nil
+}
+
+// decodeRedactedFields decodes a daemon-written json.Marshal([]string) column
+// (input_redacted_fields / resume_params_redacted_fields) into a []string. A
+// malformed value signals data corruption, so it's surfaced as an error rather
+// than silently returning empty (potentially misleading) redaction metadata.
+func decodeRedactedFields(raw, column, runID string) ([]string, error) {
+	if raw == "" || raw == "null" {
+		return nil, nil
+	}
+	var fields []string
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return nil, fmt.Errorf("decode %s for run %s: %w", column, runID, err)
+	}
+	return fields, nil
 }
 
 // GetRun fetches a run record by ID.

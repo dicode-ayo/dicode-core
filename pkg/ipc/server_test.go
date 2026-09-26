@@ -73,18 +73,23 @@ func recvMsg(t *testing.T, conn net.Conn) map[string]any {
 	return m
 }
 
-// dial connects to the Unix socket, retrying for up to 2 seconds.
-func dial(t *testing.T, socketPath string) net.Conn {
+// dial connects to a per-run IPC endpoint, retrying for up to 2 seconds. The
+// network follows the address, as a task SDK's own connect does.
+func dial(t *testing.T, addr string) net.Conn {
 	t.Helper()
+	network := "unix"
+	if IsLoopbackAddr(addr) {
+		network = "tcp"
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", socketPath)
+		conn, err := net.Dial(network, addr)
 		if err == nil {
 			return conn
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("dial %s timed out", socketPath)
+	t.Fatalf("dial %s timed out", addr)
 	return nil
 }
 
@@ -1727,6 +1732,43 @@ func TestCapRunsGetInput_GrantedFromYAML(t *testing.T) {
 	}
 
 	_ = conn // suppress unused warning from startWithSpec above
+}
+
+// TestIPC_DeleteInput_LeavesFailedBlobDeleteUncleared is the regression test
+// for #845: if the singular dicode.runs.delete_input's blob delete fails, the
+// handler must NOT clear the row's input_storage_key — doing so would drop
+// it from every future ListExpiredInputs sweep, leaking the blob forever
+// with no retry path. It must also surface the failure to the caller rather
+// than silently reporting success, matching what the batched delete_inputs
+// verb already does per-row (#819/#844).
+func TestIPC_DeleteInput_LeavesFailedBlobDeleteUncleared(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.startWithSpec(t, nil, nil, deleteInputsSpec(), nil)
+
+	ctx := context.Background()
+	id := fmt.Sprintf("run-fail-single-%d", time.Now().UnixNano())
+	key := "run-inputs/" + id
+	if _, err := e.reg.StartRunWithID(ctx, id, "test-task", "", "manual", "task"); err != nil {
+		t.Fatalf("StartRunWithID: %v", err)
+	}
+	if err := e.reg.SetRunInput(ctx, id, key, 10, time.Now().Unix(), nil); err != nil {
+		t.Fatalf("SetRunInput: %v", err)
+	}
+	srv.inputStore = &fakeInputBlobStore{failKeys: map[string]bool{key: true}}
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.runs.delete_input", "runID": id})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Fatal("expected an error response when the blob delete fails, got success")
+	}
+
+	got, err := e.reg.GetRun(ctx, id)
+	if err != nil {
+		t.Fatalf("GetRun(%s): %v", id, err)
+	}
+	if got.InputStorageKey != key {
+		t.Errorf("run %s InputStorageKey = %q, want it left intact (%q) so the next sweep retries it", id, got.InputStorageKey, key)
+	}
 }
 
 // ── dicode.runs.delete_inputs tests (#819) ──────────────────────────────────

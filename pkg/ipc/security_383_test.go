@@ -19,13 +19,20 @@ func TestIPCSocket_Mode0600(t *testing.T) {
 	runID := "sec383-sock-" + time.Now().Format("20060102150405")
 	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 
-	socketPath, _, err := srv.Start(context.Background())
+	addr, _, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(srv.Stop)
 
-	fi, err := os.Stat(socketPath)
+	if IsLoopbackAddr(addr) {
+		// A loopback endpoint has no file to carry a mode. What replaces this
+		// protection there is documented in docs/concepts/security.md: the
+		// port is bound to 127.0.0.1 and gated by the run-scoped token.
+		t.Skip("endpoint is a loopback port, not a socket file")
+	}
+
+	fi, err := os.Stat(addr)
 	if err != nil {
 		t.Fatalf("stat socket: %v", err)
 	}

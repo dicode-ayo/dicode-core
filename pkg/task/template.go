@@ -3,6 +3,7 @@ package task
 import (
 	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -32,6 +33,17 @@ const (
 	// the source loader; absent when a task is loaded outside of a source
 	// context (e.g. a raw local folder source or a unit test).
 	VarTaskSetDir = "TASK_SET_DIR"
+
+	// VarTempDir is the directory the runtimes write their per-run wrapper
+	// files into: os.TempDir() resolved to an absolute path, i.e. $TMPDIR or
+	// /tmp on Unix and whatever GetTempPath resolves on Windows.
+	VarTempDir = "TEMPDIR"
+
+	// VarCacheDir is the absolute path to the user cache directory:
+	// os.UserCacheDir() resolved to an absolute path, i.e. $XDG_CACHE_HOME or
+	// ~/.cache on Linux,
+	// ~/Library/Caches on macOS and %LOCALAPPDATA% on Windows.
+	VarCacheDir = "CACHEDIR"
 
 	// VarDataDir is the absolute path to the daemon's data directory
 	// (config.DataDir, e.g. ~/.dicode). Injected by the reconciler
@@ -272,6 +284,22 @@ func ExpandSpec(spec *Spec, taskDir string, extras map[string]string) {
 func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	vars := map[string]string{
 		VarTaskDir: taskDir,
+	}
+	// Both directory variables are resolved to absolute paths before they enter
+	// the map. A relative permissions.fs[].path is joined onto the task's own
+	// directory by the Deno runtime, so a relative value would silently grant
+	// somewhere the task never writes — the failure this whole variable exists
+	// to prevent. Neither source guarantees it: os.TempDir returns $TMPDIR
+	// unchanged, and os.UserCacheDir rejects a relative $XDG_CACHE_HOME but
+	// passes a relative $HOME through. A variable that cannot be resolved is
+	// left out, so the reference survives as a literal ${VAR} and fails loudly.
+	if tmp, err := filepath.Abs(os.TempDir()); err == nil {
+		vars[VarTempDir] = tmp
+	}
+	if cache, err := os.UserCacheDir(); err == nil {
+		if abs, err := filepath.Abs(cache); err == nil {
+			vars[VarCacheDir] = abs
+		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		vars[VarHome] = home

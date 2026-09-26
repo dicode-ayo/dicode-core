@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.6.4](https://github.com/dicode-ayo/dicode-core/compare/v0.6.3...v0.6.4) (2026-09-16)
+
+
+### Features
+
+* **task:** add ${TEMPDIR} and ${CACHEDIR} template vars ([#878](https://github.com/dicode-ayo/dicode-core/issues/878)) ([f1c2024](https://github.com/dicode-ayo/dicode-core/commit/f1c202409c3c6b6682175a7830ee36bced27f479))
+
+
+### Bug Fixes
+
+* **gitops:** HeadInfo can't resolve HEAD from a linked git worktree ([#873](https://github.com/dicode-ayo/dicode-core/issues/873)) ([ecabeeb](https://github.com/dicode-ayo/dicode-core/commit/ecabeebb5806fa6c44e05c200e93a732735ad66d))
+* **ipc:** give Windows a per-run IPC endpoint both SDKs can reach ([bd0c89b](https://github.com/dicode-ayo/dicode-core/commit/bd0c89b529eb83359f0a3b2e6bff0e8444a55d50)), closes [#871](https://github.com/dicode-ayo/dicode-core/issues/871)
+
+## [0.6.3](https://github.com/dicode-ayo/dicode-core/compare/v0.6.2...v0.6.3) (2026-09-14)
+
+
+### Bug Fixes
+
+* **release:** pin publish jobs to the release tag, not the run's commit ([#869](https://github.com/dicode-ayo/dicode-core/issues/869)) ([4ef406b](https://github.com/dicode-ayo/dicode-core/commit/4ef406bc0bb13fd00d0088cc397637e74f374ea5))
+
+## [0.6.2](https://github.com/dicode-ayo/dicode-core/compare/v0.6.1...v0.6.2) (2026-09-14)
+
+
+### Features
+
+* **approval:** per-file new/changed status markers on the pending-task inventory ([#862](https://github.com/dicode-ayo/dicode-core/issues/862)) ([9ff20da](https://github.com/dicode-ayo/dicode-core/commit/9ff20da68b927b2f2d29e53adb0ab7d96356b0b7))
+* **daemon:** add --detach to run the daemon in the background ([#857](https://github.com/dicode-ayo/dicode-core/issues/857)) ([cb00939](https://github.com/dicode-ayo/dicode-core/commit/cb00939ae0777d226c22631ff07b24a89649eb9d))
+* **webui:** accept fire-time params on the manual run endpoint ([#836](https://github.com/dicode-ayo/dicode-core/issues/836)) ([35c5154](https://github.com/dicode-ayo/dicode-core/commit/35c51549857978fbc1b2de32f4e576cd8c979e9c))
+* **webui:** show effective permissions on an approved task's detail page ([#858](https://github.com/dicode-ayo/dicode-core/issues/858)) ([c9db534](https://github.com/dicode-ayo/dicode-core/commit/c9db53487f9f12dba12b53f2be99aecfc2c13cd4))
+
+
+### Bug Fixes
+
+* **cli:** say when a data dir already holds a dashboard passphrase ([#834](https://github.com/dicode-ayo/dicode-core/issues/834)) ([6175180](https://github.com/dicode-ayo/dicode-core/commit/61751803aaa0712732662775b552b2e8ee7fad38))
+* **config:** make pruneEmptyMaps recurse so nested override maps fully collapse ([#843](https://github.com/dicode-ayo/dicode-core/issues/843)) ([b03c376](https://github.com/dicode-ayo/dicode-core/commit/b03c37688954f83765b9339635602b2ca5e1ce22))
+* **installer:** accept PowerShell Get-FileHash checksum files ([#867](https://github.com/dicode-ayo/dicode-core/issues/867)) ([48dace5](https://github.com/dicode-ayo/dicode-core/commit/48dace56cad1fdc4b35d6469d1aa165f5dea2d60))
+* **tasks:** stop cron-firing ops/relay-edge with unsatisfiable required params ([#837](https://github.com/dicode-ayo/dicode-core/issues/837)) ([a7f6106](https://github.com/dicode-ayo/dicode-core/commit/a7f6106a97e4329ae6a1dc7b145e1c70b1537d1b))
+* **webui:** bound the login page heading to the task label, not its description ([#854](https://github.com/dicode-ayo/dicode-core/issues/854)) ([01e6010](https://github.com/dicode-ayo/dicode-core/commit/01e60109b56aeeb3132f1a1141f7544ff511b5a5))
+* **webui:** render commit range and compare-view link on /approve/{token} ([#846](https://github.com/dicode-ayo/dicode-core/issues/846)) ([b53cc1f](https://github.com/dicode-ayo/dicode-core/commit/b53cc1fd3a19a05110931ee5da3a09636295c7ad))
+* **webui:** validate raw config before writing dicode.yaml ([#840](https://github.com/dicode-ayo/dicode-core/issues/840)) ([d4527c0](https://github.com/dicode-ayo/dicode-core/commit/d4527c055d1f47cb31842e49e896f56bcb0ad303))
+
+
+### Performance Improvements
+
+* **ipc:** add batched dicode.runs.delete_inputs verb to collapse per-row round trips ([#844](https://github.com/dicode-ayo/dicode-core/issues/844)) ([ffa2582](https://github.com/dicode-ayo/dicode-core/commit/ffa25820b57cc90bda15ee750648ad883a2bcab8))
+
+
+### Documentation
+
+* correct the pkg/webui architecture note ([#856](https://github.com/dicode-ayo/dicode-core/issues/856)) ([5b69bb5](https://github.com/dicode-ayo/dicode-core/commit/5b69bb53719db810a20ad3d1cf8e30afc7eb0ecc))
+
 ## [0.6.1](https://github.com/dicode-ayo/dicode-core/compare/v0.6.0...v0.6.1) (2026-09-05)
 
 

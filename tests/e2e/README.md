@@ -3,7 +3,7 @@
 Playwright suite covering the REST API, webhook triggers, cron, file-change
 reconciliation, the SPA at `/hooks/webui`, the auth flow, auth-provider
 connections, dev-mode/clone-mode, task suspend/resume, run-input persistence,
-and the MCP JSON-RPC surface. 128 tests, ~3.5 min end-to-end (136 with the
+and the MCP JSON-RPC surface. 130 tests, ~3.5 min end-to-end (138 with the
 opt-in relay project).
 
 ## One-time setup
@@ -103,7 +103,7 @@ file.
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, resume-params-redaction, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
 | `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
@@ -368,6 +368,18 @@ surface from #512: a task calling `dicode.suspend()`, the resulting
 |---|---|---|
 | 1 | suspend → fill form → resume spawns the continuation | Full round-trip: suspend, submit input, continuation run succeeds with the submitted value. |
 | 2 | a suspended run's result page redirects to the resume form | Visiting a suspended run's result page routes to the resume form instead of a normal run-detail view. |
+
+### [resume-params-redaction.spec.ts](resume-params-redaction.spec.ts) — Resume-param redaction (#817, 2 tests)
+
+Runs in the `unauthenticated` project. Reuses the `suspend-wizard` fixture's
+optional `api_key` param. Covers #817: a fire-time param backed by a live
+secret must never reach `GET /api/runs/<id>` in the clear while suspended, and
+the resumed continuation must still get the real value back.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | secret-backed param is redacted at rest and restored correctly on resume | `GET /api/runs/<id>` never contains the raw secret value and carries no `ResumeParams` field, but lists `params.api_key` in `ResumeParamsRedactedFields`; the resumed continuation's result echoes the real secret value. |
+| 2 | a param with no matching live secret round-trips unredacted | A sensitive-named param with a literal (non-secrets-store) value is NOT listed in `ResumeParamsRedactedFields` and the continuation still gets the original literal value. |
 
 ### [cli-suspend.spec.ts](cli-suspend.spec.ts) — CLI suspend/resume (3 tests)
 

@@ -3,7 +3,6 @@ package taskset
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -104,6 +103,13 @@ func WithParentOverrides(ov *Overrides) SourceOption {
 func WithAllowedTokenEnvs(envs []string) SourceOption {
 	return func(s *Source) { s.resolver.SetAllowedTokenEnvs(envs) }
 }
+
+// contentHashDomain is taskset's own versioned domain-separation prefix for
+// task.ComputeContentHash. taskSnap/s.snapshot are purely in-memory
+// reconciler change-detection state, never persisted across process
+// restarts, so this string carries no on-disk backward-compat constraint —
+// unlike pkg/approval's contentHashDomain, which is committed in dicode.lock.
+const contentHashDomain = "dicode-taskset-content-v1"
 
 type taskSnap struct {
 	specHash string
@@ -782,8 +788,13 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 
 	current := make(map[string]taskSnap, len(tasks))
 	for _, rt := range tasks {
+		hash, err := s.contentHashFor(rt.Kinded, rt.TaskDir, rt.ID)
+		if err != nil {
+			failures = append(failures, ResolveFailure{ID: rt.ID, Error: err})
+			continue
+		}
 		current[rt.ID] = taskSnap{
-			specHash: s.snapHash(rt.Kinded, rt.TaskDir, rt.ID),
+			specHash: hash,
 			kinded:   rt.Kinded,
 			taskDir:  rt.TaskDir,
 		}
@@ -913,37 +924,33 @@ func (s *Source) loadConfigDefaults() (*Defaults, error) {
 	return cs.Spec.Defaults, nil
 }
 
-// hashKinded computes a content hash for change detection over any resolved
-// task kind. *task.Spec and *task.PipelineTask both marshal to distinct JSON,
-// so a kind change (or any field change) yields a different hash.
-func hashKinded(k task.Kinded) string {
-	b, _ := json.Marshal(k)
-	h := sha256.Sum256(b)
-	return fmt.Sprintf("%x", h)
-}
-
-// snapHash is the change-detection hash for one resolved task. It folds both
-// the resolved spec and the task directory's file content: the runtime imports
-// script files (task.js/task.ts and siblings) that the resolved spec does not
-// capture, so a script-only edit must still perturb the hash — otherwise no
-// update is emitted and the approval gate never re-pends the changed task
-// (#530). A dir-less inline task hashes its spec alone.
+// contentHashFor is the change-detection hash for one resolved task, built
+// on the shared task.ComputeContentHash/ComputeSpecHash primitives (see
+// pkg/task/contenthash.go) with taskset's own contentHashDomain and the
+// resolved Kinded itself as the folded-in "resolved" value: the runtime
+// imports script files (task.js/task.ts and siblings) that the resolved spec
+// does not capture, so a script-only edit must still perturb the hash —
+// otherwise no update is emitted and the approval gate never re-pends the
+// changed task (#530). A dir-less inline task hashes its spec alone.
 //
 // It's a method (not a free function) so the error path below can log
 // through s.log — see the #682 comment on that path for why silence there
-// is unacceptable.
-func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
-	specHash := hashKinded(k)
+// is unacceptable. The returned error is non-nil only when taskDir itself
+// turns out to be unreadable (the fallback below also fails) — the caller
+// (syncAndEmit) reports that as a ResolveFailure instead of registering the
+// task with a degraded hash.
+func (s *Source) contentHashFor(k task.Kinded, taskDir, taskID string) (string, error) {
 	if taskDir == "" {
-		return specHash
+		h, err := task.ComputeSpecHash(taskID, k)
+		return string(h), err
 	}
 	var hashInclude []string
 	if sp, ok := k.(*task.Spec); ok {
 		hashInclude = sp.HashInclude
 	}
-	dirHash, err := task.Hash(taskDir, hashInclude...)
+	h, err := task.ComputeContentHash(contentHashDomain, taskID, taskDir, k, hashInclude...)
 	if err == nil {
-		return specHash + ":" + dirHash
+		return string(h), nil
 	}
 
 	// #682: task.Hash can fail here for several reasons (an unreadable
@@ -953,14 +960,13 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 	// pkg/task/spec.go can't catch, because the escape is only visible after
 	// the symlink is resolved (see
 	// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected). Whatever
-	// the cause, this used to fall back to specHash alone, silently dropping
-	// the ENTIRE directory
-	// — including the task's own script — from the change-detection
-	// identity: a script edit then changed no spec field, the hash stayed
-	// stable, syncAndEmit saw no diff, and the approval gate was never
-	// re-armed for the edit. That's a silent approval-gate bypass, not
-	// merely a missed reload, so the error must be loud and must still
-	// perturb the identity — not just get folded away.
+	// the cause, this used to fall back to a spec-only hash, silently
+	// dropping the ENTIRE directory — including the task's own script — from
+	// the change-detection identity: a script edit then changed no spec
+	// field, the hash stayed stable, syncAndEmit saw no diff, and the
+	// approval gate was never re-armed for the edit. That's a silent
+	// approval-gate bypass, not merely a missed reload, so the error must be
+	// loud and must still perturb the identity — not just get folded away.
 	//
 	// Best-effort fallback: hash taskDir alone, without hash_include. This
 	// narrower hash skips the includes loop entirely, so it's unaffected by
@@ -973,9 +979,7 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 	// is static for a given (path, boundary) pair, so folding its digest in
 	// is deterministic across repeated polls with nothing else changed: one
 	// loud transition into "changed" per new edit, not a firehose on every
-	// ~30s reconciler tick. A full redesign that propagates this error to
-	// callers instead of folding it into the hash is tracked separately
-	// (#688) — out of scope here.
+	// ~30s reconciler tick.
 	//
 	// This re-walks taskDir a second time (task.Hash above already walked it
 	// once before failing on the includes step) for as long as the failure
@@ -988,13 +992,14 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 		zap.String("taskDir", taskDir),
 		zap.Error(err),
 	)
-	fallback, fbErr := task.Hash(taskDir)
+	fallback, fbErr := task.ComputeContentHash(contentHashDomain, taskID, taskDir, k)
 	if fbErr != nil {
 		// taskDir itself is unreadable (rare — hash_include escaping is the
-		// documented failure mode, not this). Nothing left to fold in beyond
-		// the error digest below.
-		fallback = ""
+		// documented failure mode, not this). Nothing left to fold into a
+		// hash — propagate so the caller can report a resolve failure
+		// instead of degrading the identity further.
+		return "", fmt.Errorf("taskset source: task dir hash failed for %s: %w", taskID, fbErr)
 	}
 	errDigest := sha256.Sum256([]byte(err.Error()))
-	return specHash + ":" + fallback + ":hash-error:" + fmt.Sprintf("%x", errDigest)
+	return string(fallback) + ":hash-error:" + fmt.Sprintf("%x", errDigest), nil
 }

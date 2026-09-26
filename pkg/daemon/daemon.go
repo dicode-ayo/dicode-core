@@ -923,7 +923,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	// ai.notify_task is unset.
 	suspendNotify := suspendNotifier{
 		notifyTask: cfg.AI.NotifyTask,
-		resumeURL:  func(runID string) string { return srv.WebUIBaseURL() + "/?run=" + runID },
+		resumeURL:  srv.RunURL,
 		fire: func(id string, params map[string]string) error {
 			_, err := eng.FireManual(ctx, id, params)
 			return err
@@ -931,6 +931,12 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 		log: log,
 	}
 	eng.AddRunFinishedHook(suspendNotify.onRunFinished)
+
+	// Same link shape as suspendNotify.resumeURL above, so every chained
+	// task (trigger.chain and on_failure_chain alike) can open the run that
+	// triggered it without operators duplicating server.public_url into
+	// their own chain params.
+	eng.SetRunURLFunc(srv.RunURL)
 
 	if replayer != nil {
 		srv.SetReplayer(replayer)
@@ -995,14 +1001,16 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 		ids := approvalGate.Pending()
 		out := make([]ipc.PendingTask, 0, len(ids))
 		for _, id := range ids {
-			// One atomic locked read: two separate PendingHash/PendingEnabled
-			// calls could straddle a concurrent Approve/Forget between them and
-			// report an enabled task as disabled (PendingEnabled's ok=false
-			// zero-values to false). Default enabled=true on a lookup miss too
-			// — id came from the Pending() snapshot above and may have just been
+			// One atomic locked read via PendingSnapshot: two separate
+			// accessor calls could straddle a concurrent Approve/Forget
+			// between them and report an enabled task as disabled (a
+			// lookup-miss ok=false zero-values Enabled to false). Default
+			// enabled=true on a lookup miss too — id came from the
+			// Pending() snapshot above and may have just been
 			// approved/unregistered — mirroring handleTaskApprove's
 			// lookup-miss default in pkg/ipc/control_task_approve.go.
-			hash, enabled, ok := approvalGate.PendingInfo(id)
+			v, ok := approvalGate.PendingSnapshot(id)
+			enabled := v.Enabled
 			if !ok {
 				enabled = true
 			}
@@ -1010,7 +1018,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			// this response, so ipc.PendingTask.Enabled — a *bool so an older
 			// daemon's response can decode as nil over the wire — is always
 			// set to an explicit, non-nil value here.
-			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash, Enabled: &enabled})
+			out = append(out, ipc.PendingTask{TaskID: id, Hash: v.Hash, Enabled: &enabled})
 		}
 		return out
 	})

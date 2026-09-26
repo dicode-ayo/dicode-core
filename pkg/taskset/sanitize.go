@@ -1,12 +1,6 @@
 package taskset
 
-import "regexp"
-
-// urlUserinfoRe matches the `user:password@` portion of any URL
-// embedded in an arbitrary string. Same shape as the one in pkg/relay;
-// duplicated rather than shared because both packages are small and
-// the coupling isn't worth a new internal utility package.
-var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+@`)
+import "github.com/dicode/dicode/internal/gitops"
 
 // sanitizeErrorString strips user:password userinfo from URLs embedded
 // in git error messages. Operators routinely put PATs in source URLs
@@ -23,6 +17,13 @@ func sanitizeErrorString(s string) string {
 // above guards against are readable from ref.url itself, and a source URL
 // reaches further than an error message does — any task granted
 // permissions.dicode.sources_list receives one.
+//
+// The stripping logic itself lives in internal/gitops.StripURLCredentials,
+// which this package already imports elsewhere and which is the single
+// canonical implementation shared with pkg/source/git and gitops.HeadInfo.
+// SanitizeURL and sanitizeErrorString stay as this package's own exported
+// names — pull_status.go and pkg/webui/sources.go are written against
+// them — and simply delegate.
 func SanitizeURL(s string) string {
-	return urlUserinfoRe.ReplaceAllString(s, "$1")
+	return gitops.StripURLCredentials(s)
 }

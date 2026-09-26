@@ -34,7 +34,7 @@ func TestBuildDenoArgs_ProtectedPathsDenied(t *testing.T) {
 	}
 	protected := []string{"/etc/dicode/dicode.lock", "/etc/dicode/dicode.yaml"}
 
-	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", protected)
+	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", protected, "2.3.3")
 
 	deny, ok := findArg(args, "--deny-write")
 	if !ok {
@@ -56,7 +56,7 @@ func TestBuildDenoArgs_ProtectedPathsDenied(t *testing.T) {
 // test callers), no --deny-write flag is emitted.
 func TestBuildDenoArgs_NoProtectedPaths(t *testing.T) {
 	spec := &task.Spec{ID: "t/x", TaskDir: "/srv/tasks/x"}
-	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil)
+	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil, "2.3.3")
 	if v, ok := findArg(args, "--deny-write"); ok {
 		t.Errorf("expected no --deny-write with nil protected paths; got %q", v)
 	}
@@ -72,7 +72,7 @@ func TestBuildDenoArgs_FSPathCleaned(t *testing.T) {
 			FS: []task.FSEntry{{Path: "/data/foo/../bar", Permission: "w"}},
 		},
 	}
-	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil)
+	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil, "2.3.3")
 	allow, _ := findArg(args, "--allow-write")
 	if !strings.Contains(allow, "/data/bar") {
 		t.Errorf("expected cleaned /data/bar in --allow-write; got %q", allow)
@@ -92,7 +92,7 @@ func TestBuildDenoArgs_RelativeFSPathCleaned(t *testing.T) {
 			FS: []task.FSEntry{{Path: "sub/../out", Permission: "rw"}},
 		},
 	}
-	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil)
+	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil, "2.3.3")
 	allow, _ := findArg(args, "--allow-write")
 	if !strings.Contains(allow, "/srv/tasks/rel/out") {
 		t.Errorf("expected /srv/tasks/rel/out in --allow-write; got %q", allow)

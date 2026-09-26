@@ -642,6 +642,12 @@ func (s *Server) Handler() http.Handler {
 	// before clicking Approve needs the same trust boundary as approving it.
 	r.With(s.requireSessionOrNonEphemeralAPIKey).Get("/api/tasks/{id}/pending-state", s.apiApprovalPendingState)
 
+	// Effective-permissions/end-state read path for an *armed* task (#714) —
+	// pending-state 409s once a task is no longer pending, leaving no way to
+	// answer "what can this thing reach?" outside the pend/approve window.
+	// Same auth group: same review-surface trust boundary either way.
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Get("/api/tasks/{id}/state", s.apiTaskState)
+
 	// Tokenized approve link (#398) — the single-use token in the URL is the
 	// auth, so these stay outside the session groups. GET renders a confirm
 	// page without consuming the token (link prefetchers must not approve);
@@ -2714,9 +2720,12 @@ func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
 // RunDetail is the shape returned by GET /api/runs/{runID}. ResumeSchema
 // carries the suspended run's JSON Schema as raw JSON so the WebUI renders a
 // form from it directly; the embedded Run's own ResumeToken/ResumeState/
-// ResumeSchema are cleared by apiGetRun before embedding — the token is the
-// resume authorization and must never reach the client, and the state blob is
-// task-internal.
+// ResumeSchema/ResumeParams are cleared by apiGetRun before embedding — the
+// token is the resume authorization and must never reach the client, the
+// state blob is task-internal, and ResumeParams is the fire-time param carry
+// (partially redacted, never fully — see registry.Registry.SuspendRun) that
+// only ResumeRun needs; ResumeParamsRedactedFields (which fields, not their
+// values) is left in place, mirroring InputRedactedFields.
 type RunDetail struct {
 	*registry.Run
 	TaskName     string          `json:"task_name"`
@@ -2744,6 +2753,7 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 	safe.ResumeToken = ""
 	safe.ResumeState = nil
 	safe.ResumeSchema = nil
+	safe.ResumeParams = nil
 	jsonOK(w, RunDetail{Run: &safe, TaskName: taskName, ResumeSchema: schema})
 }
 

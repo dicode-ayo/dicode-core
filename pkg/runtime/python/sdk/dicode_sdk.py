@@ -2,7 +2,8 @@
 # Provides: log, params, env, kv, input, output, dicode, mcp.
 # To return a value from a task, assign: result = <value>
 #
-# Protocol: length-prefixed JSON over a single persistent Unix socket.
+# Protocol: length-prefixed JSON over a single persistent connection —
+# a Unix socket, or a loopback TCP connection on Windows.
 #   Frame:  [4-byte little-endian length][JSON bytes]
 #
 # Handshake (first exchange after connect):
@@ -32,7 +33,14 @@ threading.Thread(target=_loop.run_forever, daemon=True, name="dicode-io").start(
 
 
 async def _open_conn():
-    return await asyncio.open_unix_connection(os.environ["DICODE_SOCKET"])
+    # DICODE_SOCKET carries a Unix-socket path, except on Windows — where
+    # asyncio.open_unix_connection does not exist — and there it is a
+    # "127.0.0.1:<port>" address (see pkg/ipc/endpoint_windows.go).
+    addr = os.environ["DICODE_SOCKET"]
+    if sys.platform == "win32":
+        host, _, port = addr.rpartition(":")
+        return await asyncio.open_connection(host, int(port))
+    return await asyncio.open_unix_connection(addr)
 
 _reader_obj, _writer = asyncio.run_coroutine_threadsafe(_open_conn(), _loop).result(timeout=10)
 

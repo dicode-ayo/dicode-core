@@ -37,8 +37,8 @@ import { spawn, execFileSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import * as net from 'net';
 import { ensureBuildinCheckout } from './helpers/buildin';
+import { freePort } from './helpers/dicode-server';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -56,17 +56,6 @@ let webuiPort = 0;
 let caCertPath = '';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address() as net.AddressInfo;
-      srv.close(() => resolve(addr.port));
-    });
-    srv.on('error', reject);
-  });
-}
 
 async function waitForUrl(url: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

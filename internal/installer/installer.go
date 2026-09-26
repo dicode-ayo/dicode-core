@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -104,6 +105,9 @@ func EnsureBinary(s Spec) (string, error) {
 	}
 
 	if err := VerifyChecksum(archiveData, string(checksumData)); err != nil {
+		if errors.Is(err, errNoDigest) {
+			return "", fmt.Errorf("unreadable checksum file %s: %w", s.ChecksumURL, err)
+		}
 		return "", fmt.Errorf("checksum verification failed: %w", err)
 	}
 
@@ -162,20 +166,45 @@ func DownloadBytes(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// VerifyChecksum checks the SHA-256 of data against a checksum file line
-// in the format "<hex>  <filename>" (standard sha256sum output).
-func VerifyChecksum(data []byte, checksumLine string) error {
-	fields := strings.Fields(checksumLine)
-	if len(fields) == 0 {
-		return fmt.Errorf("empty checksum file")
+// sha256HexLen is the length of a SHA-256 digest rendered as hexadecimal.
+const sha256HexLen = 64
+
+// errNoDigest reports a checksum file holding no digest in any recognized
+// layout. It is distinct from a digest mismatch: the file could not be read,
+// so nothing was actually compared against the download.
+var errNoDigest = errors.New("no SHA-256 digest found")
+
+// VerifyChecksum checks the SHA-256 of data against the contents of a checksum
+// file. Two layouts are recognized: standard sha256sum output
+// ("<hex>  <filename>") and PowerShell Get-FileHash | Format-List output
+// ("Hash      : <HEX>"), which Deno publishes for its Windows release assets.
+func VerifyChecksum(data []byte, checksumFile string) error {
+	expected, err := parseExpectedDigest(checksumFile)
+	if err != nil {
+		return err
 	}
-	expected := strings.ToLower(fields[0])
 	h := sha256.Sum256(data)
 	got := hex.EncodeToString(h[:])
 	if got != expected {
 		return fmt.Errorf("expected %s got %s", expected, got)
 	}
 	return nil
+}
+
+// parseExpectedDigest returns the first SHA-256 digest in a checksum file,
+// lowercased. Callers must fetch per-asset checksum files: a multi-entry file
+// yields its first entry regardless of which asset that entry names.
+func parseExpectedDigest(checksumFile string) (string, error) {
+	for _, field := range strings.Fields(checksumFile) {
+		if len(field) != sha256HexLen {
+			continue
+		}
+		if _, err := hex.DecodeString(field); err != nil {
+			continue
+		}
+		return strings.ToLower(field), nil
+	}
+	return "", errNoDigest
 }
 
 // ExtractFromZip extracts a file from a zip archive. When mode is MatchExact,

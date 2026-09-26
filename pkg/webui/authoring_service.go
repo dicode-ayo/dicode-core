@@ -619,6 +619,14 @@ func (s *Server) WebUIBaseURL() string {
 	return fmt.Sprintf("%s://localhost:%d", scheme, s.port)
 }
 
+// RunURL returns the link to runID in the web UI, built off WebUIBaseURL —
+// the one place that shape lives, so the suspend notifier's resumeURL and
+// the trigger engine's chain-payload run_url (Engine.SetRunURLFunc) can't
+// drift into two different link shapes for the same run.
+func (s *Server) RunURL(runID string) string {
+	return s.WebUIBaseURL() + "/?run=" + runID
+}
+
 // statusFromAuthoringError extracts the HTTP status from an authoringError,
 // defaulting to 500 for any other error type.
 func statusFromAuthoringError(err error) int {

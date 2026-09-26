@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -30,10 +29,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// Server is a per-run Unix socket server that bridges a task subprocess and
-// the Go host using the unified IPC protocol.
+// Server is a per-run IPC server that bridges a task subprocess and the Go
+// host using the unified IPC protocol.
 //
-// Each task run gets its own socket. The subprocess connects, performs the
+// Each task run gets its own endpoint. The subprocess connects, performs the
 // capability handshake, then exchanges length-prefixed JSON messages.
 type Server struct {
 	runID  string
@@ -78,10 +77,9 @@ type Server struct {
 	// fire. Nil means allow.
 	testGuard func(taskID string) error
 
-	ctx        context.Context
-	socketPath string
-	socketDir  string // per-run 0700 parent dir; empty on Windows
-	listener   net.Listener
+	ctx       context.Context
+	socketDir string // per-run 0700 parent dir; empty for a loopback endpoint
+	listener  net.Listener
 
 	connWG   sync.WaitGroup // tracks in-flight handleConn goroutines
 	acceptMu sync.Mutex     // serialises accept+Add against Stop's Wait
@@ -185,52 +183,23 @@ func (s *Server) SetSecretOutput(ch chan map[string]string) {
 	s.secretOut = ch
 }
 
-// Start creates the Unix socket and begins accepting connections.
-// Returns the socket path and a capability token to pass to the subprocess.
+// Start creates the per-run IPC endpoint and begins accepting connections.
+// Returns the endpoint address — handed to the subprocess as DICODE_SOCKET —
+// and a capability token to pass alongside it.
 //
-// On non-Windows platforms the socket is placed inside a per-run directory
-// created with mode 0700 (e.g. /tmp/dicode-<runID>/ipc.sock). This removes
-// the brief pre-chmod window and makes the socket unreachable by other local
-// users independent of the umask at creation time. On Windows the flat
-// /tmp/dicode-<runID>.sock path is kept because AF_UNIX directory semantics
-// differ there.
-func (s *Server) Start(ctx context.Context) (socketPath, token string, err error) {
+// The transport is platform-specific (see listenIPC): a Unix socket inside a
+// per-run 0700 directory on Unix, a loopback TCP port on Windows, where
+// neither SDK can speak AF_UNIX. Callers that need to tell the two apart —
+// to derive the right sandbox grant for the task subprocess — ask
+// IsLoopbackAddr rather than re-deriving the platform themselves.
+func (s *Server) Start(ctx context.Context) (addr, token string, err error) {
 	s.ctx = ctx
 
-	if runtime.GOOS == "windows" {
-		socketPath = fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
-		_ = os.Remove(socketPath)
-	} else {
-		dir := filepath.Join("/tmp", "dicode-"+s.runID)
-		// Remove any leftover dir from a previous (crashed) run.
-		_ = os.RemoveAll(dir)
-		if err := os.Mkdir(dir, 0700); err != nil {
-			return "", "", fmt.Errorf("ipc: mkdir socket dir: %w", err)
-		}
-		s.socketDir = dir
-		socketPath = filepath.Join(dir, "ipc.sock")
-	}
-
-	l, err := net.Listen("unix", socketPath)
+	l, addr, dir, err := listenIPC(s.runID)
 	if err != nil {
-		if s.socketDir != "" {
-			_ = os.RemoveAll(s.socketDir)
-		}
-		return "", "", fmt.Errorf("ipc: listen %s: %w", socketPath, err)
+		return "", "", err
 	}
-	// On Windows the socket is created in a shared /tmp without a 0700
-	// parent dir, so we still chmod it 0600 to restrict access. On Unix the
-	// 0700 parent dir already makes the socket unreachable; chmod is a
-	// belt-and-suspenders extra that also closes the brief pre-chmod window
-	// on non-Windows platforms that lack sticky-bit /tmp behaviour.
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		_ = l.Close()
-		if s.socketDir != "" {
-			_ = os.RemoveAll(s.socketDir)
-		}
-		return "", "", fmt.Errorf("ipc: chmod socket: %w", err)
-	}
-	s.socketPath = socketPath
+	s.socketDir = dir
 	s.listener = l
 
 	// Build capability set for this task.
@@ -305,15 +274,13 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		_ = l.Close()
 		if s.socketDir != "" {
 			_ = os.RemoveAll(s.socketDir)
-		} else {
-			_ = os.Remove(socketPath)
 		}
 		return "", "", fmt.Errorf("ipc: issue token: %w", err)
 	}
 
 	go s.accept()
 	go s.flushLogs()
-	return socketPath, token, nil
+	return addr, token, nil
 }
 
 // Stop closes the listener (stopping new connections), waits for all
@@ -326,12 +293,11 @@ func (s *Server) Stop() {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
-	// On Unix the socket lives inside a per-run 0700 dir; remove the whole
-	// tree. On Windows (socketDir == "") fall back to removing the flat file.
+	// The Unix socket lives inside a per-run 0700 dir; remove the whole tree.
+	// A loopback endpoint leaves nothing on disk, and listenIPC reports no
+	// directory for it.
 	if s.socketDir != "" {
 		_ = os.RemoveAll(s.socketDir)
-	} else if s.socketPath != "" {
-		_ = os.Remove(s.socketPath)
 	}
 
 	// Step 2: wait for all in-flight handleConn goroutines to exit. Each
@@ -985,9 +951,19 @@ func (s *Server) handleConn(conn net.Conn) {
 					// env-resolver internals where CodeQL flags a secretKey
 					// taint as go/clear-text-logging false-positive.
 					_ = err
-					s.log.Warn("delete_input: storage delete failed; will still clear columns",
+					s.log.Warn("delete_input: storage delete failed; leaving row for the next sweep",
 						zap.String("run", req.RunID),
 						zap.String("error_class", "storage_delete"))
+					// Deliberately does NOT clear the row's columns on a
+					// failed blob delete: ListExpiredInputs only returns rows
+					// whose input_storage_key is still set, so clearing it
+					// here would permanently drop this row from every future
+					// retention sweep, leaking the blob forever with no
+					// retry path (#845). Matches the batched delete_inputs
+					// behavior below — leave the row intact so the next
+					// sweep retries it, and report failure to the caller.
+					reply(req.ID, nil, "ipc: storage delete failed, input metadata retained for retry")
+					continue
 				}
 			}
 			if err := s.registry.ClearRunInput(s.ctx, req.RunID); err != nil {
@@ -1017,15 +993,13 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			// toClear accumulates the run IDs it's safe to mark "input gone"
-			// in the registry. Unlike the singular delete_input (which
-			// clears columns even when the blob delete fails, on the theory
-			// that a single failure is contained and rare), a batch failure
-			// here is deliberately NOT cleared: ListExpiredInputs only
+			// in the registry. Like the singular delete_input, a failed blob
+			// delete here is deliberately NOT cleared: ListExpiredInputs only
 			// returns rows whose input_storage_key is still set, so clearing
 			// it despite a failed blob delete would permanently drop that
 			// row from every future retention sweep, leaking the blob
-			// forever with no retry path (#819 code-review follow-up). A
-			// row left uncleared just gets picked up again next sweep.
+			// forever with no retry path (#819 code-review follow-up, #845).
+			// A row left uncleared just gets picked up again next sweep.
 			toClear := req.RunIDs
 			var failed []string
 			if s.inputStore != nil {

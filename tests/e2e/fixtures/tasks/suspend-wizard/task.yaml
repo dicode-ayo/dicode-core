@@ -6,3 +6,13 @@ runtime: deno
 trigger:
   manual: true
 timeout: 10s
+params:
+  api_key:
+    description: Optional fire-time param exercising suspend/resume param redaction e2e coverage
+    required: false
+permissions:
+  env:
+    # Grants this task's own params.api_key as a redaction/restore candidate
+    # for suspend/resume — see resume-params-redaction.spec.ts. Without this
+    # grant the engine never treats params.api_key as secret-backed at all.
+    - { name: API_KEY, secret: api_key, optional: true }

@@ -32,10 +32,8 @@ func (e *Engine) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]st
 				zap.String("run", runID), zap.Error(gerr))
 			continue
 		}
-		for _, h := range e.runFinishedHooks {
-			// Duration 0: the suspended body isn't re-executed on timeout.
-			h(run.TaskID, run.ID, registry.StatusCancelled, string(run.TriggerSource), 0)
-		}
+		// Duration 0: the suspended body isn't re-executed on timeout.
+		e.emitRunFinished(run.TaskID, run.ID, registry.StatusCancelled, string(run.TriggerSource), 0)
 		e.FireChain(context.Background(), run.TaskID, run.ID, registry.StatusCancelled, nil, nil)
 
 		// A standalone daemon body that suspended kept its #470 run slot parked

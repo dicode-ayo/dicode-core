@@ -28,6 +28,7 @@ type testEnv struct {
 	engine *Engine
 	reg    *registry.Registry
 	denoRT *denoruntime.Runtime
+	db     db.DB
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -49,7 +50,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	// subprocesses are orphaned (reparented to init) when the test process
 	// exits (#526). Reap them on teardown, before the LIFO-earlier db.Close.
 	t.Cleanup(func() { reapEngineRuns(eng, 10*time.Second) })
-	return &testEnv{engine: eng, reg: reg, denoRT: rt}
+	return &testEnv{engine: eng, reg: reg, denoRT: rt, db: d}
 }
 
 // reapEngineRuns cancels every in-flight run the engine tracks — standalone

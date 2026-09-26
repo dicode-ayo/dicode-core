@@ -56,6 +56,14 @@ type RunOptions struct {
 	// engine to release the chainGuards slot on completion.
 	ChainParentTask string
 
+	// ChainDepth is how many chain hops separate this run from the one a
+	// human or a schedule started. 0 for a directly-fired run.
+	//
+	// A chain edge with no declared params hands the downstream the upstream's
+	// raw return value unchanged, so there is no envelope to carry a hop count
+	// in Input. It rides here instead, where every edge shape propagates it.
+	ChainDepth int
+
 	// ResumeState / ResumeInput carry a suspended run's prior state and the
 	// user's form submission when the engine re-spawns a task to resume it
 	// (#95). Both are opaque JSON blobs surfaced to the task as

@@ -55,12 +55,12 @@ jobs:
           deno-version: v2.x
       # Only tasks/examples/** entries that ship a task.test.ts run here — see
       # issue #551. Today that's deploy-wizard, repo-prune, and suspend-wizard,
-      # all runtime: deno. The Layer-2 unit-test harness only covers Deno
-      # (tasks/sdk-test.ts) and Python (tasks/sdk_test.py, #159 Phase 2) — a
-      # docker/podman example (hello-docker, hello-podman, nginx-start) can't
-      # ship a test file yet (#159 Phase 3 remains unstarted). hello-python's
-      # task.test.py is run separately below (it's a PEP 723 script executed
-      # via `uv run`, not `deno test`, so this glob correctly skips it).
+      # all runtime: deno. hello-python's task.test.py is run separately below
+      # (it's a PEP 723 script executed via `uv run`, not `deno test`, so this
+      # glob correctly skips it). hello-docker's Dockerfile ships a `test`
+      # build stage instead of a task.test.* file — it's exercised by
+      # pkg/tasktest's own Go tests in the `test` job above (real docker on
+      # ubuntu-latest), not by a step in this job.
       - name: Run Deno tests for tasks/examples/*
         run: deno test --allow-all --config=tasks/deno.json 'tasks/examples/**/task.test.ts'
 
@@ -71,7 +71,7 @@ jobs:
       - name: Run repo-prune shell guard tests
         run: bash tasks/examples/repo-prune/prune-stale-refs.test.sh
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "0.12.7"
 
@@ -83,6 +83,51 @@ jobs:
       # exercises it directly; no daemon needed.
       - name: Run Python task test for tasks/examples/hello-python
         run: uv run tasks/examples/hello-python/task.test.py
+
+  # Windows task execution (#871). The per-run IPC endpoint and both task SDKs
+  # take a different transport there — a loopback TCP port, since neither Deno
+  # nor asyncio can speak AF_UNIX on Windows — and no other job in this workflow
+  # runs on Windows, so that path could only ever break silently while the
+  # release kept shipping a windows/amd64 binary.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      # Scoped to the endpoint and the grants derived from it. The wider
+      # arg-building suites stay out: their fixtures hardcode POSIX paths, which
+      # filepath reads as relative on Windows (#875).
+      - name: Test the IPC endpoint and the sandbox grants derived from it
+        run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_NetDenyBlocksConnect|TestPythonSDK' -timeout 300s
+
+      # Both suites skip themselves when their toolchain is missing, so a green
+      # `go test` alone would not prove a task ran: the grep is what asserts it.
+      # uv is provisioned by the test itself, as the runtime provisions it.
+      - name: Run a Deno task end to end
+        shell: bash
+        run: |
+          go test ./pkg/runtime/deno/ -run '^TestRuntime_(ReturnValue|Log|KV)$' -v -timeout 600s | tee deno.log
+          grep -q -- '--- PASS: TestRuntime_KV' deno.log
+
+      - name: Run a Python task end to end
+        shell: bash
+        run: |
+          go test ./pkg/runtime/python/ -run '^TestExecute_(ReturnValuePersisted|OutputHTMLPersisted)$' -v -timeout 600s | tee python.log
+          grep -q -- '--- PASS: TestExecute_ReturnValuePersisted' python.log
 
   lint:
     name: Lint
