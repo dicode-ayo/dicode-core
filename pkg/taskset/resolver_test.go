@@ -953,6 +953,126 @@ spec:
 	}
 }
 
+// TestResolver_RefResolvesToTaskYmlOnlyDirectory is the end-to-end regression
+// for #765: a directory-valued ref whose directory holds only task.yml (no
+// task.yaml) must actually load, not merely pass resolution/kind-detection.
+// resolveYAMLPath's candidate probe (taskset.yaml, task.yaml, task.yml) and
+// isTaskFileName both already accept task.yml, but the loaders downstream —
+// task.LoadDirWithVars — re-derived a hardcoded task.yaml path from the
+// resolved file's parent directory, discarding which file actually matched
+// and failing with "open task.yaml ...: no such file or directory".
+func TestResolver_RefResolvesToTaskYmlOnlyDirectory(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "ymltask")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	taskYAML := `kind: Task
+apiVersion: dicode/v1
+name: ymltask
+runtime: deno
+trigger:
+  manual: true
+`
+	writeFile(t, taskDir, "task.yml", taskYAML)
+	writeFile(t, taskDir, "task.js", "// task")
+
+	tsContent := `kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: infra
+spec:
+  entries:
+    ymltask:
+      ref:
+        path: ` + taskDir + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("want 0 failures, got %d: %+v", len(failures), failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if got, want := rtSpec(results[0]).Name, "ymltask"; got != want {
+		t.Errorf("spec.Name = %q, want %q", got, want)
+	}
+}
+
+// TestResolver_FileRefLoadsExactlyItsOwnFile_NotASiblingManifest guards
+// against a mismatch a code-review of the #765 fix surfaced: a *file*-valued
+// ref that explicitly names task.yml is kind-detected and mustBeTask-checked
+// (#740/#753) against that exact file's content. If the loader then
+// re-derived a hardcoded task.yaml path from the same directory instead of
+// loading the file that was actually vetted, a sibling task.yaml with
+// different content (e.g. a different trigger or kind) would silently load
+// and run instead — the security check would have inspected one file while a
+// different file's content took effect. The resolver now passes the exact
+// vetted filename through to the loader (LoadDirWithVarsFile), so this must
+// resolve using task.yml's content, never task.yaml's.
+func TestResolver_FileRefLoadsExactlyItsOwnFile_NotASiblingManifest(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "ymltask")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The ref explicitly names task.yml — this is the file DetectKind/
+	// mustBeTask actually vets.
+	vettedYAML := `kind: Task
+apiVersion: dicode/v1
+name: vetted-via-yml
+runtime: deno
+trigger:
+  manual: true
+`
+	writeFile(t, taskDir, "task.yml", vettedYAML)
+	writeFile(t, taskDir, "task.js", "// task")
+	// A sibling task.yaml with conspicuously different content. If the loader
+	// ever re-derives a hardcoded task.yaml path instead of using the
+	// resolver-supplied filename, this is what would load instead.
+	siblingYAML := `kind: Task
+apiVersion: dicode/v1
+name: NEVER-SHOULD-LOAD-sibling-yaml
+runtime: deno
+trigger:
+  manual: true
+`
+	writeFile(t, taskDir, "task.yaml", siblingYAML)
+
+	tsContent := `kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: infra
+spec:
+  entries:
+    ymltask:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("want 0 failures, got %d: %+v", len(failures), failures)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if got, want := rtSpec(results[0]).Name, "vetted-via-yml"; got != want {
+		t.Errorf("spec.Name = %q, want %q — the ref-vetted task.yml must win, never the sibling task.yaml", got, want)
+	}
+}
+
 // Caller-supplied extraVars override the resolver's TASK_SET_DIR
 // derivation. Useful for tests or for future source types that want to
 // override the "root taskset dir" convention.
