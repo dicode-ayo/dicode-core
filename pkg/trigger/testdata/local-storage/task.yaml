@@ -5,8 +5,9 @@ description: |
   Generic filesystem-backed blob store. Stores opaque base64-encoded
   ciphertext blobs under a configurable root directory. The required
   prefix param scopes keys to a domain (e.g. "run-inputs/" for #233
-  input persistence, "relay/" for relay-client identity). Core does
-  the encryption; this task only sees ciphertext.
+  input persistence, "resume-state/" for #570 suspend-state offload,
+  "relay/" for relay-client identity). Core does the encryption; this
+  task only sees ciphertext.
 
 runtime: deno
 
@@ -21,7 +22,7 @@ params:
   key:
     type: string
     required: true
-    description: "Storage key, expected shape: run-inputs/<runID>"
+    description: "Storage key, expected shape: <prefix><id> (e.g. run-inputs/<runID>, resume-state/<runID>, relay/<id>)"
   value:
     type: string
     default: ""
@@ -40,6 +41,11 @@ permissions:
     - path: "${DATADIR}/run-inputs"
       permission: rw
     - path: "${DATADIR}/relay-store"
+      permission: rw
+    # resume_state offload (#570): a separate root from run-inputs above so
+    # the two byte-store mechanisms can never collide, even though they
+    # share this task as their storage backend.
+    - path: "${DATADIR}/resume-state"
       permission: rw
 
 # Self-opt-out from input persistence to avoid recursion: this task IS the

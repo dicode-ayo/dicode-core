@@ -325,9 +325,61 @@ func TestApplyBuiltinOverrides_RefreshesRegistry(t *testing.T) {
 	}
 }
 
+// TestApplyBuiltinOverrides_ResumeStateRetentionSeconds mirrors
+// TestApplyBuiltinOverrides_RetentionSeconds for buildin/resume-state-cleanup
+// (#570): dicode.yaml's defaults.resume_state.retention must override the
+// task's task.yaml-baked default the same way defaults.run_inputs.retention
+// does for run-inputs-cleanup.
+func TestApplyBuiltinOverrides_ResumeStateRetentionSeconds(t *testing.T) {
+	newSpec := func() *task.Spec {
+		return &task.Spec{
+			ID: "buildin/resume-state-cleanup",
+			Params: task.Params{
+				{Name: "retention_seconds", Default: "86400", Type: "number"},
+			},
+		}
+	}
+
+	t.Run("overridden when configured", func(t *testing.T) {
+		retention := 6 * time.Hour // 21600s
+		cfg := &config.Config{}
+		cfg.Defaults.ResumeState.Retention = retention
+		spec := newSpec()
+
+		got := applyBuiltinOverrides(spec, cfg)
+
+		want := fmt.Sprintf("%d", int64(retention.Seconds())) // "21600"
+		gotSpec, ok := got.(*task.Spec)
+		if !ok {
+			t.Fatalf("applyBuiltinOverrides returned %T, want *task.Spec", got)
+		}
+		if gotSpec.Params[0].Default != want {
+			t.Errorf("retention_seconds default = %q, want %q", gotSpec.Params[0].Default, want)
+		}
+		if got == task.Kinded(spec) {
+			t.Error("an applied override must return a distinct object, not the input pointer")
+		}
+	})
+
+	t.Run("skipped when zero", func(t *testing.T) {
+		cfg := &config.Config{} // Retention == 0
+		spec := newSpec()
+
+		got := applyBuiltinOverrides(spec, cfg)
+
+		if got != task.Kinded(spec) {
+			t.Error("no override configured: must return the same pointer, unchanged")
+		}
+		if spec.Params[0].Default != "86400" {
+			t.Errorf("caller's spec was mutated: Default = %q, want unchanged 86400", spec.Params[0].Default)
+		}
+	})
+}
+
 // TestRelayServerBodyGate exercises the predicate the arm closure consults
 // before eng.Register. The configured-relay branch is the load-bearing half —
 // it must report false when the operator has set up the relay, or the relay
+
 // never starts.
 func TestRelayServerBodyGate(t *testing.T) {
 	cases := []struct {
