@@ -932,8 +932,8 @@ func (s *Spec) validate() error {
 // reconciler's next poll. This check can't catch every escape, though — a
 // symlink partway down an in-bounds-looking path can still redirect outside
 // the boundary, and that's only visible once task.Hash actually resolves it
-// at hash time (see resolveInclude, and pkg/taskset/source.go's snapHash for
-// how that later failure is handled — #682).
+// at hash time (see resolveInclude, and pkg/taskset/source.go's
+// contentHashFor for how that later failure is handled — #682).
 //
 // Purely lexical, no filesystem access (symlink-aware containment is
 // task.Hash's job, once an absolute dir is known — see resolveInclude).

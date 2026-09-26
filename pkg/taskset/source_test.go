@@ -198,10 +198,11 @@ spec:
 // is only visible after resolving the symlink, which the load-time lexical
 // pre-check in pkg/task/spec.go can't catch (same construction as
 // TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected in
-// pkg/task/hash_test.go). Before the fix, snapHash silently fell back to
-// specHash alone on that error, and specHash never reflects a script-only
-// edit, so the hash stayed stable forever, syncAndEmit never saw a diff, and
-// the approval gate was never re-armed for the edit — a silent
+// pkg/task/hash_test.go). Before the fix, the taskset change-detection hash
+// silently fell back to a spec-only hash on that error, and a spec-only hash
+// never reflects a script-only edit, so the hash stayed stable forever,
+// syncAndEmit never saw a diff, and the approval gate was never re-armed for
+// the edit — a silent
 // approval-gate bypass. The fix must still detect the edit even while the
 // hash_include failure persists unchanged from one sync to the next.
 func TestSource_ScriptEditThroughSymlinkEscapedHashIncludeEmitsUpdate(t *testing.T) {
@@ -767,14 +768,14 @@ spec:
 	}
 }
 
-// TestSnapHash_ErrorFoldIsDeterministicAndDiffersFromGoodHash is a focused
-// unit test on snapHash's #682 error path, independent of syncAndEmit: a
-// hash_include entry that escapes through a symlink must fold into a hash
-// that (a) differs from the hash computed before the include started
-// failing, and (b) is identical across repeated calls while the same
-// failure persists unchanged — the "one loud transition, not a firehose"
-// property described at the fix site.
-func TestSnapHash_ErrorFoldIsDeterministicAndDiffersFromGoodHash(t *testing.T) {
+// TestContentHashFor_ErrorFoldIsDeterministicAndDiffersFromGoodHash is a
+// focused unit test on contentHashFor's #682 error path, independent of
+// syncAndEmit: a hash_include entry that escapes through a symlink must
+// fold into a hash that (a) differs from the hash computed before the
+// include started failing, and (b) is identical across repeated calls while
+// the same failure persists unchanged — the "one loud transition, not a
+// firehose" property described at the fix site.
+func TestContentHashFor_ErrorFoldIsDeterministicAndDiffersFromGoodHash(t *testing.T) {
 	parent := t.TempDir()
 	tasksRoot := filepath.Join(parent, "tasks-root")
 	if err := os.MkdirAll(tasksRoot, 0755); err != nil {
@@ -804,15 +805,24 @@ func TestSnapHash_ErrorFoldIsDeterministicAndDiffersFromGoodHash(t *testing.T) {
 
 	// No hash_include yet: task.Hash succeeds — this is the "good" hash a
 	// prior sync would have recorded before the include started escaping.
-	goodHash := src.snapHash(spec, taskDir, "infra/deploy")
+	goodHash, err := src.contentHashFor(spec, taskDir, "infra/deploy")
+	if err != nil {
+		t.Fatalf("contentHashFor: %v", err)
+	}
 
 	// Now the include escapes via evil-link: every call fails identically.
 	spec.HashInclude = []string{"../evil-link/secret.txt"}
-	errHash1 := src.snapHash(spec, taskDir, "infra/deploy")
-	errHash2 := src.snapHash(spec, taskDir, "infra/deploy")
+	errHash1, err := src.contentHashFor(spec, taskDir, "infra/deploy")
+	if err != nil {
+		t.Fatalf("contentHashFor (fallback path): %v", err)
+	}
+	errHash2, err := src.contentHashFor(spec, taskDir, "infra/deploy")
+	if err != nil {
+		t.Fatalf("contentHashFor (fallback path): %v", err)
+	}
 
 	if errHash1 != errHash2 {
-		t.Errorf("snapHash not deterministic across repeated identical errors: %q != %q", errHash1, errHash2)
+		t.Errorf("contentHashFor not deterministic across repeated identical errors: %q != %q", errHash1, errHash2)
 	}
 	if errHash1 == goodHash {
 		t.Errorf("error-folded hash must differ from the prior good hash; both were %q", errHash1)
