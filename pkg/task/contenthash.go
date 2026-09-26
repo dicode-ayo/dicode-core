@@ -30,8 +30,8 @@ type ContentHash string
 // Returns an error, never a silently degraded hash, when dir's content
 // cannot be hashed (see Hash) or resolved cannot be marshalled — the caller
 // decides what to do with that error (propagate it, or explicitly and
-// loudly fall back — see pkg/taskset/source.go's snapHash for a documented
-// example of the latter).
+// loudly fall back — see pkg/taskset/source.go's contentHashFor for a
+// documented example of the latter).
 func ComputeContentHash(domain, taskID, dir string, resolved any, hashInclude ...string) (ContentHash, error) {
 	dirHash, err := Hash(dir, hashInclude...)
 	if err != nil {

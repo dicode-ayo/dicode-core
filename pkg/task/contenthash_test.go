@@ -76,8 +76,8 @@ func TestComputeContentHash_ChangedResolvedValue_DifferentHash(t *testing.T) {
 // (pkg/taskset/source_test.go): a hash_include entry that escapes its
 // sibling-task boundary only once a symlink is resolved must make
 // ComputeContentHash return a non-nil error — this used to be untestable at
-// the taskset snapHash level because the failure was silently swallowed
-// there (#682); it's directly testable at the shared primitive now.
+// the taskset change-detection level because the failure was silently
+// swallowed there (#682); it's directly testable at the shared primitive now.
 func TestComputeContentHash_IncludeEscapingSiblingScope_Errors(t *testing.T) {
 	parent := t.TempDir()
 	tasksRoot := filepath.Join(parent, "tasks-root")
