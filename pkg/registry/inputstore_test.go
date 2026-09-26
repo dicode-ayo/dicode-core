@@ -12,12 +12,16 @@ import (
 
 // mockRunner is an in-memory storage backend for testing. It conforms to
 // TaskRunner but simulates a local-storage task: put/get/delete on a
-// map[string]string of base64-encoded blobs.
+// map[string]string of base64-encoded blobs. lastParams records the most
+// recent call's params so tests can assert on what a caller (e.g.
+// ResumeStateStore) passed through — e.g. an explicit root/prefix override.
 type mockRunner struct {
-	store map[string]string
+	store      map[string]string
+	lastParams map[string]string
 }
 
 func (m *mockRunner) RunTaskSync(ctx context.Context, taskID string, params map[string]string) (any, error) {
+	m.lastParams = params
 	switch params["op"] {
 	case "put":
 		m.store[params["key"]] = params["value"]
