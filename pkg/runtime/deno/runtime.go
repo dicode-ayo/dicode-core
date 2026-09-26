@@ -15,32 +15,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/db"
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
-
-// activePIDs tracks PIDs of all currently running Deno subprocesses.
-var activePIDs sync.Map // map[int]struct{}
-
-// ActivePIDs returns the PIDs of all currently running Deno subprocesses.
-func ActivePIDs() []int {
-	var pids []int
-	activePIDs.Range(func(k, _ any) bool {
-		pids = append(pids, k.(int))
-		return true
-	})
-	return pids
-}
 
 //go:embed sdk/shim.ts
 var shimContent string
@@ -148,12 +135,12 @@ func (rt *Runtime) live() *pkgruntime.BridgeDeps {
 // instance. When this Runtime is a per-version executor (parent != nil) it
 // reads from the parent so that a daemon-level SetInputStore call that runs
 // after NewExecutor is still visible here.
-func (rt *Runtime) effectiveInputStore() *registry.InputStore { return rt.live().InputStore }
+func (rt *Runtime) effectiveInputStore() *runinput.Store { return rt.live().InputStore }
 
 // effectiveReplayer returns the live Replayer, reading from parent when this
 // is a per-version executor so that a late SetReplayer call on the manager
 // propagates without extra bookkeeping.
-func (rt *Runtime) effectiveReplayer() *registry.Replayer { return rt.live().Replayer }
+func (rt *Runtime) effectiveReplayer() *runinput.Replayer { return rt.live().Replayer }
 
 // effectiveSourceMgr returns the live SourceController, reading from parent
 // when this is a per-version executor.
@@ -427,6 +414,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, ipcAddr, token)
+		pkgruntime.ConfigureTaskProcess(cmd)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		var wg sync.WaitGroup
@@ -468,9 +456,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			go rt.StreamRunLog(&wg, pr, runID, "stderr", "error", redactor)
 		}
 
-		// Register PID so metrics can aggregate child process resource usage.
-		pid := cmd.Process.Pid
-		activePIDs.Store(pid, struct{}{})
+		// Register the PID so metrics can aggregate child process resource
+		// usage and the daemon's shutdown sweep can find it.
+		releasePID := pkgruntime.TrackProcess(cmd.Process.Pid)
 
 		doneCh := make(chan error, 1)
 		go func() {
@@ -484,12 +472,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			doneCh <- err
 		}()
 
-		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace, pkgruntime.BridgeKillGrace,
 			func(retVal any) {
 				result.ReturnValue = retVal
 				result.Output = srv.Output()
 			},
-			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+			pkgruntime.ProcessGroup(cmd.Process),
 		)
 		if exitedFirst {
 			result.Output = srv.Output()
@@ -498,7 +486,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			}
 		}
 
-		activePIDs.Delete(pid)
+		releasePID()
 		// Wait for stdout/stderr scanners to flush all log lines before returning.
 		// Without this, callers that fetch logs immediately after Run returns may see
 		// an empty list because the goroutines haven't written to the DB yet.

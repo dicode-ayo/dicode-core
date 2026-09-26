@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 )
 
 // suspendGuardFetcher satisfies the (unexported) fetcher the Replayer depends
@@ -18,9 +18,9 @@ import (
 // called.
 type suspendGuardFetcher struct{ t *testing.T }
 
-func (s suspendGuardFetcher) Fetch(context.Context, string, string, int64) (registry.PersistedInput, error) {
+func (s suspendGuardFetcher) Fetch(context.Context, string, string, int64) (runinput.Persisted, error) {
 	s.t.Fatal("Fetch called; suspended-run guard should short-circuit before input fetch")
-	return registry.PersistedInput{}, nil
+	return runinput.Persisted{}, nil
 }
 
 // suspendGuardRunner records whether a replay was ever fired.
@@ -111,7 +111,7 @@ func TestApiReplayRun_409OnSuspendedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &suspendGuardRunner{}
-	srv.SetReplayer(registry.NewReplayer(reg, suspendGuardFetcher{t}, runner))
+	srv.SetReplayer(runinput.NewReplayer(reg, suspendGuardFetcher{t}, runner))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/susp-run/replay", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")

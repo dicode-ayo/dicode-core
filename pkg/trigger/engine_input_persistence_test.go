@@ -7,6 +7,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -39,12 +40,12 @@ func (r *fakeRunner) RunTaskSync(_ context.Context, _ string, params map[string]
 
 // newFakeInputStore returns an InputStore backed by the fakeRunner with a
 // deterministic 32-byte key.
-func newFakeInputStore(runner *fakeRunner, storageTaskID string) *registry.InputStore {
+func newFakeInputStore(runner *fakeRunner, storageTaskID string) *runinput.Store {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	return registry.NewInputStore(registry.NewInputCrypto(key), runner, storageTaskID)
+	return runinput.NewStore(runinput.NewCrypto(key), runner, storageTaskID)
 }
 
 func TestEngine_PersistsInputOnRunStart(t *testing.T) {
@@ -316,13 +317,13 @@ func TestEngine_PersistStorageTaskNotReady_NotWarned(t *testing.T) {
 
 	// Real runner backed by this engine, pointed at a storage task that is
 	// deliberately never registered so RunTaskSync returns
-	// registry.ErrStorageTaskNotRegistered.
+	// runinput.ErrStorageTaskNotRegistered.
 	runner := NewInputStoreTaskRunner(eng)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	is := registry.NewInputStore(registry.NewInputCrypto(key), runner, "buildin/local-storage")
+	is := runinput.NewStore(runinput.NewCrypto(key), runner, "buildin/local-storage")
 	eng.SetInputStore(is)
 
 	spec := &task.Spec{

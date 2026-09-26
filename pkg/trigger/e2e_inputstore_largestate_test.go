@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -108,7 +109,7 @@ func TestE2E_InputStore_LargeResumeStateRoundTrip(t *testing.T) {
 		key[i] = byte(i + 1)
 	}
 	runner := NewInputStoreTaskRunner(e.engine)
-	store := registry.NewInputStore(registry.NewInputCrypto(key), runner, "buildin/local-storage")
+	store := runinput.NewStore(runinput.NewCrypto(key), runner, "buildin/local-storage")
 
 	// A ~4 MB payload shaped like a multi-turn conversation. A unique marker
 	// rides in the last message so we can prove (a) it survives the round-trip
@@ -126,7 +127,7 @@ func TestE2E_InputStore_LargeResumeStateRoundTrip(t *testing.T) {
 		t.Fatalf("marshal payload: %v", err)
 	}
 	t.Logf("payload plaintext body: %d bytes", len(body))
-	in := registry.PersistedInput{Source: "manual", BodyKind: "json", Body: body}
+	in := runinput.Persisted{Source: "manual", BodyKind: "json", Body: body}
 
 	// InputCrypto binds the AEAD's AAD to the runID parsed as a UUID (real
 	// runs always are); resume_state offload would key by the root-run UUID.
@@ -183,7 +184,7 @@ func TestE2E_InputStore_LargeResumeStateRoundTrip(t *testing.T) {
 	if _, err := os.Stat(blobPath); !os.IsNotExist(err) {
 		t.Errorf("blob still on disk after Delete: %v", err)
 	}
-	if _, err := store.Fetch(ctx, runID, storedKey, storedAt); err != registry.ErrInputUnavailable {
+	if _, err := store.Fetch(ctx, runID, storedKey, storedAt); err != runinput.ErrUnavailable {
 		t.Errorf("Fetch after Delete: err = %v, want ErrInputUnavailable", err)
 	}
 }

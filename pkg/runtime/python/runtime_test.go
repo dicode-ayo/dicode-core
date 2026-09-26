@@ -6,10 +6,11 @@ import (
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/taskset"
 )
 
-// fakeTaskRunner satisfies registry.TaskRunner for InputStore construction.
+// fakeTaskRunner satisfies runinput.TaskRunner for InputStore construction.
 type fakeTaskRunner struct{}
 
 func (fakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]string) (any, error) {
@@ -17,12 +18,12 @@ func (fakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]stri
 }
 
 // newTestInputStore builds a minimal InputStore backed by a deterministic key.
-func newTestInputStore() *registry.InputStore {
+func newTestInputStore() *runinput.Store {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	return registry.NewInputStore(registry.NewInputCrypto(key), fakeTaskRunner{}, "fake-storage")
+	return runinput.NewStore(runinput.NewCrypto(key), fakeTaskRunner{}, "fake-storage")
 }
 
 // TestNewExecutor_SeesLateInputStore is the Python-runtime analogue of the
@@ -103,7 +104,7 @@ func TestRuntime_SetReplayer_Propagates(t *testing.T) {
 	}
 
 	is := newTestInputStore()
-	r := registry.NewReplayer(registry.New(nil), is, nil)
+	r := runinput.NewReplayer(registry.New(nil), is, nil)
 	rt.SetReplayer(r)
 
 	if got := exec.parent.Replayer; got != r {

@@ -5,14 +5,14 @@ import (
 	"net/http"
 
 	"github.com/dicode/dicode/pkg/metrics"
-	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 )
 
 // apiMetrics handles GET /api/metrics.
 // Returns daemon heap/CPU metrics and active task/child-process metrics as JSON.
 func (s *Server) apiMetrics(w http.ResponseWriter, r *http.Request) {
 	activeTasks := s.engine.ActiveRunCount()
-	pids := denoruntime.ActivePIDs()
+	pids := pkgruntime.ActivePIDs()
 
 	tasks := metrics.ReadChildMetrics(pids, activeTasks)
 	tasks.ActiveTaskSlots = s.engine.ActiveTaskSlots()

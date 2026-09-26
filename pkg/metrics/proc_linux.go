@@ -98,3 +98,65 @@ func readProcRSSMB(pid int) float64 {
 	}
 	return 0
 }
+
+// processGroupMembers maps each of pids to every live process in the group it
+// leads, including itself. The runtimes start each task subprocess as its own
+// group leader, so a group is one task's whole process tree — for a Python run
+// that is `uv` plus the interpreter it spawned, whose footprint is the one
+// worth reporting.
+//
+// /proc is walked once for the whole set rather than once per PID: a host
+// running twenty tasks among two thousand processes would otherwise cost forty
+// thousand file reads per metrics read, and the dashboard polls.
+//
+// A PID leading no group yields just itself. Matching on group id alone would
+// sweep in every process sharing the daemon's own group.
+func processGroupMembers(pids []int) map[int][]int {
+	groups := make(map[int][]int, len(pids))
+	tracked := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		groups[pid] = []int{pid}
+		tracked[pid] = true
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return groups
+	}
+	for _, e := range entries {
+		member, err := strconv.Atoi(e.Name())
+		if err != nil || tracked[member] {
+			continue
+		}
+		if leader := readProcPGID(member); tracked[leader] {
+			groups[leader] = append(groups[leader], member)
+		}
+	}
+	return groups
+}
+
+// readProcPGID returns a process's group id from /proc/<pid>/stat, or 0 when
+// it cannot be read (the process exited, most often).
+func readProcPGID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// The comm field is parenthesized and may contain spaces, so the fields
+	// after the final ')' are the only ones safe to split: 0 = state,
+	// 1 = ppid, 2 = pgrp.
+	line := string(data)
+	rp := strings.LastIndex(line, ")")
+	if rp < 0 {
+		return 0
+	}
+	fields := strings.Fields(line[rp+1:])
+	if len(fields) < 3 {
+		return 0
+	}
+	pgid, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return 0
+	}
+	return pgid
+}

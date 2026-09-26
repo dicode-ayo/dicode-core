@@ -49,7 +49,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -314,6 +313,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 		cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, ipcAddr, token)
+		pkgruntime.ConfigureTaskProcess(cmd)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		// Route stderr through cmd.Stderr (a writer), not StderrPipe: this makes
@@ -331,6 +331,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			return false
 		}
 
+		// Register the PID so metrics can aggregate child process resource
+		// usage and the daemon's shutdown sweep can find it.
+		releasePID := pkgruntime.TrackProcess(cmd.Process.Pid)
+
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go e.StreamRunLog(&wg, pr, runID, "stderr", "warn", redactor)
@@ -344,7 +348,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			doneCh <- err
 		}()
 
-		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace, pkgruntime.BridgeKillGrace,
 			func(retVal any) {
 				result.ChainInput = retVal
 				result.ReturnValue = retVal
@@ -354,7 +358,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 					result.OutputContent = out.Content
 				}
 			},
-			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+			pkgruntime.ProcessGroup(cmd.Process),
 		)
 		if exitedFirst {
 			if out := srv.Output(); out != nil {
@@ -367,6 +371,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			}
 		}
 
+		releasePID()
 		wg.Wait()
 		return result.Error != nil && sniffer.StaleLock()
 	}

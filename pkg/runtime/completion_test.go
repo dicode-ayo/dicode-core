@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"errors"
+	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,8 +22,8 @@ func TestAwaitBridgeCompletion_ReturnThenExit(t *testing.T) {
 	returnCh <- "the-result"
 
 	var got any
-	terminated := false
-	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, time.Minute,
+	proc := &stubProc{}
+	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, time.Minute, time.Minute,
 		func(v any) {
 			got = v
 			// Simulate the process exiting (with a nonzero status) right
@@ -30,7 +32,7 @@ func TestAwaitBridgeCompletion_ReturnThenExit(t *testing.T) {
 			// deterministic.
 			doneCh <- errors.New("exit status 1") // ignored: return already arrived
 		},
-		func() { terminated = true },
+		proc,
 	)
 
 	if got != "the-result" {
@@ -42,8 +44,8 @@ func TestAwaitBridgeCompletion_ReturnThenExit(t *testing.T) {
 	if exitErr != nil {
 		t.Errorf("exit status after a return must be ignored, got %v", exitErr)
 	}
-	if terminated {
-		t.Error("terminate fired although the process exited within grace")
+	if terminated, _ := proc.state(); terminated {
+		t.Error("SIGTERM sent although the process exited within grace")
 	}
 }
 
@@ -56,15 +58,15 @@ func TestAwaitBridgeCompletion_ReturnThenHang(t *testing.T) {
 	doneCh := make(chan error, 1) // never receives: process hangs
 	returnCh <- 42
 
-	terminated := false
+	proc := &stubProc{}
 	start := time.Now()
-	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, 20*time.Millisecond,
+	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, 20*time.Millisecond, time.Millisecond,
 		func(any) {},
-		func() { terminated = true },
+		proc,
 	)
 
-	if !terminated {
-		t.Fatal("terminate did not fire after the grace window")
+	if terminated, _ := proc.state(); !terminated {
+		t.Fatal("SIGTERM did not fire after the grace window")
 	}
 	if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
 		t.Errorf("terminate fired before the grace window elapsed (%v)", elapsed)
@@ -83,10 +85,14 @@ func TestAwaitBridgeCompletion_ExitFirst_Error(t *testing.T) {
 	wantErr := errors.New("exit status 2")
 	doneCh <- wantErr
 
-	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, time.Minute,
+	proc := &stubProc{}
+	exitErr, exitedFirst := AwaitBridgeCompletion(returnCh, doneCh, time.Minute, time.Minute,
 		func(any) { t.Error("onReturn called although no return value was posted") },
-		func() { t.Error("terminate fired on the exit-first path") },
+		proc,
 	)
+	if terminated, killed := proc.state(); terminated || killed {
+		t.Error("the exit-first path signaled a process that had already exited")
+	}
 
 	if !exitedFirst {
 		t.Error("exitedFirst = false, want true")
@@ -112,9 +118,9 @@ func TestAwaitBridgeCompletion_ExitFirst_DrainsRacedReturn(t *testing.T) {
 		returnCh <- "late-return"
 
 		got := any(nil)
-		exitErr, _ := AwaitBridgeCompletion(returnCh, doneCh, time.Minute,
+		exitErr, _ := AwaitBridgeCompletion(returnCh, doneCh, time.Minute, time.Minute,
 			func(v any) { got = v },
-			func() {},
+			&stubProc{},
 		)
 
 		if exitErr != nil {
@@ -123,5 +129,88 @@ func TestAwaitBridgeCompletion_ExitFirst_DrainsRacedReturn(t *testing.T) {
 		if got != "late-return" {
 			t.Fatalf("raced return value not delivered: got %v", got)
 		}
+	}
+}
+
+// stubProc records the signals the completion protocol sends.
+type stubProc struct {
+	mu         sync.Mutex
+	terminated bool
+	killed     bool
+}
+
+func (p *stubProc) Signal(os.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.terminated = true
+	return nil
+}
+
+func (p *stubProc) Kill() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.killed = true
+	return nil
+}
+
+func (p *stubProc) state() (terminated, killed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.terminated, p.killed
+}
+
+// TestAwaitBridgeCompletion_HangIgnoresSIGTERM: a child that ignores SIGTERM
+// holds the run's stderr drain open, so the second grace and the SIGKILL that
+// follows it are the only bound on how long the run takes to finish.
+func TestAwaitBridgeCompletion_HangIgnoresSIGTERM(t *testing.T) {
+	returnCh := make(chan any, 1)
+	doneCh := make(chan error, 1) // never receives: the child ignores both
+	returnCh <- 42
+
+	proc := &stubProc{}
+	start := time.Now()
+	AwaitBridgeCompletion(returnCh, doneCh, 20*time.Millisecond, 20*time.Millisecond,
+		func(any) {}, proc)
+
+	terminated, killed := proc.state()
+	if !terminated {
+		t.Error("SIGTERM not sent after the first grace window")
+	}
+	if !killed {
+		t.Error("SIGKILL not sent after the second grace window")
+	}
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+		t.Errorf("escalated after %v; want both grace windows to elapse", elapsed)
+	}
+}
+
+// TestAwaitBridgeCompletion_HangHonorsSIGTERM: a child that exits on SIGTERM
+// must not then be killed — the graceful stop is the whole point of sending
+// SIGTERM first.
+func TestAwaitBridgeCompletion_HangHonorsSIGTERM(t *testing.T) {
+	returnCh := make(chan any, 1)
+	doneCh := make(chan error, 1)
+	returnCh <- 42
+
+	proc := &stubProc{}
+	go func() {
+		for {
+			if terminated, _ := proc.state(); terminated {
+				doneCh <- nil
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	AwaitBridgeCompletion(returnCh, doneCh, 20*time.Millisecond, time.Minute,
+		func(any) {}, proc)
+
+	terminated, killed := proc.state()
+	if !terminated {
+		t.Error("SIGTERM not sent after the first grace window")
+	}
+	if killed {
+		t.Error("SIGKILL sent although the child exited on SIGTERM")
 	}
 }

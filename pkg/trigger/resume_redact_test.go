@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 )
@@ -49,7 +50,7 @@ func TestSuspendRun_RedactsSecretBackedParamAtRest(t *testing.T) {
 	if err := json.Unmarshal(orig.ResumeParams, &carry); err != nil {
 		t.Fatalf("decode resume_params: %v", err)
 	}
-	if carry.Params["api_key"] != registry.RedactPlaceholder {
+	if carry.Params["api_key"] != runinput.RedactPlaceholder {
 		t.Errorf("stored api_key = %q, want the redaction placeholder", carry.Params["api_key"])
 	}
 }

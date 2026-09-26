@@ -204,9 +204,15 @@ func NewControlServer(
 	return cs, nil
 }
 
-// Start begins accepting connections. It removes any stale socket file first.
-// Run blocks until ctx is cancelled.
+// Start begins accepting connections. It removes a stale socket file first,
+// but refuses one a daemon is still serving: unlinking a live socket does not
+// disconnect the daemon behind it, it just lets this process bind the same
+// path, leaving two daemons on one data directory and the CLI reaching
+// whichever bound last. Run blocks until ctx is canceled.
 func (cs *ControlServer) Start(ctx context.Context) error {
+	if socketReachable(cs.socketPath) {
+		return fmt.Errorf("control: a daemon is already listening on %s", cs.socketPath)
+	}
 	_ = os.Remove(cs.socketPath)
 	if err := os.MkdirAll(filepath.Dir(cs.socketPath), 0700); err != nil {
 		return fmt.Errorf("control: mkdir: %w", err)

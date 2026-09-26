@@ -28,6 +28,7 @@ import (
 	"github.com/dicode/dicode/pkg/metrics"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
@@ -110,27 +111,6 @@ func Run(configPath string, portOverride int, version string) {
 // caller checks that separately). On Linux we require an X or Wayland
 // server to be advertised, since headless servers commonly have a TTY
 // but no way to open a browser.
-// resolveDataDir picks the directory the daemon uses for SQLite, sources,
-// and run logs. Resolution order: cfg.DataDir → DICODE_DATA_DIR env var →
-// $HOME/.dicode. The env-var fallback is what makes the Docker image's
-// `ENV DICODE_DATA_DIR=/data` actually redirect state into the mounted
-// volume on the very first run, before onboarding has written a config
-// (the onboarding default also honors the env var, so the generated
-// dicode.yaml bakes the same path in for subsequent starts).
-func resolveDataDir(cfg *config.Config) (string, error) {
-	if cfg.DataDir != "" {
-		return cfg.DataDir, nil
-	}
-	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
-		return d, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	return home + "/.dicode", nil
-}
-
 // relayConfigured reports whether the operator has configured the dicode-relay
 // server. It mirrors the gate used when exporting DICODE_RELAY_* env vars at boot.
 func relayConfigured(cfg *config.Config) bool {
@@ -252,6 +232,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	gitops.SetInternalHostAllowlist(allowlist)
 
+	// 0a. Refuse a data directory another daemon is already serving, before
+	// anything below touches it. Startup cleanup stops orphaned containers,
+	// cancels every run still marked running, and rotates the CLI token —
+	// all of which belong to the daemon that is already there.
+	if err := refuseIfDataDirServed(cfg.DataDir); err != nil {
+		return err
+	}
+
 	// 1. Open database.
 	database, err := openDatabase(cfg)
 	if err != nil {
@@ -259,11 +247,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	defer database.Close()
 
-	// 2. Resolve data directory.
-	dataDir, err := resolveDataDir(cfg)
-	if err != nil {
-		return err
-	}
+	// 2. Data directory. config.Load resolved it — config, DICODE_DATA_DIR or
+	// $HOME/.dicode — and validation rejected a config that could not name
+	// one. It is not re-resolved here: the CLI locates the control socket from
+	// the same answer, and a second resolution is free to disagree.
+	dataDir := cfg.DataDir
 
 	// 3. Build secrets chain.
 	secretsChain, localSecrets := buildSecretsChain(cfg, dataDir, database, log)
@@ -342,6 +330,17 @@ func openDatabase(cfg *config.Config) (db.DB, error) {
 
 // setupRegistry cleans up container/run state left over from a previous
 // session and builds the task registry (step 4).
+// refuseIfDataDirServed reports an error when a daemon is already listening on
+// dataDir's control socket. A socket file with nothing behind it is stale and
+// does not count — ControlServer.Start unlinks it before binding.
+func refuseIfDataDirServed(dataDir string) error {
+	sock := ipc.ControlSocketIn(dataDir)
+	if sock.Reachable() {
+		return fmt.Errorf("a daemon is already running on %s (socket %s)", dataDir, sock.Path)
+	}
+	return nil
+}
+
 func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *registry.Registry {
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
 	podmanruntime.CleanupOrphanedContainers(ctx, log)
@@ -375,7 +374,7 @@ func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *regist
 // the InputStore so dicode.runs.replay finds a populated store — or nil when
 // persistence is disabled or unavailable. srv.SetReplayer is called by run()
 // after webui is built.
-func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg *registry.Registry, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) *registry.Replayer {
+func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg *registry.Registry, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) *runinput.Replayer {
 	if !cfg.Defaults.RunInputs.IsEnabled() {
 		log.Info("run-input persistence disabled by config")
 		return nil
@@ -402,13 +401,13 @@ func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg
 		return nil
 	}
 	runner := trigger.NewInputStoreTaskRunner(eng)
-	is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
+	is := runinput.NewStore(runinput.NewCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
 	eng.SetInputStore(is)
 	denoRT.SetInputStore(is)
 	pythonRT.SetInputStore(is)
 	// Replayer composes InputStore.Fetch + the engine's fireAsync.
 	// Wired after InputStore so dicode.runs.replay finds a populated store.
-	replayer := registry.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
+	replayer := runinput.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
 	denoRT.SetReplayer(replayer)
 	pythonRT.SetReplayer(replayer)
 	log.Info("run-input persistence enabled",
@@ -759,7 +758,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 
 // buildWebUI exports the relay-related env vars and builds the web UI server
 // with its approval / replay wiring (steps 8 + 8.5).
-func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
+func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *runinput.Replayer, log *zap.Logger) (*webui.Server, error) {
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -957,7 +956,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			dm := metrics.ReadDaemonMetrics()
 			return dm.HeapAllocMB, dm.HeapSysMB, dm.Goroutines, dm.CPUMs
 		},
-		ActivePIDs: denoruntime.ActivePIDs,
+		ActivePIDs: pkgruntime.ActivePIDs,
 		ReadChildren: func(pids []int, activeTasks int) (float64, *int64) {
 			cm := metrics.ReadChildMetrics(pids, activeTasks)
 			return cm.ChildRSSMB, cm.ChildCPUMs

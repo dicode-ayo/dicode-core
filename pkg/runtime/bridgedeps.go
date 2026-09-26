@@ -10,6 +10,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
@@ -44,7 +45,7 @@ type BridgeDeps struct {
 	// SecretsManager is optional; wired for dicode.secrets_set/delete.
 	SecretsManager secrets.Manager
 	// InputStore is optional; wired for dicode.runs.delete_input / get_input.
-	InputStore *registry.InputStore
+	InputStore *runinput.Store
 	DB         db.DB
 	Log        *zap.Logger
 	// IPCSecret is the per-daemon secret used to mint per-run IPC tokens.
@@ -61,7 +62,7 @@ type BridgeDeps struct {
 	SharedResolver *envresolve.Resolver
 	// Replayer, SourceMgr, RepoResolver are wired after buildRuntimes
 	// returns (same late-wiring pattern as InputStore).
-	Replayer     *registry.Replayer   // optional; enables dicode.runs.replay
+	Replayer     *runinput.Replayer   // optional; enables dicode.runs.replay
 	SourceMgr    ipc.SourceController // optional; enables dicode.sources.set_dev_mode
 	RepoResolver ipc.RepoPathResolver // optional; enables dicode.git.commit_push
 	// TestGuard is the approval gate's veto for dicode.tasks.test, forwarded
@@ -151,11 +152,11 @@ func (d *BridgeDeps) SetSecretsManager(m secrets.Manager) { d.SecretsManager = m
 // SetInputStore wires the InputStore so the per-run IPC server can serve
 // dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
 // before any run; mirrors the SetEngine / SetGateway pattern.
-func (d *BridgeDeps) SetInputStore(is *registry.InputStore) { d.InputStore = is }
+func (d *BridgeDeps) SetInputStore(is *runinput.Store) { d.InputStore = is }
 
 // SetReplayer wires the Replayer so the per-run IPC server can serve
 // dicode.runs.replay calls. Mirrors the SetInputStore wiring.
-func (d *BridgeDeps) SetReplayer(r *registry.Replayer) { d.Replayer = r }
+func (d *BridgeDeps) SetReplayer(r *runinput.Replayer) { d.Replayer = r }
 
 // SetSourceManager wires the source manager so the per-run IPC server can
 // serve dicode.sources.set_dev_mode calls.

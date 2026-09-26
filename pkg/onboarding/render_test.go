@@ -1,6 +1,7 @@
 package onboarding
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -232,5 +233,16 @@ func TestRenderConfig_PinnedPresetRendersTagNotBranch(t *testing.T) {
 	}
 	if ref.Branch != "" {
 		t.Errorf("rendered branch = %q on a pinned preset, want it omitted", ref.Branch)
+	}
+}
+
+// TestRenderConfig_RefusesAnUnresolvableDataDir: the wizard must not be able
+// to write a config the loader then refuses. DataDir is empty only when no
+// data_dir was chosen, DICODE_DATA_DIR is unset and the home directory could
+// not be determined — the one case config.validate rejects.
+func TestRenderConfig_RefusesAnUnresolvableDataDir(t *testing.T) {
+	out := RenderConfig(Result{Port: 8080})
+	if strings.Contains(out, `data_dir: ""`) {
+		t.Error("RenderConfig emitted an empty data_dir; config.Load would refuse this file")
 	}
 }

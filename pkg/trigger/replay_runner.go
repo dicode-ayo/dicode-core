@@ -5,10 +5,11 @@ import (
 	"fmt"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 )
 
-// ReplayRunnerAdapter wraps an Engine to satisfy registry.ReplayRunner.
+// ReplayRunnerAdapter wraps an Engine to satisfy runinput.ReplayRunner.
 // FireForReplay calls Engine.fireAsync with source = "replay" and the
 // supplied parent_run_id; the engine's existing chain-suppression guard
 // (introduced in #236) skips on_failure_chain for replay-sourced runs.
@@ -17,13 +18,13 @@ type ReplayRunnerAdapter struct {
 }
 
 // NewReplayRunner constructs a ReplayRunnerAdapter for the given engine.
-// Returns the registry.ReplayRunner interface so callers don't depend on
+// Returns the runinput.ReplayRunner interface so callers don't depend on
 // the concrete adapter type.
-func NewReplayRunner(engine *Engine) registry.ReplayRunner {
+func NewReplayRunner(engine *Engine) runinput.ReplayRunner {
 	return &ReplayRunnerAdapter{engine: engine}
 }
 
-// FireForReplay implements registry.ReplayRunner.
+// FireForReplay implements runinput.ReplayRunner.
 func (a *ReplayRunnerAdapter) FireForReplay(ctx context.Context, taskID, parentRunID string, input any) (string, error) {
 	spec, ok := a.engine.registry.Get(taskID)
 	if !ok {

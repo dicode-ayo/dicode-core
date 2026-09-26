@@ -7,6 +7,7 @@ import (
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -20,7 +21,7 @@ func (fakeProviderRunner) Run(_ context.Context, _ string, _ []envresolve.Provid
 	return &envresolve.ProviderResult{Values: map[string]string{}}, nil
 }
 
-// fakeTaskRunner satisfies registry.TaskRunner for InputStore construction.
+// fakeTaskRunner satisfies runinput.TaskRunner for InputStore construction.
 type fakeTaskRunner struct{}
 
 func (fakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]string) (any, error) {
@@ -28,12 +29,12 @@ func (fakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]stri
 }
 
 // newTestInputStore builds a minimal InputStore backed by a deterministic key.
-func newTestInputStore() *registry.InputStore {
+func newTestInputStore() *runinput.Store {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	return registry.NewInputStore(registry.NewInputCrypto(key), fakeTaskRunner{}, "fake-storage")
+	return runinput.NewStore(runinput.NewCrypto(key), fakeTaskRunner{}, "fake-storage")
 }
 
 // TestNewExecutor_PropagatesProviderFields pins the contract that
@@ -174,7 +175,7 @@ func TestRuntime_SetReplayer_Propagates(t *testing.T) {
 	}
 
 	is := newTestInputStore()
-	r := registry.NewReplayer(registry.New(nil), is, nil)
+	r := runinput.NewReplayer(registry.New(nil), is, nil)
 	parent.SetReplayer(r)
 
 	if got := exec.effectiveReplayer(); got != r {

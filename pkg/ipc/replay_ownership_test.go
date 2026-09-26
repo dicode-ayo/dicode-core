@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-// ipcFakeReplayRunner satisfies registry.ReplayRunner for IPC ownership tests.
+// ipcFakeReplayRunner satisfies runinput.ReplayRunner for IPC ownership tests.
 // It always returns a new run ID and records calls.
 type ipcFakeReplayRunner struct{}
 
@@ -21,21 +22,21 @@ func (ipcFakeReplayRunner) FireForReplay(_ context.Context, _, _ string, _ any) 
 	return uuid.New().String(), nil
 }
 
-// ipcFakeTaskRunner satisfies registry.TaskRunner for the InputStore.
+// ipcFakeTaskRunner satisfies runinput.TaskRunner for the InputStore.
 type ipcFakeTaskRunner struct{}
 
 func (ipcFakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]string) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-// newTestReplayer returns a registry.Replayer backed by the given registry.
-func newTestReplayer(reg *registry.Registry) *registry.Replayer {
+// newTestReplayer returns a runinput.Replayer backed by the given registry.
+func newTestReplayer(reg *registry.Registry) *runinput.Replayer {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	is := registry.NewInputStore(registry.NewInputCrypto(key), ipcFakeTaskRunner{}, "fake-storage")
-	return registry.NewReplayer(reg, is, ipcFakeReplayRunner{})
+	is := runinput.NewStore(runinput.NewCrypto(key), ipcFakeTaskRunner{}, "fake-storage")
+	return runinput.NewReplayer(reg, is, ipcFakeReplayRunner{})
 }
 
 // insertRunWithTask inserts a run row owned by taskID with a non-empty

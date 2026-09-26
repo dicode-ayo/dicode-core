@@ -19,6 +19,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	"github.com/dicode/dicode/pkg/schemavalidate"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitsource "github.com/dicode/dicode/pkg/source/git"
@@ -66,7 +67,7 @@ type Server struct {
 
 	gateway      *Gateway           // optional; enables http.register for daemon tasks
 	inputStore   inputBlobStore     // optional; enables dicode.runs.delete_input blob deletion
-	replayer     *registry.Replayer // optional; enables dicode.runs.replay
+	replayer     *runinput.Replayer // optional; enables dicode.runs.replay
 	sourceMgr    SourceController   // optional; enables dicode.sources.*
 	repoResolver RepoPathResolver   // optional; enables dicode.git.commit_push
 	crypto       *cryptoHandler     // optional; enables dicode.crypto.{encrypt, decrypt}
@@ -327,25 +328,25 @@ func (s *Server) Stop() {
 // Must be called before Start.
 func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
 
-// inputBlobStore is the subset of *registry.InputStore the IPC server calls
+// inputBlobStore is the subset of *runinput.Store the IPC server calls
 // directly. Extracted as an interface — rather than referencing
-// *registry.InputStore on the Server struct — so tests can inject a store
+// *runinput.Store on the Server struct — so tests can inject a store
 // whose Delete fails without needing a real storage-task round trip (#819
 // code-review follow-up: delete_inputs must not blindly clear a run's
 // metadata when the blob delete for it failed).
 type inputBlobStore interface {
 	Delete(ctx context.Context, key string) error
-	Fetch(ctx context.Context, runID, key string, storedAt int64) (registry.PersistedInput, error)
+	Fetch(ctx context.Context, runID, key string, storedAt int64) (runinput.Persisted, error)
 }
 
 // SetInputStore attaches the InputStore so tasks with RunsDeleteInput permission
 // can call dicode.runs.delete_input() to remove the blob before clearing the
 // runs row. Must be called before Start.
-func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
+func (s *Server) SetInputStore(is *runinput.Store) { s.inputStore = is }
 
 // SetReplayer attaches the Replayer so tasks with RunsReplay permission
 // can call dicode.runs.replay. nil disables (dispatch returns error).
-func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
+func (s *Server) SetReplayer(r *runinput.Replayer) { s.replayer = r }
 
 // SourceSummary is the per-source view dicode.sources.list() returns.
 // Host paths — the source's local checkout and its dev-mode root — are
@@ -1635,7 +1636,7 @@ func (s *Server) mcpAllowed(name string) bool {
 // explicitly in their task.yaml and are NOT listed here — they are a
 // different namespace from these daemon-private keys.
 var daemonPrivateCryptoContexts = map[string]bool{
-	"dicode/run-inputs/v1":    true, // pkg/registry/inputcrypto.go
+	"dicode/run-inputs/v1":    true, // pkg/runinput/crypto.go
 	"dicode/approval-lock/v1": true, // pkg/approval/lock.go — lock-signing key
 }
 

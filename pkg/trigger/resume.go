@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
@@ -119,7 +120,7 @@ func secretBackedParamNames(spec *task.Spec) map[string]struct{} {
 // redactSecretBackedParams returns a copy of params (never mutated) with any
 // value that exactly matches a live secrets-chain entry under a param name
 // spec's own permissions.env declares as a Secret key, replaced by
-// registry.RedactPlaceholder — the only case restoreSecretBackedParams can
+// runinput.RedactPlaceholder — the only case restoreSecretBackedParams can
 // recover later, by re-resolving the same key. A param whose name is not
 // among spec's granted secret keys is never resolved against the secrets
 // chain at all. A granted name whose value has no live secrets-chain match
@@ -168,7 +169,7 @@ func (e *Engine) redactSecretBackedParams(ctx context.Context, spec *task.Spec, 
 		if secretVal != params[name] {
 			continue
 		}
-		out[name] = registry.RedactPlaceholder
+		out[name] = runinput.RedactPlaceholder
 		redacted = append(redacted, "params."+name)
 	}
 	return out, redacted, nil

@@ -42,6 +42,7 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/source` | Interface + git/local implementations; git uses go-git (no binary) |
 | `pkg/registry` | In-memory task map; SQLite run/log persistence |
 | `pkg/registry/reconciler` | Diff sources against registry, drive add/remove/update |
+| `pkg/runinput` | What a run was given: redact → encrypt → store via the storage task, and replay a stored input |
 | `pkg/trigger` | Schedule/fire tasks; supports cron, webhook, manual, chain, daemon |
 | `pkg/runtime/deno` | Execute JS/TS tasks via a Deno subprocess with restrictive `--allow-*` flags; SDK shim embedded from `pkg/runtime/deno/sdk/shim.ts` |
 | `pkg/runtime/python` | Execute Python tasks via a `uv`-provisioned interpreter subprocess; SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py` |

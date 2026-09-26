@@ -87,7 +87,13 @@ server:
 # ---------------------------------------------------------------------------
 log_level: info
 `)
-	fmt.Fprintf(&b, "data_dir: %q\n", r.DataDir)
+	// An empty DataDir means nothing could name one — no choice, no
+	// DICODE_DATA_DIR, no home directory. Writing it would produce a config
+	// config.Load refuses; omitting it leaves the same error to the loader,
+	// which words it for the operator.
+	if r.DataDir != "" {
+		fmt.Fprintf(&b, "data_dir: %q\n", r.DataDir)
+	}
 
 	return b.String()
 }

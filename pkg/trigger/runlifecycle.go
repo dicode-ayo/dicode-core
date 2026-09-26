@@ -13,6 +13,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runinput"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
@@ -188,9 +189,9 @@ func (e *Engine) persistRunInput(k task.Kinded, opts *pkgruntime.RunOptions, sou
 		return
 	}
 
-	var web *registry.WebhookFields
+	var web *runinput.WebhookFields
 	if opts.WebhookCtx != nil {
-		web = &registry.WebhookFields{
+		web = &runinput.WebhookFields{
 			Method:          opts.WebhookCtx.Method,
 			Path:            opts.WebhookCtx.Path,
 			Headers:         opts.WebhookCtx.Headers,
@@ -200,10 +201,10 @@ func (e *Engine) persistRunInput(k task.Kinded, opts *pkgruntime.RunOptions, sou
 			BodyFullTextual: bodyFullTextual,
 		}
 	}
-	in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
+	in := runinput.BuildFromRunOpts(string(source), opts.Params, opts.Input, web)
 	key, size, storedAt, err := e.inputStore.Persist(context.Background(), opts.RunID, in)
 	if err != nil {
-		if errors.Is(err, registry.ErrStorageTaskNotRegistered) {
+		if errors.Is(err, runinput.ErrStorageTaskNotRegistered) {
 			// Startup race (#523): daemon-triggered runs (tray, relay-*,
 			// nginx-start) fire before buildin/local-storage registers, so the
 			// backing store isn't ready yet. Expected and self-healing.

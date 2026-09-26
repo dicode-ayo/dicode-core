@@ -6,6 +6,41 @@ Newest release first.
 
 ## Unreleased
 
+### `DICODE_DATA_DIR` now outranks `data_dir` in dicode.yaml
+
+The CLI, the daemon and the first-run wizard each resolved the data directory from their own inputs, and they disagreed whenever both `DICODE_DATA_DIR` and a `data_dir` in `dicode.yaml` were set: the CLI took the environment variable, the daemon took the config. The CLI then dialed a socket no daemon was listening on and started a second daemon, which unlinked the live socket and rebound it — two daemons over one data directory.
+
+One resolver now answers for all three, and the order is the one the CLI and the wizard already used: `DICODE_DATA_DIR`, then `data_dir`, then `$HOME/.dicode`.
+
+**If you set both to different paths, the daemon moves.** It will read and write the directory named by `DICODE_DATA_DIR`, so its SQLite database, sources and run logs appear empty — the old ones are still at the `data_dir` path, untouched. Pick one:
+
+- drop `DICODE_DATA_DIR` from the daemon's environment to keep using `data_dir`, or
+- point both at the same directory.
+
+Setting only one of the two is unaffected, and so is the Docker image, where `ENV DICODE_DATA_DIR=/data` and the generated config already name the same directory.
+
+`${DATADIR}`, `database.path` and the AI scratch directory now follow `DICODE_DATA_DIR` as well; previously only `data_dir` moved them.
+
+### Task subprocesses run in a process group of their own
+
+Deno and Python task subprocesses are now started as process-group leaders, and the graceful stop after a run posts its result signals the whole group. A Python task runs as `uv run python`, so the process the daemon holds is a wrapper: signaling it alone left the interpreter running, and SIGKILL — which no wrapper can forward — orphaned it outright.
+
+The group also means task subprocesses are no longer in the terminal's foreground group, so a Ctrl-C on a foreground `dicode daemon` no longer reaches them directly. The run context's cancel now stops the whole group instead of the leader alone, which covers both that and a task's own timeout — before, a `uv`-wrapped interpreter outlived its cancel and held the run's stderr open.
+
+Per-child resource metrics (`/api/metrics`, `dicode status`) now sum the whole group, so a Python task's memory and CPU are reported instead of `uv`'s. Expect the numbers to rise for Python workloads — that is the task's real footprint, which was previously invisible.
+
+### A second daemon no longer takes over a live data directory
+
+Starting a daemon against a data directory that already has one running now fails immediately with `a daemon is already running on <dir>`. Previously it ran its whole startup sequence first — stopping every container labelled with a run id, marking every `running` row cancelled, and rotating the CLI token — and only then unlinked the live control socket and rebound it. Every one of those belonged to the daemon already there.
+
+The check happens before anything touches the directory, and `ControlServer.Start` refuses a live socket as a second line.
+
+A restart that races its own not-yet-exited predecessor will now fail rather than take over; retry once the old process has gone.
+
+### A config that can name no data directory is refused
+
+`data_dir` unset, `DICODE_DATA_DIR` unset and no home directory now fails at load with `cannot determine the data directory: set data_dir or DICODE_DATA_DIR`. It previously resolved to `/.dicode` and ran from there. A systemd unit with no `User=` (and therefore no `$HOME`) is the way to hit this: set `data_dir` in the config, or `Environment=DICODE_DATA_DIR=...` on the unit.
+
 ### Bundled Deno version bumped to 2.9.6
 
 The Deno binary dicode downloads and runs tasks with moves from 2.3.3 to
