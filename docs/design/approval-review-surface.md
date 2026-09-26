@@ -218,6 +218,11 @@ not. They are **content-hash** machinery: `ContentHash` must stay sensitive to
 a repointed `params[].default`, which is why the redaction for display lives
 outside `resolvedFieldsOf`. Deleting them changes what the gate holds on.
 
+The dir+resolved combination itself lives in `pkg/task.ComputeContentHash`,
+shared with `pkg/taskset`'s reconciler change-detection hash — `pkg/approval`
+supplies only its own versioned domain string (`contentHashDomain`) and the
+field-selection policy above, not a second digest scheme.
+
 ---
 
 ## Issue disposition

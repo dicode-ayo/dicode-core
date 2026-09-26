@@ -1,9 +1,6 @@
 package approval
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -918,28 +915,6 @@ type resolvedPipelineSecurityFields struct {
 	Chain       *task.ChainTrigger   `json:"chain,omitempty"`
 }
 
-// hashDirResolved combines the task-dir hash with the canonical JSON of the
-// resolved security fields under the versioned domain prefix, NUL-delimited.
-// hashInclude is forwarded to task.Hash unchanged — see task.Spec.HashInclude
-// (#585) for why a task may need its content hash to cover files outside dir.
-func hashDirResolved(taskID, dir string, resolved any, hashInclude ...string) (string, error) {
-	dirHash, err := task.Hash(dir, hashInclude...)
-	if err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(resolved)
-	if err != nil {
-		return "", fmt.Errorf("hash %s: marshal resolved fields: %w", taskID, err)
-	}
-	h := sha256.New()
-	h.Write([]byte(contentHashDomain))
-	h.Write([]byte{0})
-	h.Write([]byte(dirHash))
-	h.Write([]byte{0})
-	h.Write(b)
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // ContentHash computes the gate's content hash for a task.
 //
 // For a *task.Spec with a task directory, the hash covers task.Hash over the
@@ -1021,28 +996,22 @@ func ContentHash(k task.Kinded) (string, error) {
 	switch s := k.(type) {
 	case *task.Spec:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
+			h, err := task.ComputeContentHash(contentHashDomain, k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
+			return string(h), err
 		}
 		// Dir-less fallback: hash a shallow copy with secrets stripped so the
 		// committable lock never embeds a digest over secret material.
 		c := *s
 		c.Trigger.WebhookSecret = ""
 		c.Permissions = sanitizePermissions(c.Permissions)
-		return hashJSON(k.TaskID(), &c)
+		h, err := task.ComputeSpecHash(k.TaskID(), &c)
+		return string(h), err
 	case *task.PipelineTask:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
+			h, err := task.ComputeContentHash(contentHashDomain, k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
+			return string(h), err
 		}
 	}
-	return hashJSON(k.TaskID(), k)
-}
-
-// hashJSON is the dir-less fallback: SHA-256 over the JSON encoding of v.
-func hashJSON(taskID string, v any) (string, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "", fmt.Errorf("hash %s: %w", taskID, err)
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+	h, err := task.ComputeSpecHash(k.TaskID(), k)
+	return string(h), err
 }

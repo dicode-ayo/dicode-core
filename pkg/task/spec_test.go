@@ -227,8 +227,8 @@ func TestSpec_Validate_RejectsAbsoluteHashIncludeEntry(t *testing.T) {
 // the task's parent directory boundary (task.Hash's resolveInclude enforces
 // this at hash time) must be rejected here too, at config-load time —
 // otherwise it only fails inside task.Hash later, where
-// pkg/taskset/source.go's snapHash silently falls back to a spec-only hash
-// on any Hash() error, dropping ALL dir-content change detection for the
+// pkg/taskset/source.go's contentHashFor silently falls back to a spec-only
+// hash on any Hash() error, dropping ALL dir-content change detection for the
 // task (not just the broken include) until the entry is fixed.
 func TestSpec_Validate_RejectsLexicallyOutOfScopeHashInclude(t *testing.T) {
 	cases := []string{
