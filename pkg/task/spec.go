@@ -452,6 +452,14 @@ type DicodePermissions struct {
 	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
 	// RunsUnpinInput enables dicode.runs.unpin_input().
 	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
+	// RunsListExpiredResumeState enables dicode.runs.list_expired_resume_state()
+	// — lists rows carrying an offloaded resume-state blob past retention
+	// (#570). Mirrors RunsListExpired for the resume-state offload mechanism.
+	RunsListExpiredResumeState bool `yaml:"runs_list_expired_resume_state,omitempty" json:"runs_list_expired_resume_state,omitempty"`
+	// RunsDeleteResumeState enables dicode.runs.delete_resume_state() —
+	// deletes an offloaded resume-state blob and clears its runs-row columns
+	// (#570). Mirrors RunsDeleteInput for the resume-state offload mechanism.
+	RunsDeleteResumeState bool `yaml:"runs_delete_resume_state,omitempty" json:"runs_delete_resume_state,omitempty"`
 	// RunsReplay enables dicode.runs.replay() — re-fires a previously
 	// persisted run with its stored input.
 	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`

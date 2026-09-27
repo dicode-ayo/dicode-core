@@ -22,13 +22,14 @@ import (
 // unset. Every other field is a hard dependency of the socket bridge, so a
 // new field is treated as required until it is listed here.
 var optionalBridgeDeps = map[string]bool{
-	"InputStore":     true, // wireRunInputPersistence, only when a SubKeyDeriver exists
-	"Replayer":       true, // wireRunInputPersistence
-	"SourceMgr":      true, // initSources
-	"RepoResolver":   true, // initSources
-	"TestGuard":      true, // setupApprovalGate
-	"MCPTokenMinter": true, // wireMCPTokenMinter
-	"ProtectedPaths": true, // setupApprovalGate
+	"InputStore":       true, // wireRunInputPersistence, only when a SubKeyDeriver exists
+	"ResumeStateStore": true, // wireResumeStatePersistence, only when a SubKeyDeriver exists and defaults.resume_state is enabled
+	"Replayer":         true, // wireRunInputPersistence
+	"SourceMgr":        true, // initSources
+	"RepoResolver":     true, // initSources
+	"TestGuard":        true, // setupApprovalGate
+	"MCPTokenMinter":   true, // wireMCPTokenMinter
+	"ProtectedPaths":   true, // setupApprovalGate
 }
 
 // TestBuildRuntimesWiresBothRuntimes guards the wiring obligation BridgeDeps

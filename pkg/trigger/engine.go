@@ -234,28 +234,40 @@ type Engine struct {
 	runURLMu   sync.RWMutex
 	runURLFunc func(runID string) string
 
+	// resumeStateStore offloads large dicode.suspend() state blobs to a
+	// storage task (#570). nil = offload disabled — suspend always writes
+	// state inline regardless of size (matches pre-#570 behavior). Set via
+	// SetResumeStateStore after the daemon has initialised secrets.
+	resumeStateStore *registry.ResumeStateStore
+	// resumeStateThresholdBytes is the len(state) cutoff above which
+	// suspendRun offloads instead of writing inline. Defaults to
+	// registry.DefaultResumeStateThresholdBytes; overridable via
+	// SetResumeStateThresholdBytes (mainly for tests).
+	resumeStateThresholdBytes int
+
 	guards *chainGuards
 }
 
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:           r,
-		executors:          make(map[task.Runtime]pkgruntime.Executor),
-		cron:               cron.New(),
-		log:                log,
-		cronArmed:          make(map[string]cronArm),
-		webhooks:           make(map[string]string),
-		webhookReplayCache: newReplayCache(1 * time.Hour),
-		daemonRuns:         make(map[string]string),
-		daemonSpecs:        make(map[string]*task.Spec),
-		daemonStates:       newDaemonStateMap(),
-		crashloops:         newCrashloopTracker(),
-		restartGates:       newRestartGate(),
-		livePipelines:      make(map[string]*PipelineRunner),
-		deferredPipelines:  make(map[string]*task.PipelineTask),
-		guards:             newChainGuards(),
-		drainGrace:         shutdownDrainGrace,
+		registry:                  r,
+		executors:                 make(map[task.Runtime]pkgruntime.Executor),
+		cron:                      cron.New(),
+		log:                       log,
+		cronArmed:                 make(map[string]cronArm),
+		webhooks:                  make(map[string]string),
+		webhookReplayCache:        newReplayCache(1 * time.Hour),
+		daemonRuns:                make(map[string]string),
+		daemonSpecs:               make(map[string]*task.Spec),
+		daemonStates:              newDaemonStateMap(),
+		crashloops:                newCrashloopTracker(),
+		restartGates:              newRestartGate(),
+		livePipelines:             make(map[string]*PipelineRunner),
+		deferredPipelines:         make(map[string]*task.PipelineTask),
+		guards:                    newChainGuards(),
+		drainGrace:                shutdownDrainGrace,
+		resumeStateThresholdBytes: registry.DefaultResumeStateThresholdBytes,
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -307,6 +319,25 @@ func (e *Engine) buildRunURL(runID string) string {
 		return ""
 	}
 	return fn(runID)
+}
+
+// SetResumeStateStore wires the ResumeStateStore so a suspend whose state
+// exceeds the offload threshold writes it to the storage task instead of
+// inline (#570). Called by the daemon after secrets are available. When nil
+// (the default), resume-state offload is a no-op — suspend always writes
+// state inline, matching pre-#570 behavior.
+func (e *Engine) SetResumeStateStore(s *registry.ResumeStateStore) { e.resumeStateStore = s }
+
+// SetResumeStateThresholdBytes overrides the len(state) cutoff above which
+// suspendRun offloads to the ResumeStateStore instead of writing inline.
+// Zero or negative resets to registry.DefaultResumeStateThresholdBytes.
+// Exposed mainly so tests can exercise the offload path without a 32 KiB
+// fixture.
+func (e *Engine) SetResumeStateThresholdBytes(n int) {
+	if n <= 0 {
+		n = registry.DefaultResumeStateThresholdBytes
+	}
+	e.resumeStateThresholdBytes = n
 }
 
 // SetFireGuard installs a veto consulted before any run starts (see the

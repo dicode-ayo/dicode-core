@@ -328,6 +328,17 @@ declared.
   class instances, `Map`/`Set`, etc. won't survive the round trip. Keep it to
   plain objects, arrays, strings, numbers, and booleans.
 
+- **Large `state` is offloaded automatically — no action needed.** A carried
+  `state` over ~32 KiB (e.g. a cumulative chat-style state that grows every
+  turn) is transparently written to encrypted blob storage instead of being
+  rewritten inline on every suspend; `ctx.state` on resume is byte-identical
+  either way. This is internal plumbing, not a task-facing option — there is
+  no `externalize` flag to set. The only thing to keep in mind: **cumulative
+  state that grows unboundedly across many suspends will grow the underlying
+  blob unboundedly too** — a long-running conversation task should still cap
+  or summarize its own history rather than relying on offload as an excuse to
+  never bound it.
+
 - **Never swallow the suspend signal.** `suspend()` throws (Deno) / raises
   (Python) a control signal *after* the payload is recorded; the runtime wrapper
   catches it to end the run cleanly. If your own `try/catch` (or bare

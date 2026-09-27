@@ -97,7 +97,7 @@ type Run struct {
 	// Suspend/resume persistence fields (#95). Populated by GetRun only; the
 	// list queries omit them (mirrors the input-persistence fields above).
 	// Zero values mean "not suspended".
-	ResumeState    []byte // opaque task-provided state blob; nil when absent
+	ResumeState    []byte // opaque task-provided state blob; nil when absent OR offloaded (see ResumeStateStorageKey)
 	ResumeSchema   []byte // JSON Schema to validate the resume submission against; nil when absent
 	ResumeToken    string // unguessable resume handle; empty when absent
 	SuspendedAt    int64  // Unix ms the run suspended; 0 when absent
@@ -112,6 +112,16 @@ type Run struct {
 	// out of ResumeParams — mirrors InputRedactedFields. nil when nothing was
 	// redacted.
 	ResumeParamsRedactedFields []string
+
+	// Resume-state offload fields (#570) — set instead of (never alongside)
+	// ResumeState when the suspend-time state exceeded
+	// ResumeStateThresholdBytes. Mirrors the InputStorageKey/InputSize/
+	// InputStoredAt trio but namespaced under its own columns/key-prefix so
+	// the two offload mechanisms (run-input audit trail vs. cumulative
+	// suspend/resume state) can't collide despite sharing a storage task.
+	ResumeStateStorageKey string // storage key passed to the storage task ("resume-state/<runID>"); empty when inline or absent
+	ResumeStateSize       int    // ciphertext byte size; 0 when inline or absent
+	ResumeStateStoredAt   int64  // unix timestamp the blob was stored (AAD-bound); 0 when inline or absent
 }
 
 // LogEntry is one log line from a run.
@@ -349,6 +359,19 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 	)
 }
 
+// ResumeStateBlobRef points at a resume-state blob offloaded to the
+// configured storage task (#570) — passed to SuspendRun in place of an inline
+// state blob when len(state) exceeded the offload threshold. Mirrors the
+// input-persistence storage-key/size/stored-at trio (SetRunInput) but is
+// written atomically as part of the same suspend UPDATE, since (unlike run
+// inputs, which are persisted separately at run-start) the offload decision
+// and the suspend write happen at the same instant.
+type ResumeStateBlobRef struct {
+	StorageKey string // "resume-state/<runID>"
+	Size       int    // ciphertext byte size
+	StoredAt   int64  // unix timestamp the blob's AAD was bound to
+}
+
 // SuspendRun records a run as suspended awaiting user input, persisting the
 // opaque state blob, the JSON Schema, the resume token, and the suspend
 // timestamp. It deliberately leaves finished_at NULL: suspended is a
@@ -359,6 +382,13 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 // nil. The schema is persisted in the legacy resume_form BLOB column (reused
 // as-is to avoid a migration).
 //
+// blobRef is nil for the common small-state case: state is written inline as
+// before and the offload columns are cleared. When non-nil (the caller
+// already durably persisted the large state to the storage task and is
+// passing back its handle), state is ignored/cleared and the offload columns
+// are populated instead — the caller must have written the blob successfully
+// BEFORE calling SuspendRun so a dangling reference is never persisted.
+//
 // The UPDATE is guarded on status = running so a concurrent finalize (a kill or
 // shutdown drain that already moved the run to cancelled/failure) is not
 // clobbered back to suspended. Reports whether the row changed: false means the
@@ -368,7 +398,7 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 // already redacted out of resumeParams before calling — this only records that
 // metadata (mirroring SetRunInput's redactedFields); it does not itself redact
 // anything.
-func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte, resumeParamsRedactedFields []string) (bool, error) {
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte, resumeParamsRedactedFields []string, blobRef *ResumeStateBlobRef) (bool, error) {
 	var deadlineArg any
 	if deadline > 0 {
 		deadlineArg = deadline
@@ -377,9 +407,20 @@ func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema [
 	if err != nil {
 		return false, fmt.Errorf("marshal resume_params_redacted_fields: %w", err)
 	}
+	var resumeStateArg any = state
+	var storageKeyArg, sizeArg, storedAtArg any
+	if blobRef != nil {
+		resumeStateArg = nil // the real state lives in the blob, not this column
+		storageKeyArg = blobRef.StorageKey
+		sizeArg = blobRef.Size
+		storedAtArg = blobRef.StoredAt
+	}
 	affected, err := r.db.ExecResult(ctx,
-		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ?, resume_params_redacted_fields = ? WHERE id = ? AND status = ?`,
-		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, string(rfJSON), runID, StatusRunning,
+		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ?, resume_params_redacted_fields = ?,
+		                  resume_state_storage_key = ?, resume_state_size = ?, resume_state_stored_at = ?
+		 WHERE id = ? AND status = ?`,
+		StatusSuspended, resumeStateArg, schema, token, suspendedAt, deadlineArg, resumeParams, string(rfJSON),
+		storageKeyArg, sizeArg, storedAtArg, runID, StatusRunning,
 	)
 	if err != nil {
 		return false, err
@@ -485,7 +526,9 @@ const runInputColumns = `,
 const runResumeColumns = `,
         resume_state, resume_form, COALESCE(resume_token, ''),
         COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0), resume_params,
-        COALESCE(resume_params_redacted_fields, '')`
+        COALESCE(resume_params_redacted_fields, ''),
+        COALESCE(resume_state_storage_key, ''), COALESCE(resume_state_size, 0),
+        COALESCE(resume_state_stored_at, 0)`
 
 // scanRun decodes one row selected with runColumns (plus runInputColumns when
 // withInput is true, plus runResumeColumns when withResume is true) into a Run,
@@ -512,7 +555,8 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	if withResume {
 		dest = append(dest,
 			&run.ResumeState, &run.ResumeSchema, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline,
-			&run.ResumeParams, &resumeParamsRedactedJSON)
+			&run.ResumeParams, &resumeParamsRedactedJSON,
+			&run.ResumeStateStorageKey, &run.ResumeStateSize, &run.ResumeStateStoredAt)
 	}
 	if err := rows.Scan(dest...); err != nil {
 		return nil, err
@@ -945,4 +989,62 @@ func (r *Registry) SweepStalePins(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// ── Resume-state offload retention management (#570) ────────────────────────
+
+// ExpiredResumeState identifies a run whose offloaded resume-state blob is
+// past retention and safe to sweep. Mirrors ExpiredInput.
+type ExpiredResumeState struct {
+	RunID      string `json:"runID"`
+	StorageKey string `json:"storageKey"`
+	StoredAt   int64  `json:"storedAt"`
+}
+
+// ListExpiredResumeStates returns rows carrying an offloaded resume-state
+// blob (resume_state_storage_key set) whose resume_state_stored_at is older
+// than beforeUnix, EXCLUDING any row still in the `suspended` status.
+//
+// The status exclusion is the load-bearing safety property: a `suspended`
+// row's blob is the live reference a future ResumeRun will dereference —
+// deleting it would strand a dangling resume_state_storage_key, exactly the
+// failure mode #570 exists to prevent. A row's blob only becomes eligible
+// once the row has moved to a terminal state (resumed after a successful
+// fetch, or cancelled by the resume-deadline sweep), at which point nothing
+// will ever read that specific row's blob again — the retention window past
+// that point is purely a grace period, not a correctness requirement. Used
+// by the resume-state-cleanup buildin (mirrors run-inputs-cleanup).
+func (r *Registry) ListExpiredResumeStates(ctx context.Context, beforeUnix int64) ([]ExpiredResumeState, error) {
+	var out []ExpiredResumeState
+	err := r.db.Query(ctx,
+		`SELECT id, resume_state_storage_key, resume_state_stored_at FROM runs
+		 WHERE resume_state_storage_key IS NOT NULL
+		   AND resume_state_storage_key != ''
+		   AND resume_state_stored_at < ?
+		   AND status != ?`,
+		[]any{beforeUnix, StatusSuspended},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				var e ExpiredResumeState
+				if err := rows.Scan(&e.RunID, &e.StorageKey, &e.StoredAt); err != nil {
+					return err
+				}
+				out = append(out, e)
+			}
+			return nil
+		},
+	)
+	return out, err
+}
+
+// ClearResumeStateBlob nulls the resume_state_storage_key/size/stored_at
+// columns on a row. The caller is responsible for deleting the actual blob
+// from the storage task (typically via ResumeStateStore.Delete) BEFORE
+// calling this — the column clear is the authoritative "blob gone" signal,
+// mirroring ClearRunInput.
+func (r *Registry) ClearResumeStateBlob(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx,
+		`UPDATE runs SET resume_state_storage_key = NULL, resume_state_size = NULL,
+		                  resume_state_stored_at = NULL
+		 WHERE id = ?`, runID)
 }

@@ -79,6 +79,138 @@ export const steps = { next: async () => ({ done: true }) };
 	t.Logf("suspended with %d bytes of resume state", len(run.ResumeState))
 }
 
+// TestE2E_SuspendResume_LargeState_OffloadsThroughRealStorageTask is the
+// full-stack #570 lock-in this file's own doc comment says was still
+// missing: a real Deno task suspends with a large state, the engine's
+// ResumeStateStore (backed by the REAL buildin/local-storage task — no
+// mocks) offloads it BEFORE the row lands `suspended`, and a real
+// eng.ResumeRun transparently rehydrates the exact original state for the
+// continuation. This is the reachable "e2e" for #570: the offload is pure
+// internal Go/storage-task plumbing with no HTTP/UI surface (the webui API
+// deliberately nils ResumeState out of every run it serializes — see
+// server.go's `safe.ResumeState = nil` — so there is nothing for a
+// Playwright test to observe that would distinguish offloaded from inline).
+func TestE2E_SuspendResume_LargeState_OffloadsThroughRealStorageTask(t *testing.T) {
+	e := newTestEnv(t) // real Deno runtime; skips if deno unavailable
+	ctx := context.Background()
+
+	dataDir := t.TempDir()
+	spec, err := task.LoadDirWithVars(buildinLocalStorageDir(t), map[string]string{
+		task.VarDataDir: dataDir,
+	})
+	if err != nil {
+		t.Fatalf("load local-storage: %v", err)
+	}
+	spec.ID = "buildin/local-storage"
+	spec.Name = "buildin/local-storage"
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("re-validate: %v", err)
+	}
+	if err := e.reg.Register(spec); err != nil {
+		t.Fatalf("register local-storage: %v", err)
+	}
+
+	// Deterministic 32-byte key, distinct from the run-inputs key used above
+	// in this file — mirrors the real daemon deriving a separate sub-key.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(255 - i)
+	}
+	runner := NewInputStoreTaskRunner(e.engine)
+	resumeRoot := filepath.Join(dataDir, "resume-state")
+	rs := registry.NewResumeStateStore(registry.NewInputCrypto(key), runner, "buildin/local-storage", resumeRoot)
+	e.engine.SetResumeStateStore(rs)
+	e.engine.SetResumeStateThresholdBytes(4096) // well under the ~500 KB fixture state
+
+	dir := t.TempDir()
+	const marker = "RESUME_OFFLOAD_E2E_MARKER_9f2c"
+	script := `export default async function main({ dicode }) {
+  const big = "S".repeat(500 * 1024); // ~500 KB — well over the offload threshold
+  await dicode.suspend({ to: "next", state: { blob: big, marker: "` + marker + `" }, schema: { type: "object" } });
+}
+export const steps = {
+  next: async ({ state }) => ({ blobLen: state.blob.length, marker: state.marker }),
+};
+`
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write task.ts: %v", err)
+	}
+	wizSpec := &task.Spec{
+		ID: "large-suspend-offload", Name: "large-suspend-offload", Runtime: task.RuntimeDeno,
+		TaskDir: dir, Trigger: task.TriggerConfig{Manual: true}, Enabled: true,
+	}
+	if err := e.reg.Register(wizSpec); err != nil {
+		t.Fatalf("register wizard: %v", err)
+	}
+
+	runID, err := e.engine.FireManual(ctx, "large-suspend-offload", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	run := waitStatus(t, e.reg, runID, registry.StatusSuspended)
+
+	// The suspend must have offloaded: resume_state stays nil, the offload
+	// columns are populated, and — critically — the write happened BEFORE the
+	// row reached `suspended` (this run only reaches waitStatus once the row
+	// is already there, so a populated storage key here proves the ordering).
+	if run.ResumeState != nil {
+		t.Fatalf("resume_state = %d bytes, want nil (should have offloaded)", len(run.ResumeState))
+	}
+	if run.ResumeStateStorageKey != "resume-state/"+runID {
+		t.Fatalf("resume_state_storage_key = %q, want %q", run.ResumeStateStorageKey, "resume-state/"+runID)
+	}
+
+	// The blob is really on disk, under the DEDICATED resume-state root — not
+	// commingled with run-inputs — and it's ciphertext, not plaintext.
+	blobPath := filepath.Join(resumeRoot, runID+".bin")
+	raw, err := os.ReadFile(blobPath)
+	if err != nil {
+		t.Fatalf("read stored resume-state blob at %s: %v", blobPath, err)
+	}
+	if bytes.Contains(raw, []byte(marker)) {
+		t.Error("plaintext marker found in stored resume-state blob — payload was not encrypted")
+	}
+	if bytes.Contains(raw, []byte(strings.Repeat("S", 4096))) {
+		t.Error("plaintext filler found in stored resume-state blob — payload was not encrypted")
+	}
+
+	// Resume: the continuation must see the FULL original state, transparently
+	// rehydrated — proving the real round trip through Deno → IPC → daemon →
+	// storage task → Deno again, not just the Go-level plumbing.
+	newID, err := e.engine.ResumeRun(ctx, run.ResumeToken, nil)
+	if err != nil {
+		t.Fatalf("ResumeRun: %v", err)
+	}
+	cont := waitStatus(t, e.reg, newID, registry.StatusSuccess)
+
+	var result struct {
+		BlobLen int    `json:"blobLen"`
+		Marker  string `json:"marker"`
+	}
+	if err := json.Unmarshal([]byte(cont.ReturnValue), &result); err != nil {
+		t.Fatalf("decode continuation return value %q: %v", cont.ReturnValue, err)
+	}
+	if result.BlobLen != 500*1024 {
+		t.Errorf("continuation saw blobLen = %d, want %d", result.BlobLen, 500*1024)
+	}
+	if result.Marker != marker {
+		t.Errorf("continuation saw marker = %q, want %q", result.Marker, marker)
+	}
+
+	// GC: the blob is gone (eager delete on successful resume) and the row's
+	// offload columns are cleared.
+	if _, err := os.Stat(blobPath); !os.IsNotExist(err) {
+		t.Errorf("resume-state blob still on disk after resume: %v", err)
+	}
+	after, err := e.reg.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ResumeStateStorageKey != "" {
+		t.Errorf("resume_state_storage_key = %q after resume, want cleared", after.ResumeStateStorageKey)
+	}
+}
+
 func TestE2E_InputStore_LargeResumeStateRoundTrip(t *testing.T) {
 	e := newTestEnv(t) // real Deno runtime; skips if deno unavailable
 	ctx := context.Background()
