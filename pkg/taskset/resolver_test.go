@@ -1386,3 +1386,107 @@ spec:
 		t.Errorf("failure Error = %v, want an unmarshal error", f.Error)
 	}
 }
+
+// A warning an override resolves must not be logged: the log reflects the
+// resolved spec, not the pre-override task.yaml.
+func TestResolver_WarningsLoggedFromResolvedSpec(t *testing.T) {
+	const wantWarn = "params.zone is required with no default"
+	cases := []struct {
+		name      string
+		overrides string
+		wantWarn  bool
+	}{
+		{"override satisfies required param", "      overrides:\n        params:\n          zone: eu\n", false},
+		{"no override keeps warning", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			dir := filepath.Join(repoDir, "edge")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, dir, "task.yaml", `kind: Task
+apiVersion: dicode/v1
+name: edge
+runtime: deno
+trigger:
+  cron: "0 8 * * *"
+params:
+  zone:
+    required: true
+`)
+			writeFile(t, dir, "task.js", "// task")
+			tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    edge:
+      ref:
+        path: `+filepath.Join(dir, "task.yaml")+"\n"+tc.overrides)
+			logger, logs := newObservedLogger()
+			r := NewResolver(t.TempDir(), false, logger)
+			results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+			if err != nil || len(failures) != 0 || len(results) != 1 {
+				t.Fatalf("resolve: err=%v failures=%v results=%d", err, failures, len(results))
+			}
+			var got bool
+			for _, e := range logs.FilterMessage("taskset: task config warning").All() {
+				if strings.Contains(e.ContextMap()["warning"].(string), wantWarn) {
+					got = true
+				}
+			}
+			if got != tc.wantWarn {
+				t.Errorf("required-param warning logged = %v, want %v", got, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func TestResolver_DowngradeNoteLoggedUnlessOverridden(t *testing.T) {
+	cases := []struct {
+		name      string
+		overrides string
+		want      bool
+	}{
+		{"kept", "", true},
+		{"auth disabled by override", "      overrides:\n        trigger:\n          auth: false\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			dir := filepath.Join(repoDir, "hook")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, dir, "task.yaml", "kind: Task\napiVersion: dicode/v1\nname: hook\nruntime: deno\ntrigger:\n  webhook: /hooks/x\n  auth: any\n  webhook_secret: \"${WEBHOOK_SECRET_NOT_SET}\"\n")
+			writeFile(t, dir, "task.js", "// task")
+			tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    hook:
+      ref:
+        path: `+filepath.Join(dir, "task.yaml")+"\n"+tc.overrides)
+			logger, logs := newObservedLogger()
+			r := NewResolver(t.TempDir(), false, logger)
+			results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+			if err != nil || len(failures) != 0 || len(results) != 1 {
+				t.Fatalf("resolve: err=%v failures=%v results=%d", err, failures, len(results))
+			}
+			var got bool
+			for _, e := range logs.FilterMessage("taskset: task config warning").All() {
+				if e.ContextMap()["warning"] == task.WebhookAuthDowngradeWarning {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("downgrade note logged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -207,9 +207,12 @@ func normalizeWebhookAuthFields(mode *WebhookAuthMode, secret *string, replayPro
 	// unauthenticated" warning on a webhook that is in fact session-gated.
 	*replayProtection = nil
 	*requireTimestamp = nil
-	*warnings = append(*warnings,
-		`trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`)
+	*warnings = append(*warnings, WebhookAuthDowngradeWarning)
 }
+
+// WebhookAuthDowngradeWarning is the load-time note normalizeWebhookAuthFields
+// records; Validate does not regenerate it.
+const WebhookAuthDowngradeWarning = `trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`
 
 // normalizeWebhookAuth applies normalizeWebhookAuthFields to a kind: Task spec.
 func normalizeWebhookAuth(s *Spec) {
