@@ -1444,3 +1444,49 @@ spec:
 		})
 	}
 }
+
+func TestResolver_DowngradeNoteLoggedUnlessOverridden(t *testing.T) {
+	cases := []struct {
+		name      string
+		overrides string
+		want      bool
+	}{
+		{"kept", "", true},
+		{"auth disabled by override", "      overrides:\n        trigger:\n          auth: false\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			dir := filepath.Join(repoDir, "hook")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, dir, "task.yaml", "kind: Task\napiVersion: dicode/v1\nname: hook\nruntime: deno\ntrigger:\n  webhook: /hooks/x\n  auth: any\n  webhook_secret: \"${WEBHOOK_SECRET_NOT_SET}\"\n")
+			writeFile(t, dir, "task.js", "// task")
+			tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    hook:
+      ref:
+        path: `+filepath.Join(dir, "task.yaml")+"\n"+tc.overrides)
+			logger, logs := newObservedLogger()
+			r := NewResolver(t.TempDir(), false, logger)
+			results, failures, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+			if err != nil || len(failures) != 0 || len(results) != 1 {
+				t.Fatalf("resolve: err=%v failures=%v results=%d", err, failures, len(results))
+			}
+			var got bool
+			for _, e := range logs.FilterMessage("taskset: task config warning").All() {
+				if e.ContextMap()["warning"] == task.WebhookAuthDowngradeWarning {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("downgrade note logged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

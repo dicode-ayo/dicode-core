@@ -358,7 +358,8 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			// Validate rebuilds Warnings, so carry over the load-time
-			// downgrade note it would otherwise drop.
+			// downgrade note it would otherwise drop, unless an override
+			// has since changed the webhook or its auth.
 			loadWarnings := slices.Contains(spec.Warnings, task.WebhookAuthDowngradeWarning)
 			layers := expandOverrideLayers(
 				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
@@ -376,7 +377,7 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			warnings := resolved.Warnings
-			if loadWarnings {
+			if loadWarnings && resolved.Trigger.Webhook != "" && resolved.Trigger.WebhookAuth == task.WebhookAuthSession {
 				warnings = append([]string{task.WebhookAuthDowngradeWarning}, warnings...)
 			}
 			for _, w := range warnings {
