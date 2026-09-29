@@ -193,6 +193,10 @@ The reconciler is the component that consumes events from all sources and keeps 
 - If a task's `task.yaml` fails to parse or validate on `added` or `updated`, the task is **not** registered (or, for `updated`, the previously registered good version is kept as-is). This is logged to daemon.log — but it is also recorded as a **load failure** and surfaced through the API/UI (see below) rather than only there. A task never silently disappears because its content stopped parsing (#649).
 - Source errors (git clone failure, auth failure) are logged and retried on the next poll cycle. The reconciler does not crash.
 
+### Config warnings reflect the resolved task
+
+Non-fatal `task.yaml` warnings (for example a required param with no default on a cron task) are logged as `taskset: task config warning` from the spec *after* `overrides` are applied, so an override that resolves the condition silences its warning instead of it re-logging on every reconcile.
+
 ### Load failures stay visible (#649)
 
 Earlier versions of dicode dropped a task from the registry the moment its `task.yaml` failed to parse — with `updated`, this looked like the task was deliberately removed (its trigger silently went dead), and daemon.log was the only place recording why. A parse error no longer does this:

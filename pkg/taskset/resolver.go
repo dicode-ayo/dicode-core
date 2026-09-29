@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -356,12 +357,9 @@ func (r *Resolver) resolveBody(
 				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
-			for _, w := range spec.Warnings {
-				r.log.Warn("taskset: task config warning",
-					zap.String("entry", fullID),
-					zap.String("warning", w),
-				)
-			}
+			// Validate rebuilds Warnings, so carry over the load-time
+			// downgrade note it would otherwise drop.
+			loadWarnings := slices.Contains(spec.Warnings, task.WebhookAuthDowngradeWarning)
 			layers := expandOverrideLayers(
 				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
 				taskDir, extras)
@@ -376,6 +374,16 @@ func (r *Resolver) resolveBody(
 					zap.String("entry", fullID), zap.Error(err))
 				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
+			}
+			warnings := resolved.Warnings
+			if loadWarnings {
+				warnings = append([]string{task.WebhookAuthDowngradeWarning}, warnings...)
+			}
+			for _, w := range warnings {
+				r.log.Warn("taskset: task config warning",
+					zap.String("entry", fullID),
+					zap.String("warning", w),
+				)
 			}
 			results = append(results, &ResolvedTask{
 				Kinded:  resolved,
