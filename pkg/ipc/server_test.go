@@ -2940,7 +2940,6 @@ func TestServer_Suspend_GrantedForDeno(t *testing.T) {
 	}
 }
 
-
 // fakeSourceCtl records the SetDevMode call, reports a fixed dev root, and
 // serves a fixed source listing.
 type fakeSourceCtl struct {
