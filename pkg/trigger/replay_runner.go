@@ -10,8 +10,8 @@ import (
 
 // ReplayRunnerAdapter wraps an Engine to satisfy registry.ReplayRunner.
 // FireForReplay calls Engine.fireAsync with source = "replay" and the
-// supplied parent_run_id and fire-time params; the engine's existing chain-suppression guard
-// (introduced in #236) skips on_failure_chain for replay-sourced runs.
+// supplied parent_run_id and fire-time params; the engine's chain-suppression
+// guard skips on_failure_chain for replay-sourced runs.
 type ReplayRunnerAdapter struct {
 	engine *Engine
 }
