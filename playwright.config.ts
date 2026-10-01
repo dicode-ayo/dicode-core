@@ -70,6 +70,7 @@ export default defineConfig({
         '**/mcp.spec.ts',
         '**/dev-mode-clone.spec.ts',
         '**/run-input-persistence.spec.ts',
+        '**/replay-params.spec.ts',
         '**/task-toggle.spec.ts',
         '**/suspend-resume.spec.ts',
         '**/resume-params-redaction.spec.ts',
@@ -97,6 +98,7 @@ export default defineConfig({
         '**/auth-providers.spec.ts',
         '**/webhook-auth-any.spec.ts',
         '**/login-heading-overflow.spec.ts',
+        '**/replay-params.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

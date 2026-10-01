@@ -17,7 +17,7 @@ import (
 // It always returns a new run ID and records calls.
 type ipcFakeReplayRunner struct{}
 
-func (ipcFakeReplayRunner) FireForReplay(_ context.Context, _, _ string, _ any) (string, error) {
+func (ipcFakeReplayRunner) FireForReplay(_ context.Context, _, _ string, _ any, _ map[string]string) (string, error) {
 	return uuid.New().String(), nil
 }
 

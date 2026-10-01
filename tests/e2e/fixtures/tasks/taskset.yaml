@@ -37,6 +37,9 @@ spec:
     persistence-test:
       ref:
         path: FIXTURES_TASKS_DIR/persistence-test/task.yaml
+    replay-params:
+      ref:
+        path: FIXTURES_TASKS_DIR/replay-params/task.yaml
     suspend-wizard:
       ref:
         path: FIXTURES_TASKS_DIR/suspend-wizard/task.yaml

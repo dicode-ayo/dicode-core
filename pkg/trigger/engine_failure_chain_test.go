@@ -219,7 +219,7 @@ func TestEngine_ChainSuppression_UsesTypedReplaySource(t *testing.T) {
 
 	// Fire the failing task with TriggerSource = replay; assert no chain fires.
 	runner := NewReplayRunner(e.engine)
-	replayedRunID, err := runner.FireForReplay(context.Background(), "fail", "parent-run", nil)
+	replayedRunID, err := runner.FireForReplay(context.Background(), "fail", "parent-run", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

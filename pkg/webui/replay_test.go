@@ -26,7 +26,7 @@ func (s suspendGuardFetcher) Fetch(context.Context, string, string, int64) (regi
 // suspendGuardRunner records whether a replay was ever fired.
 type suspendGuardRunner struct{ fired bool }
 
-func (s *suspendGuardRunner) FireForReplay(context.Context, string, string, any) (string, error) {
+func (s *suspendGuardRunner) FireForReplay(context.Context, string, string, any, map[string]string) (string, error) {
 	s.fired = true
 	return "new-run", nil
 }

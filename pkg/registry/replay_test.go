@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -20,13 +21,14 @@ type replayCall struct {
 	taskID      string
 	parentRunID string
 	input       any
+	params      map[string]string
 }
 
-func (f *fakeReplayRunner) FireForReplay(ctx context.Context, taskID, parentRunID string, input any) (string, error) {
+func (f *fakeReplayRunner) FireForReplay(ctx context.Context, taskID, parentRunID string, input any, params map[string]string) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
-	f.calls = append(f.calls, replayCall{taskID: taskID, parentRunID: parentRunID, input: input})
+	f.calls = append(f.calls, replayCall{taskID: taskID, parentRunID: parentRunID, input: input, params: params})
 	return uuid.New().String(), nil
 }
 
@@ -112,6 +114,80 @@ func TestReplay_TaskNameOverride(t *testing.T) {
 	}
 	if runner.calls[0].taskID != "different-task" {
 		t.Errorf("taskID = %q, want different-task", runner.calls[0].taskID)
+	}
+	if runner.calls[0].params != nil {
+		t.Errorf("params = %v, want nil for an override task", runner.calls[0].params)
+	}
+}
+
+func TestReplay_PassesFireParamsForSameTask(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+
+	mr := &mockRunner{store: map[string]string{}}
+	is := NewInputStore(newTestInputCrypto(t), mr, "fake-storage")
+
+	runID := uuid.New().String()
+	if _, err := r.StartRunWithID(ctx, runID, "user-task", "", "manual", "task"); err != nil {
+		t.Fatal(err)
+	}
+	in := BuildPersistedInputFromRunOpts("manual", map[string]string{"greeting": "hi", "api_token": "s3cret"}, nil, nil)
+	key, size, storedAt, err := is.Persist(ctx, runID, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetRunInput(ctx, runID, key, size, storedAt, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeReplayRunner{}
+	replayer := NewReplayer(r, is, runner)
+	if _, err := replayer.Replay(ctx, runID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"greeting": "hi"}
+	if got := runner.calls[0].params; !reflect.DeepEqual(got, want) {
+		t.Errorf("params = %v, want %v", got, want)
+	}
+}
+
+func TestPersistedInput_FireParams(t *testing.T) {
+	tests := []struct {
+		name string
+		in   PersistedInput
+		want map[string]string
+	}{
+		{"empty", PersistedInput{}, nil},
+		{
+			"plain strings restored",
+			PersistedInput{Params: map[string]any{"a": "1", "b": "2"}},
+			map[string]string{"a": "1", "b": "2"},
+		},
+		{
+			"redacted field skipped",
+			PersistedInput{
+				Params:         map[string]any{"a": "1", "api_token": "x"},
+				RedactedFields: []string{"params.api_token"},
+			},
+			map[string]string{"a": "1"},
+		},
+		{
+			"placeholder value skipped",
+			PersistedInput{Params: map[string]any{"a": RedactPlaceholder}},
+			nil,
+		},
+		{
+			"non-string skipped",
+			PersistedInput{Params: map[string]any{"n": 3, "m": map[string]any{"k": "v"}, "ok": "y"}},
+			map[string]string{"ok": "y"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.FireParams(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("FireParams() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
