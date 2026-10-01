@@ -36,6 +36,7 @@ func TestReplayRunner_FiresWithReplaySource(t *testing.T) {
 		"echo-task",
 		parentRunID,
 		map[string]any{"replayed": true},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +62,7 @@ func TestReplayRunner_TaskNotRegistered(t *testing.T) {
 		context.Background(),
 		"nonexistent-task",
 		"parent-run-id",
+		nil,
 		nil,
 	)
 	if err == nil {

@@ -6,6 +6,12 @@ Newest release first.
 
 ## Unreleased
 
+### Replay restores fire-time params
+
+A replayed run (`POST /api/runs/{runID}/replay`, `dicode.runs.replay`, the Web UI replay button) now runs with the params the original run was fired with. Previously it ran with only the declared defaults, so replaying a task with a `required: true` param failed preflight (`params_invalid`).
+
+Params that the input redactor masked at rest (names such as `api_token` or `password`) are deliberately not restored; the redaction placeholder is never injected. Such a param falls back to its declared default, or fails preflight if it is `required`. A replay redirected at a different task via `task_name` gets no restored params.
+
 ### Bundled Deno version bumped to 2.9.6
 
 The Deno binary dicode downloads and runs tasks with moves from 2.3.3 to

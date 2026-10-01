@@ -71,7 +71,7 @@ func (f *blockingFetcher) count() int {
 
 type stubReplayRunner struct{}
 
-func (stubReplayRunner) FireForReplay(ctx context.Context, taskID, parentRunID string, input any) (string, error) {
+func (stubReplayRunner) FireForReplay(ctx context.Context, taskID, parentRunID string, input any, _ map[string]string) (string, error) {
 	return "replayed-run", nil
 }
 

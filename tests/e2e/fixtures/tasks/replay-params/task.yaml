@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: Task
+name: Replay Params
+description: Echoes its params so replay-params.spec.ts can assert which fire-time values a replay runs with.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s
+params:
+  greeting:
+    description: Required, non-sensitive param restored on replay.
+    required: true
+  api_token:
+    description: Sensitive-named param; masked at rest so never restored.
+    default: default-token

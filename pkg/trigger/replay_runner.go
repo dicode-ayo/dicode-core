@@ -10,8 +10,8 @@ import (
 
 // ReplayRunnerAdapter wraps an Engine to satisfy registry.ReplayRunner.
 // FireForReplay calls Engine.fireAsync with source = "replay" and the
-// supplied parent_run_id; the engine's existing chain-suppression guard
-// (introduced in #236) skips on_failure_chain for replay-sourced runs.
+// supplied parent_run_id and fire-time params; the engine's chain-suppression
+// guard skips on_failure_chain for replay-sourced runs.
 type ReplayRunnerAdapter struct {
 	engine *Engine
 }
@@ -24,7 +24,7 @@ func NewReplayRunner(engine *Engine) registry.ReplayRunner {
 }
 
 // FireForReplay implements registry.ReplayRunner.
-func (a *ReplayRunnerAdapter) FireForReplay(ctx context.Context, taskID, parentRunID string, input any) (string, error) {
+func (a *ReplayRunnerAdapter) FireForReplay(ctx context.Context, taskID, parentRunID string, input any, params map[string]string) (string, error) {
 	spec, ok := a.engine.registry.Get(taskID)
 	if !ok {
 		return "", &TaskNotFoundError{TaskID: taskID}
@@ -32,6 +32,7 @@ func (a *ReplayRunnerAdapter) FireForReplay(ctx context.Context, taskID, parentR
 	return a.engine.fireAsync(ctx, spec, pkgruntime.RunOptions{
 		ParentRunID: parentRunID,
 		Input:       input,
+		Params:      params,
 	}, registry.TriggerReplay)
 }
 

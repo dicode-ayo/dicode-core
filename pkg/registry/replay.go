@@ -23,11 +23,12 @@ var ErrRunNotReplayable = errors.New("replay: run is suspended and must be resum
 // interface to keep pkg/registry import-cycle-free. The trigger engine's
 // adapter (pkg/trigger.ReplayRunnerAdapter) implements this interface.
 type ReplayRunner interface {
-	// FireForReplay fires the given task with input attached, sets
+	// FireForReplay fires the given task with input and params attached, sets
 	// triggerSource = "replay" on the new run, sets parent_run_id =
-	// parentRunID. Returns the new run ID synchronously; the run executes
-	// asynchronously.
-	FireForReplay(ctx context.Context, taskID, parentRunID string, input any) (string, error)
+	// parentRunID. params are the fire-time params to run with (nil leaves
+	// the task's declared defaults). Returns the new run ID synchronously;
+	// the run executes asynchronously.
+	FireForReplay(ctx context.Context, taskID, parentRunID string, input any, params map[string]string) (string, error)
 }
 
 // fetcher abstracts InputStore.Fetch for testability. *InputStore satisfies
@@ -61,6 +62,10 @@ func NewReplayer(reg *Registry, store fetcher, runner ReplayRunner) *Replayer {
 //
 // When both fields are empty the ownership check is bypassed — backwards
 // compatible for REST handlers and tests that have no task scope.
+//
+// Fire-time params are restored from the persisted input, except those the
+// redactor masked: a masked param falls back to the task default, or fails
+// preflight when required. An override task gets no restored params.
 //
 // Errors:
 //   - run not found → wrapped GetRun error
@@ -103,9 +108,40 @@ func (r *Replayer) Replay(ctx context.Context, runID, taskName, callerTaskID, ca
 		target = taskName
 	}
 
-	newRunID, err := r.runner.FireForReplay(ctx, target, runID, in)
+	// Params are restored only for the original task: another task may not
+	// declare them.
+	var params map[string]string
+	if target == run.TaskID {
+		params = in.FireParams()
+	}
+
+	newRunID, err := r.runner.FireForReplay(ctx, target, runID, in, params)
 	if err != nil {
 		return "", fmt.Errorf("fire replay: %w", err)
 	}
 	return newRunID, nil
+}
+
+// FireParams returns the persisted fire-time string params that are safe to
+// restore on replay. Redacted and placeholder values are omitted.
+func (in PersistedInput) FireParams() map[string]string {
+	masked := make(map[string]struct{}, len(in.RedactedFields))
+	for _, f := range in.RedactedFields {
+		masked[f] = struct{}{}
+	}
+	var out map[string]string
+	for k, v := range in.Params {
+		sv, ok := v.(string)
+		if !ok || sv == RedactPlaceholder {
+			continue
+		}
+		if _, hit := masked["params."+k]; hit {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = sv
+	}
+	return out
 }
