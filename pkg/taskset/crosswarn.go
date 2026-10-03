@@ -35,6 +35,12 @@ func CrossTaskParamWarnings(results []*ResolvedTask, defaultChain task.OnFailure
 	for _, rt := range results {
 		switch k := rt.Kinded.(type) {
 		case *task.PipelineTask:
+			if !defaultReported {
+				if w := failureChainWarnings(defaultChain.Task, "defaults.on_failure_chain", defaultChain.Task, rt.ID, specs); len(w) > 0 {
+					out = append(out, w...)
+					defaultReported = true
+				}
+			}
 			if k.Trigger.Cron == "" {
 				continue
 			}

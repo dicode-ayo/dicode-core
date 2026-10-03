@@ -101,6 +101,15 @@ func TestCrossTaskParamWarnings_DefaultsChainWarnsOnce(t *testing.T) {
 	mustContain(t, got[0].Message, "ns/handler")
 }
 
+func TestCrossTaskParamWarnings_DefaultsChainCoversPipelines(t *testing.T) {
+	got := CrossTaskParamWarnings([]*ResolvedTask{
+		specRT("ns/handler", requiredTitle, nil),
+		pipelineRT("ns/pipe", "", task.Stage{Task: "ns/handler"}),
+	}, task.OnFailureChainSpec{Task: "ns/handler"})
+	mustLen(t, got, 1)
+	mustContain(t, got[0].Message, "defaults.on_failure_chain")
+}
+
 func TestCrossTaskParamWarnings_UnknownTargetsSkipped(t *testing.T) {
 	got := CrossTaskParamWarnings([]*ResolvedTask{
 		specRT("ns/job", nil, &task.OnFailureChainSpec{Task: "other/missing"}),
