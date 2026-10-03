@@ -3089,8 +3089,12 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	// overrides) populates it before this call.
 	s.cfgMu.RLock()
 	allowedTokenEnvs := s.cfg.SourceSecurity.AllowedTokenEnvs
+	defaultsFailureChain := s.cfg.Defaults.OnFailureChain
 	s.cfgMu.RUnlock()
-	opts := []taskset.SourceOption{taskset.WithAllowedTokenEnvs(allowedTokenEnvs)}
+	opts := []taskset.SourceOption{
+		taskset.WithAllowedTokenEnvs(allowedTokenEnvs),
+		taskset.WithDefaultsOnFailureChain(defaultsFailureChain),
+	}
 	if entry.Overrides != nil {
 		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
 	}

@@ -159,6 +159,16 @@ docker-hardening misconfigurations) rather than refusing to load — give
 the param a `default`, drop `required`, or ship the task `enabled: false`
 until an override supplies the value (#821).
 
+The same rule is checked across tasks when a source resolves, for two
+dispatch paths that likewise carry no fire-time params: every stage of a
+`kind: PipelineTask` with `trigger.cron` (the stage's own
+`overrides.params` can patch in a default and clear the warning), and any
+task named by a per-task `on_failure_chain` or the config-level
+`defaults.on_failure_chain` (failure chains pass `input` only, and have no
+overrides). These warnings are logged once by the source
+(`taskset: cross-task config warning`) rather than attached to the task's
+`Warnings`; a target that lives in another source is not checked.
+
 ### Trigger types
 
 **Cron** — runs on a schedule:
