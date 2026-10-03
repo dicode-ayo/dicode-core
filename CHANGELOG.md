@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.5](https://github.com/dicode-ayo/dicode-core/compare/v0.6.4...v0.6.5) (2026-10-03)
+
+
+### Features
+
+* **approval:** bound the commit-count walk for the "what moved" strip ([#890](https://github.com/dicode-ayo/dicode-core/issues/890)) ([8ecaa27](https://github.com/dicode-ayo/dicode-core/commit/8ecaa2762625cd6223597c741346da70ba17e665))
+* **suspend:** offload large cumulative resume_state to blob storage ([#897](https://github.com/dicode-ayo/dicode-core/issues/897)) ([9bd9b01](https://github.com/dicode-ayo/dicode-core/commit/9bd9b01ba32ccc61383f36800d5d7f52a7c7642f))
+* **taskset:** warn on unsatisfiable required params across tasks ([#901](https://github.com/dicode-ayo/dicode-core/issues/901)) ([db868dd](https://github.com/dicode-ayo/dicode-core/commit/db868dd4d60a5c40803a4be0bd9bb0b6e8ba6351))
+* **tasktest:** Docker/Podman parity for dicode task test (Phase 3) ([#891](https://github.com/dicode-ayo/dicode-core/issues/891)) ([1feec23](https://github.com/dicode-ayo/dicode-core/commit/1feec23117c8412f66fd09761e4beef80077aced))
+* **trigger:** stamp a run_url into the chain payload ([#889](https://github.com/dicode-ayo/dicode-core/issues/889)) ([7eeabd1](https://github.com/dicode-ayo/dicode-core/commit/7eeabd19396457142ffceac418a98363d94f9600))
+
+
+### Bug Fixes
+
+* **approval:** capture commit-range baseline at Admit time, not live ([#885](https://github.com/dicode-ayo/dicode-core/issues/885)) ([ab9d3d8](https://github.com/dicode-ayo/dicode-core/commit/ab9d3d8a83620ea3ee3b9bb29231e823cc4481fe))
+* **replay:** restore fire-time params on replayed runs ([#900](https://github.com/dicode-ayo/dicode-core/issues/900)) ([8fe74f5](https://github.com/dicode-ayo/dicode-core/commit/8fe74f5cef2e73a06be53204257f715d6e0deb1d))
+* **runtime/deno:** grant unix: net scope for the IPC socket on Deno 2.9+ ([#892](https://github.com/dicode-ayo/dicode-core/issues/892)) ([38ea12d](https://github.com/dicode-ayo/dicode-core/commit/38ea12db06149a414d921a73e671e1ee556bf588))
+* **taskset:** log resolved (post-override) task warnings ([#899](https://github.com/dicode-ayo/dicode-core/issues/899)) ([4a5f745](https://github.com/dicode-ayo/dicode-core/commit/4a5f745e1e2ab5c159b664b237e4b36266609221))
+
+
+### Documentation
+
+* add a Code Comments convention to CLAUDE.md ([#880](https://github.com/dicode-ayo/dicode-core/issues/880)) ([67fe6d5](https://github.com/dicode-ayo/dicode-core/commit/67fe6d5a20685b56ddc903828ef9153fa1789a5e))
+
 ## [0.6.4](https://github.com/dicode-ayo/dicode-core/compare/v0.6.3...v0.6.4) (2026-09-16)
 
 
