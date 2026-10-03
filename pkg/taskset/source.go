@@ -74,6 +74,15 @@ type Source struct {
 	failures   map[string]task.LoadFailure
 
 	parentOverrides *Overrides // overrides applied at the dicode.yaml entry level
+
+	// defaultsFailureChain is the config-level defaults.on_failure_chain,
+	// used only for cross-task param warnings.
+	defaultsFailureChain task.OnFailureChainSpec
+
+	// loggedWarnings holds the cross-task warnings logged by the previous
+	// resolve pass, so an unchanged warning is not re-logged every poll.
+	warnMu         sync.Mutex
+	loggedWarnings map[string]struct{}
 }
 
 // cloneState holds the per-session state for a dev-mode clone.
@@ -102,6 +111,12 @@ func WithParentOverrides(ov *Overrides) SourceOption {
 // allowlist — see Resolver.SetAllowedTokenEnvs.
 func WithAllowedTokenEnvs(envs []string) SourceOption {
 	return func(s *Source) { s.resolver.SetAllowedTokenEnvs(envs) }
+}
+
+// WithDefaultsOnFailureChain supplies the config-level defaults.on_failure_chain
+// so resolution can warn when its target has a required param with no default.
+func WithDefaultsOnFailureChain(spec task.OnFailureChainSpec) SourceOption {
+	return func(s *Source) { s.defaultsFailureChain = spec }
 }
 
 // contentHashDomain is taskset's own versioned domain-separation prefix for
@@ -899,7 +914,29 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, []ResolveFailure
 	s.mu.Lock()
 	parent := s.parentOverrides
 	s.mu.Unlock()
-	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, parent, nil)
+	results, failures, err := s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, parent, nil)
+	if err == nil {
+		s.logCrossTaskWarnings(CrossTaskParamWarnings(results, s.defaultsFailureChain))
+	}
+	return results, failures, err
+}
+
+// logCrossTaskWarnings logs each warning that was not already logged by the
+// previous pass; the remembered set is replaced every pass.
+func (s *Source) logCrossTaskWarnings(warnings []CrossTaskWarning) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	next := make(map[string]struct{}, len(warnings))
+	for _, w := range warnings {
+		key := w.TaskID + "\x00" + w.Message
+		next[key] = struct{}{}
+		if _, seen := s.loggedWarnings[key]; seen {
+			continue
+		}
+		s.log.Warn("taskset: cross-task config warning",
+			zap.String("source", s.id), zap.String("entry", w.TaskID), zap.String("warning", w.Message))
+	}
+	s.loggedWarnings = next
 }
 
 func (s *Source) loadConfigDefaults() (*Defaults, error) {

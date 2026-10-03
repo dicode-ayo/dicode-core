@@ -1004,15 +1004,9 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 // notification too. Advisory only, like webhookSecretGatedFieldWarnings /
 // dockerHardeningWarnings below.
 //
-// Scope: only covers a task's own declared trigger. Two related cases still
-// go unwarned because they need cross-task/cross-file resolution this
-// function doesn't have: a cron-triggered kind: PipelineTask whose stage
-// references a task with an unsatisfiable required param, and a task
-// reachable only as an on_failure_chain / defaults.on_failure_chain target
-// whose own trigger (e.g. manual, just to satisfy "at least one trigger")
-// reads as fine in isolation. Both dispatch the same no-Params way as
-// cron/daemon/chain above. Tracked separately as #838 (needs
-// taskset-resolution-time cross-referencing, once every entry is loaded).
+// Scope: only a task's own declared trigger. Cron-triggered pipeline stages
+// and on_failure_chain / defaults.on_failure_chain targets need cross-task
+// resolution and are covered at taskset resolution (pkg/taskset/crosswarn.go).
 func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string {
 	var kind string
 	effective := params
@@ -1024,7 +1018,7 @@ func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string
 	case t.Chain != nil:
 		kind = "chain"
 		if t.Chain.Overrides != nil && len(t.Chain.Overrides.Params) > 0 {
-			effective = applyParamOverridePatch(params, t.Chain.Overrides.Params)
+			effective = ApplyParamOverridePatch(params, t.Chain.Overrides.Params)
 		}
 	default:
 		return nil
@@ -1041,20 +1035,13 @@ func unsatisfiableRequiredParamWarnings(t TriggerConfig, params Params) []string
 	return warnings
 }
 
-// applyParamOverridePatch returns a copy of params with each override
-// applied — matching entries get their Default (and, when set, Required)
-// patched in, and an override naming a param that isn't already declared is
-// appended as a new one — mirroring pkg/taskset/override.go's mergeParams
-// exactly (same field-by-field patch, same append-if-not-found fallback),
-// reimplemented here rather than imported because pkg/taskset imports
-// pkg/task and a reverse import would cycle. Only used to predict whether a
-// chain-trigger edge's own declared overrides
-// (trigger.chain.overrides.params, applied to itself before dispatch — see
-// fireSuccessChains) would satisfy an otherwise-unsatisfiable required
-// param; the append case matters because an override can introduce a
-// brand-new required-with-no-default param that was never in the task's
-// own declared params, and that is exactly as unsatisfiable as one that was.
-func applyParamOverridePatch(params Params, overrides ParamOverrides) Params {
+// ApplyParamOverridePatch returns a copy of params with each override
+// applied: matching entries get their Default (and, when set, Required)
+// patched in, and an override naming an undeclared param is appended as a new
+// one. Mirrors pkg/taskset/override.go's mergeParams (pkg/taskset imports
+// pkg/task, so it cannot be shared directly). The append case matters because
+// an override can introduce a required param with no default.
+func ApplyParamOverridePatch(params Params, overrides ParamOverrides) Params {
 	out := make(Params, len(params), len(params)+len(overrides))
 	copy(out, params)
 	for _, po := range overrides {
