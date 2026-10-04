@@ -267,26 +267,13 @@ func TestApplyTriggerPatch_Exhaustive(t *testing.T) {
 // overrides (b), b winning and gaps filled from a. Any field it does not
 // gap-fill is silently dropped from the parent patch when the entry override
 // leaves it unset — the same field-drop failure class as the
-// DicodePermissions bug. New fields must be gap-filled or allowlisted.
+// DicodePermissions bug. Every field must be gap-filled; there is no allowlist.
 func TestMergeOverrides_Exhaustive(t *testing.T) {
-	// Fields NOT gap-filled from a by mergeOverrides today. These are
-	// pre-existing drops documented as-is when this guard was added (#388);
-	// they are candidates for follow-up fixes, not deliberate design. If you
-	// wire one of them into mergeOverrides, remove it here so the guard
-	// protects it.
-	allowlist := map[string]string{
-		"Name":        "pre-existing drop: parent-patch name is lost when the entry override has none",
-		"Description": "pre-existing drop: parent-patch description is lost when the entry override has none",
-		"Net":         "pre-existing drop: parent-patch net is lost when the entry override has none",
-		"Fs":          "pre-existing drop: parent-patch fs is lost when the entry override has none",
-		"Dicode":      "pre-existing drop: parent-patch dicode perms are lost when the entry override has none",
-	}
-
 	a := &Overrides{}
 	populateValue(t, reflect.ValueOf(a).Elem(), 3)
 	got := mergeOverrides(a, &Overrides{})
-	checkAllFieldsNonZero(t, reflect.ValueOf(got).Elem(), "task.Overrides", allowlist,
-		"not gap-filled in mergeOverrides (pkg/taskset/resolver.go) — a parent entry patch setting it is silently dropped; wire it into the merge or add it to this test's allowlist")
+	checkAllFieldsNonZero(t, reflect.ValueOf(got).Elem(), "task.Overrides", map[string]string{},
+		"not gap-filled in mergeOverrides (pkg/taskset/resolver.go) — a parent entry patch setting it is silently dropped; wire it into the merge")
 
 	// b-wins direction: an empty parent patch must not clobber the entry's
 	// own overrides.
@@ -294,7 +281,35 @@ func TestMergeOverrides_Exhaustive(t *testing.T) {
 	populateValue(t, reflect.ValueOf(b).Elem(), 3)
 	got = mergeOverrides(&Overrides{}, b)
 	checkAllFieldsNonZero(t, reflect.ValueOf(got).Elem(), "task.Overrides", map[string]string{},
-		"dropped from b by mergeOverrides (pkg/taskset/resolver.go) even though b wins — update the merge and this test's allowlist")
+		"dropped from b by mergeOverrides (pkg/taskset/resolver.go) even though b wins — update the merge")
+}
+
+// Each Overrides field set by only one layer must survive mergeOverrides,
+// whichever layer sets it.
+func TestMergeOverrides_EachFieldSurvivesOneSidedSet(t *testing.T) {
+	typ := reflect.TypeOf(Overrides{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		t.Run(f.Name+"/parent-only", func(t *testing.T) {
+			a := &Overrides{}
+			populateValue(t, reflect.ValueOf(a).Elem().Field(i), 3)
+			got := mergeOverrides(a, &Overrides{})
+			if reflect.ValueOf(got).Elem().Field(i).IsZero() {
+				t.Errorf("%s set by parent patch was dropped", f.Name)
+			}
+		})
+		t.Run(f.Name+"/child-only", func(t *testing.T) {
+			b := &Overrides{}
+			populateValue(t, reflect.ValueOf(b).Elem().Field(i), 3)
+			got := mergeOverrides(&Overrides{}, b)
+			if reflect.ValueOf(got).Elem().Field(i).IsZero() {
+				t.Errorf("%s set by entry overrides was dropped", f.Name)
+			}
+		})
+	}
 }
 
 // ── task.Spec ⊕ copySpec ─────────────────────────────────────────────────────
