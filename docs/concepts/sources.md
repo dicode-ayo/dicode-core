@@ -122,7 +122,7 @@ trigger:
 2. TaskSet `spec.defaults`
 3. Per-entry `overrides` (parent entry patch merged with local entry overrides; leaf wins)
 
-The merge is per field: a field the local entry's `overrides` leaves unset falls back to the parent entry patch, including `name`, `description`, `net`, `fs` and `dicode`. A field set in both takes the local value as-is (`net`, `fs` and `dicode` are not unioned).
+For a task entry, the merge is per field: a field its local `overrides` leaves unset falls back to the parent TaskSet's `overrides.entries` patch for that task, including `name`, `description`, `net`, `fs` and `dicode`. A field set in both takes the local value as-is (`net`, `fs` and `dicode` are not unioned). Fields set directly on a nested TaskSet entry do not apply to descendant task specs; set descendant values in its `overrides.entries` patches.
 
 > **Deprecated:** `kind:Config spec.defaults` and `overrides.defaults` from parent TaskSets are no longer applied to the override stack. Migrate shared defaults to `dicode.yaml defaults:` instead.
 
