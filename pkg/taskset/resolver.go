@@ -902,6 +902,21 @@ func mergeOverrides(a, b *Overrides) *Overrides {
 	if out.Defaults == nil {
 		out.Defaults = a.Defaults
 	}
+	if out.Name == "" {
+		out.Name = a.Name
+	}
+	if out.Description == "" {
+		out.Description = a.Description
+	}
+	if len(out.Net) == 0 {
+		out.Net = a.Net
+	}
+	if len(out.Fs) == 0 {
+		out.Fs = a.Fs
+	}
+	if out.Dicode == nil {
+		out.Dicode = a.Dicode
+	}
 	// Env: merge by name (a first, b wins)
 	if len(a.Env) > 0 || len(out.Env) > 0 {
 		out.Env = mergeEnvEntries(a.Env, out.Env)

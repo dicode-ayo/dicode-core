@@ -566,6 +566,77 @@ spec:
 	}
 }
 
+func TestResolver_NestedParentPatchPermissionsSurviveChildOverrides(t *testing.T) {
+	rootDir := t.TempDir()
+	nestedDir := t.TempDir()
+	taskDir := writeTaskDir(t, nestedDir, "deploy")
+
+	nestedTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: backend
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        trigger:
+          cron: "0 4 * * *"
+`
+	nestedPath := writeTaskSetFile(t, nestedDir, "taskset.yaml", nestedTS)
+
+	rootTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    backend:
+      ref:
+        path: ` + nestedPath + `
+      overrides:
+        entries:
+          deploy:
+            name: Parent Name
+            description: Parent description
+            net: [parent.example.com]
+            fs:
+              - path: /data
+                permission: r
+            dicode:
+              list_tasks: true
+`
+	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
+
+	r := newResolver(t)
+	results, _, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1, got %d", len(results))
+	}
+	spec := rtSpec(results[0])
+	if spec.Trigger.Cron != "0 4 * * *" {
+		t.Errorf("child cron lost: got %q", spec.Trigger.Cron)
+	}
+	if spec.Name != "Parent Name" || spec.Description != "Parent description" {
+		t.Errorf("name/description = %q/%q, want parent values", spec.Name, spec.Description)
+	}
+	if len(spec.Permissions.Net) != 1 || spec.Permissions.Net[0] != "parent.example.com" {
+		t.Errorf("net = %v, want [parent.example.com]", spec.Permissions.Net)
+	}
+	if len(spec.Permissions.FS) != 1 || spec.Permissions.FS[0].Path != "/data" {
+		t.Errorf("fs = %v, want [/data r]", spec.Permissions.FS)
+	}
+	if spec.Permissions.Dicode == nil || !spec.Permissions.Dicode.ListTasks {
+		t.Errorf("dicode perms = %+v, want list_tasks", spec.Permissions.Dicode)
+	}
+}
+
 func TestResolver_RepoDedupLocalRefs(t *testing.T) {
 	// Two entries pointing to the same local path are both resolved correctly.
 	repoDir := t.TempDir()
