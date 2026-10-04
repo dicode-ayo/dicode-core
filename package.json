@@ -10,7 +10,7 @@
     "@playwright/test": "^1.56.1",
     "@types/node": "^24.0.0",
     "dicode-relay": "^0.2.0",
-    "js-yaml": "^5.2.1"
+    "js-yaml": "^5.4.2"
   },
   "overrides": {
     "uuid": "^14.0.0"
