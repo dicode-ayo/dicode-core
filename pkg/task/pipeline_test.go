@@ -312,3 +312,33 @@ stages:
 		t.Fatalf("DATADIR not expanded: %q", pathDefault)
 	}
 }
+
+// TestLoadPipelineDir_TaskYmlFallback verifies that a directory containing
+// only task.yml (no task.yaml) still loads — the PipelineTask counterpart of
+// TestLoadDirWithVars_TaskYmlFallback in spec_test.go (#765). Before this
+// fix, LoadPipelineDir hardcoded the task.yaml basename, so a ref that
+// legitimately resolved to a task.yml-only PipelineTask directory would pass
+// resolution/kind-detection but then fail to load.
+func TestLoadPipelineDir_TaskYmlFallback(t *testing.T) {
+	dir := t.TempDir()
+	yamlSrc := `apiVersion: dicode/v1
+kind: PipelineTask
+name: Yml Only Pipeline
+subtype: sequential
+trigger:
+  manual: true
+stages:
+  - task: buildin/template
+`
+	if err := os.WriteFile(filepath.Join(dir, "task.yml"), []byte(yamlSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadPipelineDir(dir, nil)
+	if err != nil {
+		t.Fatalf("LoadPipelineDir with only task.yml present: %v", err)
+	}
+	if p.Name != "Yml Only Pipeline" {
+		t.Fatalf("p.Name = %q, want %q", p.Name, "Yml Only Pipeline")
+	}
+}

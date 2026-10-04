@@ -61,6 +61,7 @@ export default defineConfig({
         '**/pending-task-list-signals.spec.ts',
         '**/task-load-failure.spec.ts',
         '**/task-state-armed.spec.ts',
+        '**/task-yml-manifest.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
         '**/webhook-sign-cli.spec.ts',
