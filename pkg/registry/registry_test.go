@@ -627,3 +627,26 @@ func TestSuspendRun_DoesNotResurrectCancelled(t *testing.T) {
 		t.Errorf("resume_token = %q, want empty (no resume state should be written)", run.ResumeToken)
 	}
 }
+
+func TestRegistry_LoadFailureClearedOnRegisterAndUnregister(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	reg.SetLoadFailure("a", "src", "boom")
+	f, ok := reg.LoadFailures()["a"]
+	if !ok || f.Source != "src" || f.Error != "boom" {
+		t.Fatalf("recorded failure = %+v, ok=%v", f, ok)
+	}
+
+	if err := reg.Register(&task.Spec{ID: "a", Name: "a", Trigger: task.TriggerConfig{Manual: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.LoadFailures()["a"]; ok {
+		t.Error("failure should clear on successful register")
+	}
+
+	reg.SetLoadFailure("b", "src", "boom")
+	reg.Unregister("b")
+	if _, ok := reg.LoadFailures()["b"]; ok {
+		t.Error("failure should clear on unregister")
+	}
+}

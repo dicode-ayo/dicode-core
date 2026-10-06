@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Tests for pkg/task.Hash and pkg/task.ScanDir.
+// Tests for pkg/task.Hash.
 // Covers issue #125 item 4: "identical content on reload produces the same
 // hash → no spurious re-registration" — the reconciler diffs the Hash output
 // for each task on every sync pass, so non-determinism here would cause
@@ -418,37 +418,6 @@ func TestHash_MissingDirHashesEmpty(t *testing.T) {
 	}
 }
 
-// TestScanDir_StableAcrossInvocations covers the reconciler's broader
-// assumption: scanning the same tasks directory must produce the same
-// taskID → hash map every time, otherwise the diff() output would be
-// non-deterministic and the registry would churn on every poll tick.
-func TestScanDir_StableAcrossInvocations(t *testing.T) {
-	root := t.TempDir()
-	writeTaskFiles(t, filepath.Join(root, "alpha"),
-		"name: alpha\n", "export default () => 'a'\n")
-	writeTaskFiles(t, filepath.Join(root, "beta"),
-		"name: beta\n", "export default () => 'b'\n")
-
-	first, err := ScanDir(root)
-	if err != nil {
-		t.Fatalf("ScanDir: %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		got, err := ScanDir(root)
-		if err != nil {
-			t.Fatalf("ScanDir trial %d: %v", i, err)
-		}
-		if len(got) != len(first) {
-			t.Fatalf("trial %d: len=%d, want %d", i, len(got), len(first))
-		}
-		for id, hash := range first {
-			if got[id] != hash {
-				t.Fatalf("trial %d: id=%q hash=%q, want %q", i, id, got[id], hash)
-			}
-		}
-	}
-}
-
 // TestHash_LargeFileHashedByDescriptor covers the per-file size cap: a file
 // over maxHashedFileBytes folds in only its size+mtime, so rewriting its
 // contents while preserving size and mtime must not change the hash, but
@@ -563,38 +532,6 @@ func TestHash_SkipsHeavyDirs(t *testing.T) {
 	}
 	if before != after {
 		t.Fatalf("hash changed after adding files under heavy dirs: %q -> %q", before, after)
-	}
-}
-
-// TestScanDir_SkipsDirsWithoutTaskYaml documents that ScanDir silently
-// ignores directories missing task.yaml — paired with the reconciler's
-// assumption that "scratch" dirs in a repo don't register as tasks.
-func TestScanDir_SkipsDirsWithoutTaskYaml(t *testing.T) {
-	root := t.TempDir()
-	writeTaskFiles(t, filepath.Join(root, "real"),
-		"name: real\n", "export default () => 1\n")
-
-	// Sibling dir with JS but no task.yaml.
-	scratch := filepath.Join(root, "scratch")
-	if err := os.MkdirAll(scratch, 0755); err != nil {
-		t.Fatalf("mkdir scratch: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(scratch, "task.js"), []byte("nope"), 0644); err != nil {
-		t.Fatalf("write scratch js: %v", err)
-	}
-
-	got, err := ScanDir(root)
-	if err != nil {
-		t.Fatalf("ScanDir: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 task, got %d: %v", len(got), got)
-	}
-	if _, ok := got["real"]; !ok {
-		t.Errorf("missing 'real' task in result: %v", got)
-	}
-	if _, ok := got["scratch"]; ok {
-		t.Errorf("scratch dir without task.yaml should not register")
 	}
 }
 
@@ -923,38 +860,6 @@ func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Hash blocked reading a FIFO hash_include entry instead of skipping it")
-	}
-}
-
-// TestScanDir_HonorsHashInclude is the regression for a gap caught in
-// review: ScanDir (the change-detection primitive for the flat local/git
-// source types, which never fully load a task.Spec) must still read each
-// task's hash_include list — via the lightweight readHashInclude parse —
-// or hash_include silently does nothing for any task registered through
-// those source types, even though the same task registered via a taskset.yaml
-// source (pkg/taskset/source.go's contentHashFor) would correctly honor it.
-func TestScanDir_HonorsHashInclude(t *testing.T) {
-	root := t.TempDir()
-	shared := filepath.Join(root, "shared.ts")
-	if err := os.WriteFile(shared, []byte("v1"), 0644); err != nil {
-		t.Fatalf("write shared: %v", err)
-	}
-	writeTaskFiles(t, filepath.Join(root, "task-a"),
-		"name: a\nhash_include: [\"../shared.ts\"]\n", "js")
-
-	before, err := ScanDir(root)
-	if err != nil {
-		t.Fatalf("ScanDir before: %v", err)
-	}
-	if err := os.WriteFile(shared, []byte("v2"), 0644); err != nil {
-		t.Fatalf("rewrite shared: %v", err)
-	}
-	after, err := ScanDir(root)
-	if err != nil {
-		t.Fatalf("ScanDir after: %v", err)
-	}
-	if before["task-a"] == after["task-a"] {
-		t.Fatalf("ScanDir ignored an edit to a hash_include'd shared module: before == after == %q", before["task-a"])
 	}
 }
 

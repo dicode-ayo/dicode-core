@@ -22,7 +22,6 @@ const initialSyncBarrier source.EventKind = "dicode-internal/initial-sync-barrie
 type Reconciler struct {
 	registry *Registry
 	sources  []source.Source
-	dataDir  string
 	log      *zap.Logger
 
 	// OnRegister is called after a task is registered (used by trigger engine).
@@ -56,14 +55,10 @@ type Reconciler struct {
 }
 
 // NewReconciler creates a Reconciler for the given registry and sources.
-// dataDir is the daemon's data directory (config.DataDir); it is injected as
-// the ${DATADIR} template variable when loading task specs so buildin tasks
-// can reference shared paths under the data dir.
-func NewReconciler(r *Registry, sources []source.Source, dataDir string, log *zap.Logger) *Reconciler {
+func NewReconciler(r *Registry, sources []source.Source, log *zap.Logger) *Reconciler {
 	return &Reconciler{
 		registry: r,
 		sources:  sources,
-		dataDir:  dataDir,
 		log:      log,
 		cancels:  make(map[string]context.CancelFunc),
 		pending:  make(map[string]source.Event),
@@ -226,46 +221,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 func (rc *Reconciler) handle(ev source.Event) {
 	switch ev.Kind {
 	case source.EventAdded, source.EventUpdated:
-		var k task.Kinded
-		if ev.Kinded != nil {
-			// TaskSet sources pre-resolve the task (overrides already applied).
-			k = ev.Kinded
-		} else {
-			extras := ev.ExtraVars
-			if extras == nil {
-				extras = make(map[string]string, 1)
-			}
-			if _, ok := extras[task.VarDataDir]; !ok && rc.dataDir != "" {
-				// Don't clobber a source-supplied DATADIR (allows tests to override).
-				// Clone before mutate — ev.ExtraVars may be shared across event consumers.
-				cloned := make(map[string]string, len(extras)+1)
-				for key, v := range extras {
-					cloned[key] = v
-				}
-				cloned[task.VarDataDir] = rc.dataDir
-				extras = cloned
-			}
-			loaded, err := task.LoadKindedDir(ev.TaskDir, extras)
-			if err != nil {
-				rc.log.Warn("failed to load task",
-					zap.String("task", ev.TaskID),
-					zap.String("source", ev.Source),
-					zap.Error(err),
-				)
-				// Surface the failure (#649) instead of only logging it: any
-				// earlier-good registration for this ID stays in the registry
-				// untouched (this event is simply not applied), and the webui
-				// merges this record onto that row — or, for a task that has
-				// never registered, synthesizes a row for it — so it doesn't
-				// silently vanish from the task list.
-				rc.registry.SetLoadFailure(ev.TaskID, ev.Source, err.Error())
-				return
-			}
-			k = loaded
-		}
-		// The registry keys on the event's TaskID. Flat git/local sources already
-		// load with ID == basename == TaskID, but namespaced/pre-resolved tasks
-		// need the canonical ID stamped here so every layer agrees.
+		k := ev.Kinded
 		k.SetTaskID(ev.TaskID)
 		for _, w := range k.LoadWarnings() {
 			rc.log.Warn("task config warning",

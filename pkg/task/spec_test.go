@@ -1094,7 +1094,7 @@ func TestLoadDir_ZeroTimeoutPreserved(t *testing.T) {
 }
 
 // TestLoadDir_OpsTasksParse walks every on-disk `tasks/ops/*/task.yaml` and
-// asserts LoadKindedDir succeeds — the same reconciler path that runs the
+// asserts LoadDirWithVars succeeds — the same loader that runs the
 // strict validator. Ops tasks ship with no Deno test that exercises the Go
 // loader, so without this a spec the reconciler would reject (e.g. two trigger
 // types on one task) can pass CI and never register at runtime.
@@ -1132,8 +1132,8 @@ func TestLoadDir_OpsTasksParse(t *testing.T) {
 		rel, _ := filepath.Rel(repoRoot, dir)
 		t.Run(rel, func(t *testing.T) {
 			extras := map[string]string{VarTaskSetDir: opsRoot}
-			if _, err := LoadKindedDir(dir, extras); err != nil {
-				t.Fatalf("LoadKindedDir(%s): %v", dir, err)
+			if _, err := LoadDirWithVars(dir, extras); err != nil {
+				t.Fatalf("LoadDirWithVars(%s): %v", dir, err)
 			}
 		})
 	}

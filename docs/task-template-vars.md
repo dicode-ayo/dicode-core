@@ -67,8 +67,8 @@ silently producing an empty or malformed path.
 ## Adding a new variable
 
 1. Add a `Var*` constant in [pkg/task/template.go](../pkg/task/template.go).
-2. Wire it up wherever the loader has the value (see `pkg/taskset/source.go`
-   and `pkg/source/{local,git}` for the injection point).
+2. Wire it up wherever the loader has the value (see `pkg/taskset/resolver.go`
+   for the injection point).
 3. Add a row to the table above.
 4. Add a test in [pkg/task/template_test.go](../pkg/task/template_test.go).
 
