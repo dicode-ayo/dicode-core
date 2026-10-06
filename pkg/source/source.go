@@ -1,5 +1,5 @@
 // Package source defines the Source interface and event types consumed by the
-// reconciler. Concrete implementations (git, local) live in sub-packages.
+// reconciler. Concrete implementations live in pkg/taskset.
 package source
 
 import (
@@ -21,19 +21,11 @@ const (
 type Event struct {
 	Kind    EventKind
 	TaskID  string // namespaced task ID, e.g. "infra/backend/deploy"
-	TaskDir string // absolute path to the task directory (used by reconciler for LoadDir)
+	TaskDir string // absolute path to the task directory
 	Source  string // source identifier (URL or path) for logging
-	// Kinded, when non-nil, is a fully resolved task of any kind (overrides
-	// already applied). The reconciler uses it directly instead of loading from
-	// TaskDir. Set by taskset sources; nil for plain git/local sources, which
-	// the reconciler loads via task.LoadKindedDir(TaskDir).
+	// Kinded is the fully resolved task (overrides already applied) for added
+	// and updated events; always set for those kinds.
 	Kinded task.Kinded
-	// ExtraVars carries per-source template variables injected into
-	// task.yaml's ${VAR} expansion at load time. Sources populate this with
-	// e.g. TASK_SET_DIR (the source's root path) so tasks can reference
-	// shared directories without hardcoding a path. nil = no extras. See
-	// docs/task-template-vars.md for the full variable set.
-	ExtraVars map[string]string
 }
 
 // Source is anything that can produce task change events.
@@ -47,7 +39,7 @@ type Source interface {
 	// Start must be called only once per Source.
 	Start(ctx context.Context) (<-chan Event, error)
 
-	// Sync triggers an immediate reconciliation (pull for git, rescan for local).
+	// Sync triggers an immediate reconciliation (pull and re-resolve).
 	// Safe to call concurrently.
 	Sync(ctx context.Context) error
 }

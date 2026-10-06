@@ -501,7 +501,7 @@ func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, den
 	denoRT.SetRepoResolver(sourceMgr)
 	pythonRT.SetSourceManager(sourceMgr)
 	pythonRT.SetRepoResolver(sourceMgr)
-	rec := registry.NewReconciler(reg, sources, dataDir, log)
+	rec := registry.NewReconciler(reg, sources, log)
 	return sourceMgr, rec, nil
 }
 

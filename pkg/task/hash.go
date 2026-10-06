@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/dicode/dicode/internal/pathguard"
-	"gopkg.in/yaml.v3"
 )
 
 // maxHashedFileBytes bounds the contents read into the digest per file. The
@@ -382,65 +381,4 @@ func collectEntries(dir string, includes ...string) ([]hashEntry, error) {
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].label < entries[j].label })
 	return entries, nil
-}
-
-// ScanDir scans the tasks/ directory in a repo and returns a map of
-// taskID → content hash for all valid task directories.
-//
-// This is the change-detection primitive for the flat local/git source
-// types (pkg/source/local, pkg/source/git) — unlike pkg/taskset/source.go's
-// resolver-based Source, it never fully loads a task.Spec (LoadDirWithVars),
-// only checking that task.yaml exists. So a task's hash_include list (#585)
-// has to be read separately here via readHashInclude — a best-effort partial
-// parse, not the full loader — or hash_include would silently do nothing for
-// any task registered through these two source types.
-func ScanDir(tasksDir string) (map[string]string, error) {
-	entries, err := os.ReadDir(tasksDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("scan tasks dir %s: %w", tasksDir, err)
-	}
-
-	result := make(map[string]string, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(tasksDir, e.Name())
-		yamlPath := filepath.Join(dir, "task.yaml")
-		// skip directories that don't contain task.yaml
-		if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
-			continue
-		}
-		hash, err := Hash(dir, readHashInclude(yamlPath)...)
-		if err != nil {
-			return nil, err
-		}
-		result[e.Name()] = hash
-	}
-	return result, nil
-}
-
-// readHashInclude does a lenient, minimal parse of yamlPath's hash_include
-// field only — every other field, and any parse/read failure, is ignored
-// (returns nil). ScanDir must tolerate an in-progress or otherwise invalid
-// edit without aborting the whole reconciler scan the way the full loader
-// (LoadDirWithVars) is allowed to fail loudly; a task.yaml this function
-// can't parse just means "no includes counted this poll" — the task's own
-// dir hash still reflects the edit, and the full loader reports the real
-// error once the reconciler actually tries to load it.
-func readHashInclude(yamlPath string) []string {
-	data, err := os.ReadFile(yamlPath)
-	if err != nil {
-		return nil
-	}
-	var probe struct {
-		HashInclude []string `yaml:"hash_include"`
-	}
-	if err := yaml.Unmarshal(data, &probe); err != nil {
-		return nil
-	}
-	return probe.HashInclude
 }

@@ -85,7 +85,7 @@ func (t PipelineTrigger) count() int {
 }
 
 // LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml. The caller
-// is responsible for having already determined the kind (see LoadKindedDir).
+// is responsible for having already determined the kind.
 func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error) {
 	specPath := filepath.Join(dir, "task.yaml")
 	f, err := os.Open(specPath)

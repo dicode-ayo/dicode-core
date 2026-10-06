@@ -45,6 +45,15 @@ func writeTask(t *testing.T, dir, name string) string {
 	return td
 }
 
+func loadKinded(t *testing.T, dir string) task.Kinded {
+	t.Helper()
+	k, err := task.LoadDirWithVars(dir, nil)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	return k
+}
+
 func newTestReconciler(t *testing.T, sources ...source.Source) (*Registry, *Reconciler) {
 	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
@@ -53,7 +62,7 @@ func newTestReconciler(t *testing.T, sources ...source.Source) (*Registry, *Reco
 	}
 	t.Cleanup(func() { d.Close() })
 	r := New(d)
-	rec := NewReconciler(r, sources, "", zap.NewNop())
+	rec := NewReconciler(r, sources, zap.NewNop())
 	return r, rec
 }
 
@@ -70,7 +79,7 @@ func TestReconciler_Added(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- rec.Run(ctx) }()
 
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "my-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "my-task", Kinded: loadKinded(t, td), Source: "test"}
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -94,13 +103,13 @@ func TestReconciler_Updated(t *testing.T) {
 	defer cancel()
 	go rec.Run(ctx)
 
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "upd-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "upd-task", Kinded: loadKinded(t, td), Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
 	// Update the task name on disk and emit Updated.
 	_ = os.WriteFile(filepath.Join(td, "task.yaml"),
 		[]byte("name: upd-task-v2\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
-	fs.ch <- source.Event{Kind: source.EventUpdated, TaskID: "upd-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventUpdated, TaskID: "upd-task", Kinded: loadKinded(t, td), Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
 	spec, _ := reg.Get("upd-task")
@@ -120,135 +129,14 @@ func TestReconciler_Removed(t *testing.T) {
 	defer cancel()
 	go rec.Run(ctx)
 
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "rem-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "rem-task", Kinded: loadKinded(t, td), Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
-	fs.ch <- source.Event{Kind: source.EventRemoved, TaskID: "rem-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventRemoved, TaskID: "rem-task", Kinded: loadKinded(t, td), Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
 	if _, ok := reg.Get("rem-task"); ok {
 		t.Error("task should be removed")
-	}
-}
-
-func TestReconciler_InvalidTask_Ignored(t *testing.T) {
-	dir := t.TempDir()
-	td := filepath.Join(dir, "bad-task")
-	_ = os.MkdirAll(td, 0755)
-	// task.yaml with missing required field (name)
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
-
-	fs := newFakeSource("test")
-	reg, rec := newTestReconciler(t, fs)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rec.Run(ctx)
-
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "bad-task", TaskDir: td, Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-
-	if _, ok := reg.Get("bad-task"); ok {
-		t.Error("invalid task should not be registered")
-	}
-}
-
-// TestReconciler_InvalidTask_RecordsLoadFailure is the pkg/registry-level
-// regression lock for #649's reconciler.handle() path: a source event whose
-// task.yaml fails to load must be recorded via Registry.LoadFailure rather
-// than only logged, so the webui can still surface it even though the task
-// never registers.
-func TestReconciler_InvalidTask_RecordsLoadFailure(t *testing.T) {
-	dir := t.TempDir()
-	td := filepath.Join(dir, "bad-task")
-	_ = os.MkdirAll(td, 0755)
-	// task.yaml with missing required field (name)
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
-
-	fs := newFakeSource("test")
-	reg, rec := newTestReconciler(t, fs)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rec.Run(ctx)
-
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "bad-task", TaskDir: td, Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-
-	fails := reg.LoadFailures()
-	f, ok := fails["bad-task"]
-	if !ok {
-		t.Fatalf("want a recorded load failure for bad-task, got %v", fails)
-	}
-	if f.Source != "test" {
-		t.Errorf("Source = %q, want %q", f.Source, "test")
-	}
-	if f.Error == "" {
-		t.Error("Error should be non-empty")
-	}
-}
-
-// TestReconciler_LoadFailureClearedOnRecovery covers both halves of #649's
-// "don't leave stale failure state behind" requirement: a task that fails to
-// load and then loads cleanly must have its failure record cleared on
-// successful registration, and a task that fails to load and is then
-// genuinely removed must not leave a ghost failure record behind either.
-func TestReconciler_LoadFailureClearedOnRecovery(t *testing.T) {
-	dir := t.TempDir()
-	td := writeTask(t, dir, "flaky-task")
-
-	fs := newFakeSource("test")
-	reg, rec := newTestReconciler(t, fs)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rec.Run(ctx)
-
-	// Break it first.
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "flaky-task", TaskDir: td, Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-	if _, ok := reg.LoadFailures()["flaky-task"]; !ok {
-		t.Fatal("expected a load failure to be recorded after the broken load")
-	}
-
-	// Fix it and re-emit — Register must clear the failure record.
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("name: flaky-task\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
-	fs.ch <- source.Event{Kind: source.EventUpdated, TaskID: "flaky-task", TaskDir: td, Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-
-	if _, ok := reg.Get("flaky-task"); !ok {
-		t.Fatal("task should now be registered")
-	}
-	if _, ok := reg.LoadFailures()["flaky-task"]; ok {
-		t.Error("load failure should be cleared once the task registers successfully")
-	}
-}
-
-func TestReconciler_LoadFailureClearedOnRemoved(t *testing.T) {
-	dir := t.TempDir()
-	td := filepath.Join(dir, "gone-task")
-	_ = os.MkdirAll(td, 0755)
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
-
-	fs := newFakeSource("test")
-	reg, rec := newTestReconciler(t, fs)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rec.Run(ctx)
-
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "gone-task", TaskDir: td, Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-	if _, ok := reg.LoadFailures()["gone-task"]; !ok {
-		t.Fatal("expected a load failure to be recorded")
-	}
-
-	fs.ch <- source.Event{Kind: source.EventRemoved, TaskID: "gone-task", Source: "test"}
-	time.Sleep(50 * time.Millisecond)
-
-	if _, ok := reg.LoadFailures()["gone-task"]; ok {
-		t.Error("load failure should be cleared once the entry is genuinely removed")
 	}
 }
 
@@ -271,7 +159,7 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	defer cancel()
 	go rec.Run(ctx)
 
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "cb-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "cb-task", Kinded: loadKinded(t, td), Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
@@ -282,15 +170,14 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	}
 }
 
-// TestReconcilerLoadsPipelineKind covers the reconciler boundary only: a raw
-// source event whose task.yaml declares kind: PipelineTask is loaded as a
-// *task.PipelineTask, stored in the registry under the event's TaskID, and
-// surfaced through the kind-aware OnRegister hook. Engine-side acceptance
+// TestReconcilerRegistersPipelineKind covers the reconciler boundary only: a
+// resolved *task.PipelineTask is stored in the registry under the event's
+// TaskID and surfaced through the kind-aware OnRegister hook. Engine-side acceptance
 // (registerPipeline's stage-ref + cycle validation) is exercised in
 // pkg/trigger/registerpipeline_test.go; it can't be cross-tested here because
 // pkg/trigger imports pkg/registry, not the reverse, so wiring a real engine
 // into a package registry test would be an import cycle.
-func TestReconcilerLoadsPipelineKind(t *testing.T) {
+func TestReconcilerRegistersPipelineKind(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(`apiVersion: dicode/v1
 kind: PipelineTask
@@ -309,7 +196,11 @@ stages:
 	var registered task.Kinded
 	rec.OnRegister = func(k task.Kinded) { registered = k }
 
-	rec.handle(source.Event{Kind: source.EventAdded, TaskID: "demo/p", TaskDir: dir})
+	p, err := task.LoadPipelineDir(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.handle(source.Event{Kind: source.EventAdded, TaskID: "demo/p", Kinded: p})
 
 	if registered == nil || registered.KindOf() != task.KindPipelineTask {
 		t.Fatalf("expected pipeline registration via OnRegister, got %v", registered)
@@ -339,16 +230,15 @@ func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true},
 	}
 
-	rc := NewReconciler(reg, nil, "", zap.NewNop())
+	rc := NewReconciler(reg, nil, zap.NewNop())
 	rc.runCtx = ctx
 	rc.merged = make(chan source.Event, 1)
 
 	rc.handle(source.Event{
-		Kind:    source.EventAdded,
-		TaskID:  "consumer",
-		Kinded:  consumer,
-		Source:  "test",
-		TaskDir: "",
+		Kind:   source.EventAdded,
+		TaskID: "consumer",
+		Kinded: consumer,
+		Source: "test",
 	})
 
 	if _, ok := reg.Get("consumer"); ok {
@@ -369,8 +259,8 @@ func TestReconciler_MultipleSources(t *testing.T) {
 	defer cancel()
 	go rec.Run(ctx)
 
-	fs1.ch <- source.Event{Kind: source.EventAdded, TaskID: "src1-task", TaskDir: td1, Source: "src1"}
-	fs2.ch <- source.Event{Kind: source.EventAdded, TaskID: "src2-task", TaskDir: td2, Source: "src2"}
+	fs1.ch <- source.Event{Kind: source.EventAdded, TaskID: "src1-task", Kinded: loadKinded(t, td1), Source: "src1"}
+	fs2.ch <- source.Event{Kind: source.EventAdded, TaskID: "src2-task", Kinded: loadKinded(t, td2), Source: "src2"}
 	time.Sleep(100 * time.Millisecond)
 
 	if _, ok := reg.Get("src1-task"); !ok {
@@ -482,61 +372,6 @@ func TestReconciler_RemovedWhilePendingNotRetried(t *testing.T) {
 	}
 }
 
-func TestReconciler_InjectsDATADIR(t *testing.T) {
-	dataDir := "/var/lib/dicode-test"
-	// The reconciler derives spec.ID from filepath.Base(ev.TaskDir), so the
-	// task directory name must match the event's TaskID.
-	taskDir := filepath.Join(t.TempDir(), "dummy")
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	taskYAML := `name: dummy
-runtime: deno
-trigger:
-  manual: true
-permissions:
-  fs:
-    - path: "${DATADIR}/some-subdir"
-      permission: rw
-`
-	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(taskYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(taskDir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	fs := newFakeSource("test")
-
-	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
-	reg := New(d)
-	rc := NewReconciler(reg, []source.Source{fs}, dataDir, zap.NewNop())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rc.Run(ctx)
-
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "dummy", TaskDir: taskDir, Source: "test"}
-	time.Sleep(100 * time.Millisecond)
-
-	spec, ok := reg.Get("dummy")
-	if !ok {
-		t.Fatal("task not registered")
-	}
-	if len(spec.Permissions.FS) == 0 {
-		t.Fatal("expected at least one FS permission entry")
-	}
-	want := dataDir + "/some-subdir"
-	if spec.Permissions.FS[0].Path != want {
-		t.Errorf("FS[0].Path = %q, want %q (${DATADIR} was not expanded)", spec.Permissions.FS[0].Path, want)
-	}
-}
-
 // TestReconciler_QueuedWarnLoggedOnce verifies that an unresolved provider
 // dependency warns exactly once even when the queued-retry check re-runs on
 // every subsequent registration (#521). Repeat re-checks drop to debug so one
@@ -551,7 +386,7 @@ func TestReconciler_QueuedWarnLoggedOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close() })
 	reg := New(d)
-	rc := NewReconciler(reg, []source.Source{fs}, "", zap.New(core))
+	rc := NewReconciler(reg, []source.Source{fs}, zap.New(core))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -827,7 +827,7 @@ func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *re
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 
-	rec := registry.NewReconciler(reg, nil, "", zap.NewNop())
+	rec := registry.NewReconciler(reg, nil, zap.NewNop())
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = rec.Run(ctx) }()

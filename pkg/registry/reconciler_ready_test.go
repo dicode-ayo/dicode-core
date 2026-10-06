@@ -20,7 +20,7 @@ func TestReconciler_Ready_AfterInitialSync(t *testing.T) {
 	fs := newFakeSource("test")
 	// Buffer the initial inventory BEFORE Run starts, mirroring how real
 	// sources emit their initial scan synchronously inside Start.
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "init-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "init-task", Kinded: loadKinded(t, td), Source: "test"}
 
 	reg, rec := newTestReconciler(t, fs)
 
@@ -66,7 +66,7 @@ func TestReconciler_Ready_WaitsForAllSources(t *testing.T) {
 
 	// One source with a buffered initial event, one that starts empty.
 	full := newFakeSource("full")
-	full.ch <- source.Event{Kind: source.EventAdded, TaskID: "multi-task", TaskDir: td, Source: "full"}
+	full.ch <- source.Event{Kind: source.EventAdded, TaskID: "multi-task", Kinded: loadKinded(t, td), Source: "full"}
 	empty := newFakeSource("empty")
 
 	reg, rec := newTestReconciler(t, full, empty)
@@ -117,7 +117,7 @@ func TestReconciler_Ready_ConcurrentReaders(t *testing.T) {
 	td := writeTask(t, dir, "race-task")
 
 	fs := newFakeSource("test")
-	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "race-task", TaskDir: td, Source: "test"}
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "race-task", Kinded: loadKinded(t, td), Source: "test"}
 	_, rec := newTestReconciler(t, fs)
 
 	var wg sync.WaitGroup

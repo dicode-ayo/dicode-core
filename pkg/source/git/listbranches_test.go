@@ -94,3 +94,17 @@ func TestListBranches_PublicHostReachesDialStage(t *testing.T) {
 		t.Fatalf("expected failure from the dial stage (list remote), got: %v", err)
 	}
 }
+
+func TestListBranches_RefusesTokenOverHTTP(t *testing.T) {
+	t.Setenv("LB_TEST_TOKEN", "secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ListBranches(ctx, "http://example.com/repo.git", "LB_TEST_TOKEN")
+	if err == nil || !strings.Contains(err.Error(), "non-HTTPS") {
+		t.Fatalf("err = %v, want non-HTTPS credential refusal", err)
+	}
+	_, err = ListBranches(ctx, "https://example.com/repo.git", "LB_TEST_TOKEN")
+	if err != nil && strings.Contains(err.Error(), "non-HTTPS") {
+		t.Fatalf("https URL wrongly refused: %v", err)
+	}
+}

@@ -214,10 +214,8 @@ func (m *SourceManager) List() []SourceInfo {
 // branches for a plain git/local entry, or one still mid-registration via
 // apiAddSource (claimed in cfg.Spec.Entries but not yet in m.tasksets). Those
 // sources' task-load failures are recorded on the shared registry (see
-// pkg/registry/reconciler.go's handle(), which calls SetLoadFailure for any
-// event whose task.Kinded wasn't pre-resolved by a taskset.Source) rather
-// than on a taskset.Source's own failure map, so this reads from m.registry
-// instead of src.LoadFailures(). Filtered by LoadFailure.Source == name
+// Registry.SetLoadFailure) rather than on a taskset.Source's own failure
+// map, so this reads from m.registry instead of src.LoadFailures(). Filtered by LoadFailure.Source == name
 // (the entry/source name) — no dedupe needed since a task ID belongs to
 // exactly one source. No-op if m.registry is nil (some test setups don't
 // wire one).

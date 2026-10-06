@@ -7,9 +7,7 @@ import "time"
 // task.yaml failed to load (or a taskset entry that failed to resolve) was
 // just logged and discarded — which made the task vanish from the registry
 // and the webui with no trace beyond daemon.log (#649). Both
-// pkg/registry.Registry (for plain git/local sources, which load task.yaml
-// via task.LoadKindedDir in the reconciler) and pkg/taskset.Source (for
-// taskset sources, which resolve entries themselves) record failures of this
+// pkg/registry.Registry and pkg/taskset.Source record failures of this
 // shape into their own side-channel so the webui can merge them into
 // GET /api/tasks and GET /api/sources instead of the entry disappearing.
 type LoadFailure struct {
