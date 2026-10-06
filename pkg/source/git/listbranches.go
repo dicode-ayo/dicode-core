@@ -33,6 +33,9 @@ func ListBranches(ctx context.Context, repoURL, tokenEnv string) ([]string, erro
 	var auth gogittransport.AuthMethod
 	if tokenEnv != "" {
 		if token := os.Getenv(tokenEnv); token != "" {
+			if !strings.HasPrefix(strings.ToLower(repoURL), "https://") {
+				return nil, fmt.Errorf("refusing to send %s credentials over a non-HTTPS URL", tokenEnv)
+			}
 			auth = &http.BasicAuth{Username: "git", Password: token}
 		}
 	}
