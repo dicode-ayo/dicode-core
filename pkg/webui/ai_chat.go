@@ -16,8 +16,9 @@ import (
 
 // apiAIChat forwards an AI chat request to the task named by cfg.AI.Task.
 // It accepts any JSON body; a blank or absent `prompt` opens a suspend/resume
-// conversation. The body is passed through verbatim to the configured task's webhook so per-task params
-// (session_id, skills, tools, model overrides…) travel untouched.
+// conversation. The body is passed through verbatim to the configured task's
+// webhook so per-task params (session_id, skills, tools, model overrides…)
+// travel untouched.
 //
 // This endpoint re-enters s.Handler() rather than calling the
 // webhook handler directly. The webhook path already layers: longest-prefix
