@@ -9,13 +9,14 @@ import (
 	"net/http/httptest"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
 
 // apiAIChat forwards an AI chat request to the task named by cfg.AI.Task.
-// It accepts any JSON body — the only required field is `prompt`. The body is
-// passed through verbatim to the configured task's webhook so per-task params
+// It accepts any JSON body; a blank or absent `prompt` opens a suspend/resume
+// conversation. The body is passed through verbatim to the configured task's webhook so per-task params
 // (session_id, skills, tools, model overrides…) travel untouched.
 //
 // This endpoint re-enters s.Handler() rather than calling the
@@ -35,18 +36,10 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Minimal schema validation: prompt is required. Anything else is pass-through.
-	var probe struct {
-		Prompt string `json:"prompt"`
-	}
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &probe); err != nil {
-			jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-	if probe.Prompt == "" {
-		jsonErr(w, "prompt is required", http.StatusBadRequest)
+	// Only well-formedness is checked: a blank or absent prompt opens a
+	// suspend/resume conversation, and every other field passes through.
+	if len(bytes.TrimSpace(body)) > 0 && !json.Valid(body) {
+		jsonErr(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
@@ -128,6 +121,19 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 			zap.String("task", taskID), zap.String("webhook", spec.Trigger.Webhook))
 		jsonErr(w, "ai task webhook not yet wired — retry in a moment", http.StatusServiceUnavailable)
 		return
+	}
+
+	// A task that suspended (the ai-agent's chat loop) is not a failure, but
+	// the webhook layer reports it as one. Answer 202 with the suspended run id
+	// so the client continues via POST /api/runs/{runID}/resume.
+	if runID := rec.Header().Get("X-Run-Id"); runID != "" {
+		if run, err := s.registry.GetRun(r.Context(), runID); err == nil && run.Status == registry.StatusSuspended {
+			w.Header().Set("X-Run-Id", runID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": registry.StatusSuspended})
+			return
+		}
 	}
 
 	// Propagate the inner response. Content-Type defaults to JSON since the

@@ -190,7 +190,12 @@ Two surfaces read this setting:
 
 - `POST /api/ai/chat` — used by the WebUI chat panel. Forwards the JSON body
   to the configured task's webhook and returns its response. Requires a valid
-  dicode session (gated by `requireAuth` when `server.auth: true`).
+  dicode session (gated by `requireAuth` when `server.auth: true`). A non-empty
+  `prompt` is a one-shot turn. A blank or absent `prompt` opens a
+  suspend/resume conversation: the agent suspends awaiting the first message
+  and the endpoint answers `202 {"runId": "...", "status": "suspended"}`;
+  continue with `POST /api/runs/{runID}/resume`. Only malformed JSON is
+  rejected with 400.
 - `dicode ai "<prompt>" [--session-id ID] [--task TASK_ID]` — fires the
   configured task through the engine over the CLI control socket. Use
   `--task` to override for a single invocation; use `--session-id` to continue
