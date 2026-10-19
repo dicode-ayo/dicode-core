@@ -1,0 +1,8 @@
+[
+  {"name": "no step, no state", "to": null, "state": null, "envelope": {"__step": null, "state": null}},
+  {"name": "step and object state", "to": "ask_name", "state": {"n": 42, "nested": {"a": [1, 2]}}, "envelope": {"__step": "ask_name", "state": {"n": 42, "nested": {"a": [1, 2]}}}},
+  {"name": "step only", "to": "confirm", "state": null, "envelope": {"__step": "confirm", "state": null}},
+  {"name": "falsy state is preserved", "to": null, "state": 0, "envelope": {"__step": null, "state": 0}},
+  {"name": "empty string state is preserved", "to": "s", "state": "", "envelope": {"__step": "s", "state": ""}},
+  {"name": "false state is preserved", "to": null, "state": false, "envelope": {"__step": null, "state": false}}
+]

@@ -442,6 +442,10 @@ const __resume__ = await __call__({ method: "resume" }) as
   { resumed?: boolean; state?: unknown; input?: unknown } | null;
 const __resumed__ = __resume__ != null && __resume__.resumed === true;
 
+function __suspendEnvelope__(to: string | null | undefined, state: unknown): { __step: string | null; state: unknown } {
+  return { __step: to ?? null, state: state ?? null };
+}
+
 function __unwrapState__(raw: unknown): { step: string | undefined; state: unknown } {
   if (raw && typeof raw === "object" && "__step" in (raw as Record<string, unknown>)) {
     const env = raw as { __step?: unknown; state?: unknown };
@@ -545,7 +549,7 @@ const dicode: Dicode = {
       method: "dicode.suspend",
       // Persist an envelope so the runner can dispatch steps[to] on resume; the
       // author's blob rides in `state` and is unwrapped before any handler runs.
-      state: { __step: req.to ?? null, state: req.state ?? null },
+      state: __suspendEnvelope__(req.to, req.state),
       schema: req.schema,
       deadline: req.deadline ?? 0,
     });
@@ -649,4 +653,84 @@ const dicode: Dicode = {
 // The runner awaits this on exit so fire-and-forget log writes are not lost.
 async function __flush__(): Promise<void> { await __wq__; }
 
-export { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ };
+// ── dispatch ──────────────────────────────────────────────────────────────────
+
+interface TaskModule {
+  default?: unknown;
+  resume?: unknown;
+  steps?: Record<string, unknown>;
+}
+
+// Picks the handler for this invocation. A first run calls main (the default
+// export); a resume runs steps[step] when the marker names an exported step,
+// else the exported resume, else main so a single-main task keeps working.
+// When `steps` is exported but the marker names no matching step (typo, or the
+// task was edited mid-wizard), it throws rather than silently re-running an
+// unrelated handler against mid-wizard state.
+function __selectHandler__(
+  mod: TaskModule,
+  resumed: boolean,
+  step: string | undefined,
+): (ctx: unknown) => unknown {
+  let handler: unknown = mod.default;
+  if (resumed) {
+    if (mod.steps && step) {
+      handler = mod.steps[step];
+      if (typeof handler !== "function") {
+        throw new Error(`resume step "${step}" is not an exported step function`);
+      }
+    } else if (typeof mod.resume === "function") {
+      handler = mod.resume;
+    }
+  }
+  if (typeof handler !== "function") {
+    throw new Error("task has no default export (main) to run");
+  }
+  return handler as (ctx: unknown) => unknown;
+}
+
+// Runs the task module's handler and owns the process lifecycle: the return
+// value is delivered over IPC, a SuspendSignal is a clean exit, and any other
+// failure is rethrown after the connection is flushed and closed.
+async function __dispatch__(load: () => Promise<TaskModule>): Promise<void> {
+  const fail = async (msg: string): Promise<never> => {
+    console.error("[dicode] " + msg);
+    await __flush__();
+    try { __conn__.close(); } catch { /* already closed */ }
+    Deno.exit(1);
+  };
+  let mod: TaskModule;
+  try {
+    mod = await load();
+  } catch (e) {
+    return fail("task import failed: " + String(e));
+  }
+  let handler: (ctx: unknown) => unknown;
+  try {
+    handler = __selectHandler__(mod, __resumed__, __resumeStep__);
+  } catch (e) {
+    return fail((e as Error).message);
+  }
+  try {
+    const result = await handler({ params, kv, input, state, output, mcp, dicode });
+    // A normal return with a suspend requested means task code swallowed the
+    // SuspendSignal and kept running; the payload is already recorded, so fail
+    // rather than leave the run suspended-and-returned.
+    if (__wasSuspendRequested__()) {
+      return fail("dicode.suspend() was called but its control-flow signal was caught by task code — do not wrap dicode.suspend() in a try/catch that swallows it");
+    }
+    await __setReturn__(result);
+  } catch (err) {
+    if (__isSuspend__(err)) {
+      await __flush__();
+      try { __conn__.close(); } catch { /* already closed */ }
+      Deno.exit(0);
+    }
+    throw err;
+  } finally {
+    await __flush__();
+    try { __conn__.close(); } catch { /* already closed */ }
+  }
+}
+
+export { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__, __dispatch__, __selectHandler__, __unwrapState__, __suspendEnvelope__ };
