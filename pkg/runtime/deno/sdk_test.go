@@ -4,19 +4,20 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+
+	denopkg "github.com/dicode/dicode/pkg/deno"
 )
 
-// TestDenoSDK runs the Deno test suite for the SDK shim. Skips locally when
-// Deno is unavailable; on CI it fails loudly.
+// TestDenoSDK runs the Deno test suite for the SDK shim. A Deno provisioning
+// failure skips locally but fails on CI, so a broken setup cannot silently
+// drop the suite.
 func TestDenoSDK(t *testing.T) {
-	rt, _, cleanup := newTestRuntime(t)
-	defer cleanup()
-	denoPath := rt.denoPath
-	if denoPath == "" {
+	denoPath, err := denopkg.EnsureDeno(denopkg.DefaultVersion)
+	if err != nil {
 		if os.Getenv("CI") != "" {
-			t.Fatal("deno binary not resolved in CI")
+			t.Fatalf("deno not available in CI: %v", err)
 		}
-		t.Skip("deno not available")
+		t.Skipf("deno not available: %v", err)
 	}
 	cmd := exec.Command(denoPath, "test", "--allow-all", "--no-lock", "sdk/shim_test.ts")
 	out, err := cmd.CombinedOutput()
