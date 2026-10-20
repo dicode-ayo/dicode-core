@@ -338,6 +338,10 @@ class _Context:
 ctx = _Context(input)
 
 
+def _suspend_envelope(to, state):
+    return {"__step": to, "state": state}
+
+
 def _call_handler(fn):
     """Invoke a task handler, passing `ctx` if it declares a positional
     parameter and awaiting it if it returns a coroutine (#512). A no-arg
@@ -630,7 +634,7 @@ class _Dicode:
         # behavior) so a schema-less suspend carries no constraint rather than a
         # `null` the daemon would have to reject as an invalid schema.
         req = {"method": "dicode.suspend",
-               "state": {"__step": to, "state": state},
+               "state": _suspend_envelope(to, state),
                "deadline": deadline or 0}
         if schema is not None:
             req["schema"] = schema

@@ -389,6 +389,21 @@ class SuspendTests(SDKTestBase):
         self.assertEqual(captured["schema"]["title"], "Name?")
         self.assertEqual(captured["deadline"], 1893456000000)
 
+    def test_suspend_envelope_matches_shared_fixture(self):
+        # The Deno shim asserts the same fixture, so the two SDKs cannot drift on
+        # the { __step, state } wire envelope.
+        fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "..", "testdata", "suspend_envelopes.json")
+        with open(fixture) as f:
+            cases = json.load(f)
+        captured = []
+        self.server.handlers["dicode.suspend"] = lambda msg: captured.append(msg.get("state")) or True
+        sdk = self.load_sdk()
+        for c in cases:
+            with self.assertRaises(sdk.SuspendSignal):
+                sdk.dicode.suspend(to=c["to"], state=c["state"])
+        self.assertEqual(captured, [c["envelope"] for c in cases])
+
     def test_suspend_without_schema_omits_the_field(self):
         # A schema-less suspend must send no `schema` field at all (not `null`),
         # mirroring Deno's dropped-undefined-key behavior, so the daemon records

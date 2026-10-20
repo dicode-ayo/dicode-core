@@ -210,6 +210,8 @@ Injected before every Deno task script. Updated for unified IPC protocol:
 - Length-prefix framing (`readExact` + 4-byte LE header) replaces newline-delimited reads
 - Handshake on connect: reads `DICODE_TOKEN` from env, sends to server, validates response
 - All globals unchanged: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`), **`mcp`** (`list_tools`, `call`)
+- Owns the resume dispatcher: the generated runner is just `await __dispatch__(() => import(task))`. `__selectHandler__` (first run → `main`; resume with a step marker → `steps[to]`; else `resume`; else `main`) and `__unwrapState__` are exported and unit-tested by `sdk/shim_test.ts`, run from `TestDenoSDK` (`pkg/runtime/deno/sdk_test.go`)
+- The `{ __step, state }` suspend envelope is asserted against `pkg/runtime/testdata/suspend_envelopes.json` by both `shim_test.ts` and `test_dicode_sdk.py`, so the Deno and Python SDKs cannot drift on the wire contract
 
 ### `pkg/runtime/python/sdk/dicode_sdk.py` ✅
 

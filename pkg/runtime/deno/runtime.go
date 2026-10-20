@@ -334,74 +334,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ } from \"" + moduleURL(shimPath) + "\";\n" +
-		"let __mod__;\n" +
-		"try {\n" +
-		"  __mod__ = await import(\"" + moduleURL(taskPath) + "\");\n" +
-		"} catch (__importErr__) {\n" +
-		"  console.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
-		"  await __flush__();\n" +
-		"  try { __conn__.close(); } catch {}\n" +
-		"  Deno.exit(1);\n" +
-		"}\n" +
-		// Auto-dispatch (#512): a first run calls main; a resume runs steps[to]
-		// (wizard shape) when the marker names an exported step, else the exported
-		// resume (two-function shape), else falls back to main so a single-main
-		// task keeps working. The author reads ctx.state / ctx.input, never a step
-		// switch. main is the entry (first) step. When `steps` is exported but the
-		// marker names no matching step (typo, or the task was edited mid-wizard),
-		// fail loudly rather than silently re-running an unrelated handler against
-		// mid-wizard state.
-		"const __ctx__ = { params, kv, input, state, output, mcp, dicode };\n" +
-		"const __main__ = __mod__.default;\n" +
-		"const __resumeFn__ = __mod__.resume;\n" +
-		"const __steps__ = __mod__.steps;\n" +
-		"let __handler__ = __main__;\n" +
-		"if (__resumed__) {\n" +
-		"  if (__steps__ && __resumeStep__) {\n" +
-		"    if (typeof __steps__[__resumeStep__] === \"function\") { __handler__ = __steps__[__resumeStep__]; }\n" +
-		"    else {\n" +
-		"      console.error(\"[dicode] resume step \\\"\" + __resumeStep__ + \"\\\" is not an exported step function\");\n" +
-		"      await __flush__();\n" +
-		"      try { __conn__.close(); } catch {}\n" +
-		"      Deno.exit(1);\n" +
-		"    }\n" +
-		"  }\n" +
-		"  else if (typeof __resumeFn__ === \"function\") { __handler__ = __resumeFn__; }\n" +
-		"}\n" +
-		"if (typeof __handler__ !== \"function\") {\n" +
-		"  console.error(\"[dicode] task has no default export (main) to run\");\n" +
-		"  await __flush__();\n" +
-		"  try { __conn__.close(); } catch {}\n" +
-		"  Deno.exit(1);\n" +
-		"}\n" +
-		"try {\n" +
-		"  const result = await __handler__(__ctx__);\n" +
-		// If main() returned normally yet a suspend was requested, the task
-		// caught the SuspendSignal in its own try/catch and kept running. The
-		// payload is already recorded server-side, so a normal return would
-		// leave the run in a contradictory suspended-and-returned state. Fail
-		// loudly (exit 1) instead so the author fixes the swallowing catch.
-		"  if (__wasSuspendRequested__()) {\n" +
-		"    console.error(\"[dicode] dicode.suspend() was called but its control-flow signal was caught by task code — do not wrap dicode.suspend() in a try/catch that swallows it\");\n" +
-		"    await __flush__();\n" +
-		"    try { __conn__.close(); } catch {}\n" +
-		"    Deno.exit(1);\n" +
-		"  }\n" +
-		"  await __setReturn__(result);\n" +
-		"} catch (__err__) {\n" +
-		// A dicode.suspend() throws SuspendSignal after the payload is already
-		// delivered over IPC. Treat it as a clean exit (0), not a failure.
-		"  if (__isSuspend__(__err__)) {\n" +
-		"    await __flush__();\n" +
-		"    try { __conn__.close(); } catch {}\n" +
-		"    Deno.exit(0);\n" +
-		"  }\n" +
-		"  throw __err__;\n" +
-		"} finally {\n" +
-		"  await __flush__();\n" +
-		"  try { __conn__.close(); } catch {}\n" +
-		"}\n"
+	runner := "import { __dispatch__ } from \"" + moduleURL(shimPath) + "\";\n" +
+		"await __dispatch__(() => import(\"" + moduleURL(taskPath) + "\"));\n"
 	if _, err := runnerFile.WriteString(runner); err != nil {
 		runnerFile.Close()
 		result.Error = fmt.Errorf("write runner: %w", err)
