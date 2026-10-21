@@ -46,20 +46,15 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 	e.launchDaemon(spec, slot)
 }
 
-// launchDaemon fires the daemon body on a claimed slot and records the run +
-// DaemonRunning state. Daemons that need config rendered before they start are
-// expressed as a kind: PipelineTask whose terminal stage is this daemon Task —
-// the render stages run in the pipeline runner, not here.
+// launchDaemon fires the daemon body on a claimed slot and publishes
+// DaemonRunning.
 func (e *Engine) launchDaemon(spec *task.Spec, slot daemonSlot) {
-	// Record the spawn time before the body can exit: a fast crash would
-	// otherwise run noteExit first and a late noteSpawn would stamp a spawn
-	// time onto a dead run, which crash-loop recovery misreads as sustained.
+	// Must precede the body: a late noteSpawn would stamp a spawn time onto a
+	// dead run, which crash-loop recovery misreads as sustained.
 	e.crashloops.noteSpawn(spec.ID)
 
-	// Attach the run and publish DaemonRunning before firing the body: an
-	// instant crash can drive onDaemonRunFinished before fireAsync returns, and
-	// a late write would leave a stale slot or overwrite its terminal state.
-	// fireAsync honors a non-empty opts.RunID.
+	// Attach and publish DaemonRunning before firing: an instant exit drives
+	// onDaemonRunFinished before fireAsync returns. fireAsync honors opts.RunID.
 	runID := uuid.New().String()
 	if !slot.attach(runID) {
 		// Unregistered while the start was in flight.
@@ -82,18 +77,15 @@ func (e *Engine) launchDaemon(spec *task.Spec, slot daemonSlot) {
 		return
 	}
 
-	// An Unregister between attach and fireAsync evicted the slot before the
-	// run was killable, so its KillRun missed; kill the body here.
-	if !slot.bound(runID) {
+	// Unregister's KillRun misses a run that was not yet registered.
+	if slot.evicted() {
 		e.KillRun(runID)
 	}
 }
 
-// resumeDaemonBody spawns the continuation of a suspended daemon body. The slot
-// stays parked on the suspended run across the gap; it is adopted for the
-// continuation before the body fires so a reconciler reload sees a body in
-// flight. Adoption fails, and the resume coalesces, if the slot is no longer
-// bound to the suspended run (unregistered, or another start took over).
+// resumeDaemonBody spawns the continuation of a suspended daemon body, adopting
+// the slot parked on the suspended run. It fails if the slot is no longer bound
+// to that run.
 func (e *Engine) resumeDaemonBody(spec *task.Spec, suspendedRunID string, opts pkgruntime.RunOptions) (string, error) {
 	runID := uuid.New().String()
 	opts.RunID = runID
@@ -116,16 +108,14 @@ func (e *Engine) resumeDaemonBody(spec *task.Spec, suspendedRunID string, opts p
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		return "", err
 	}
-	if !slot.bound(runID) {
+	if slot.evicted() {
 		e.KillRun(runID)
 	}
 	return newRunID, nil
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
-	// Resolve the run status BEFORE releasing the slot: a suspended body must
-	// keep its slot (see below), so the slot decision depends on
-	// the outcome.
+	// A suspended body keeps its slot, so resolve the status before releasing.
 	run, err := e.registry.GetRun(context.Background(), runID)
 	if err != nil {
 		// Free the slot even on a lookup failure so a dead body can't pin the
@@ -135,16 +125,10 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		return
 	}
 
-	// A suspended run is non-terminal: the subprocess exited to await user
-	// input, not because the daemon crashed or stopped. Keep the slot claimed so
-	// the "one body in flight" invariant holds across the suspended gap — a reconciler reload must not start a second body while
-	// this one is parked — and publish DaemonSuspended instead of leaving a
-	// stale "running". The resume continuation (resumeDaemonBody) adopts the
-	// slot and drives the next transition. Crash-loop tracking and the restart
-	// policy are deliberately untouched. The slot-ownership check guards the
-	// unregister race: if Unregister already freed the slot (and killed the
-	// body), there is nothing to park and no state to publish for a task the
-	// engine no longer tracks.
+	// A suspended run is non-terminal: keep the slot parked so a reload cannot
+	// start a second body, and publish DaemonSuspended. resumeDaemonBody adopts
+	// the slot. Crash-loop tracking and the restart policy are untouched. If
+	// Unregister already evicted the slot there is nothing to park.
 	if run.Status == registry.StatusSuspended {
 		if slot, ok := e.slots.holding(spec.ID, runID); ok && slot.park() {
 			e.setDaemonState(spec.ID, DaemonSuspended)
@@ -152,7 +136,11 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		return
 	}
 
-	e.slots.releaseRun(spec.ID, runID)
+	// A slot that is no longer bound to this run was evicted or taken over; a
+	// stale finish must not touch the newer body's state.
+	if !e.slots.releaseRun(spec.ID, runID) {
+		return
+	}
 	e.daemonMu.Lock()
 	_, stillRegistered := e.daemonSpecs[spec.ID]
 	e.daemonMu.Unlock()

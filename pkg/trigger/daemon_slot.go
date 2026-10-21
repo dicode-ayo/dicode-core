@@ -20,8 +20,9 @@ type slotKey struct {
 }
 
 type slotEntry struct {
-	runID  string
-	parked bool
+	runID   string
+	parked  bool
+	evicted bool // freed by evict, as opposed to released by its own body
 }
 
 // daemonSlot is a handle on one claimed entry. Every operation re-checks under
@@ -94,6 +95,7 @@ func (s *daemonSlots) evict(taskID string) string {
 		return ""
 	}
 	delete(s.m, k)
+	e.evicted = true
 	return e.runID
 }
 
@@ -135,6 +137,17 @@ func (h daemonSlot) bound(runID string) bool {
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	return h.owned() && h.e.runID == runID
+}
+
+// evicted reports whether the handle's entry was freed by evict. A release by
+// the entry's own body does not count.
+func (h daemonSlot) evicted() bool {
+	if h.s == nil {
+		return false
+	}
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	return h.e.evicted
 }
 
 // attach binds the claimed slot to runID. False if the slot was evicted.

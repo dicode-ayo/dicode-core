@@ -150,25 +150,86 @@ func TestDaemonSlot_PipelineKeyspaceIsSeparate(t *testing.T) {
 // launches a body or publishes DaemonRunning.
 func TestUnregister_EvictsInFlightStartClaim(t *testing.T) {
 	eng, spec, exec := daemonRaceEnv(t, "never")
+	eng.setDaemonState(spec.ID, DaemonCrashed)
 
 	slot, ok := eng.slots.claim(spec.ID)
 	if !ok {
 		t.Fatal("claim failed")
 	}
 	eng.Unregister(spec.ID)
-
-	if _, ok := eng.slots.claim(spec.ID); !ok {
-		t.Fatal("Unregister must free the in-flight start's claim")
-	}
-	eng.slots.evict(spec.ID)
+	eng.setDaemonState(spec.ID, DaemonCrashed)
 
 	eng.launchDaemon(spec, slot)
 	time.Sleep(100 * time.Millisecond)
 	if got := exec.runs.Load(); got != 0 {
 		t.Fatalf("executed %d bodies for a start that lost the race to Unregister, want 0", got)
 	}
-	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
-		t.Fatalf("DaemonState = %q, want stopped", got)
+	if got := eng.DaemonState(spec.ID); got != DaemonCrashed {
+		t.Fatalf("DaemonState = %q, want crashed left untouched (no DaemonRunning write)", got)
+	}
+	fresh, ok := eng.slots.claim(spec.ID)
+	if !ok {
+		t.Fatal("slot still occupied after the lost start")
+	}
+	fresh.release("")
+}
+
+// A finish handler of an evicted body must not touch the state of a body
+// started after a re-register.
+func TestOnDaemonRunFinished_StaleFinishAfterReregisterIgnored(t *testing.T) {
+	eng, spec, _ := daemonRaceEnv(t, "never")
+	oldRun := quickFailureRun(t, eng, spec.ID, registry.StatusSuccess)
+	seedSlot(eng, spec.ID, oldRun)
+
+	eng.Unregister(spec.ID)
+	eng.daemonMu.Lock()
+	eng.daemonSpecs[spec.ID] = spec
+	eng.daemonMu.Unlock()
+	seedSlot(eng, spec.ID, "new-run")
+	eng.setDaemonState(spec.ID, DaemonRunning)
+
+	eng.onDaemonRunFinished(spec, oldRun)
+
+	if got := eng.DaemonState(spec.ID); got != DaemonRunning {
+		t.Fatalf("DaemonState = %q, want running: stale finish overwrote the new body's state", got)
+	}
+	if got := eng.slots.runID(spec.ID); got != "new-run" {
+		t.Fatalf("slot = %q, want new-run", got)
+	}
+}
+
+// A body that exits before the launch returns released its own slot; that is
+// not an eviction.
+func TestLaunchDaemon_InstantExitIsNotEviction(t *testing.T) {
+	eng, spec, exec := daemonRaceEnv(t, "never")
+	slot, ok := eng.slots.claim(spec.ID)
+	if !ok {
+		t.Fatal("claim failed")
+	}
+	eng.launchDaemon(spec, slot)
+	waitUntil(t, 5*time.Second, func() bool { return exec.runs.Load() == 1 }, "body never ran")
+	waitUntil(t, 5*time.Second, func() bool { return eng.slots.runID(spec.ID) == "" }, "slot not released")
+	if slot.evicted() {
+		t.Fatal("a slot released by its own body reported as evicted")
+	}
+}
+
+func TestDaemonSlot_EvictedOnlyByEvict(t *testing.T) {
+	s := newDaemonSlots()
+	h, _ := s.claim("t")
+	h.attach("r1")
+	if h.evicted() {
+		t.Fatal("live slot reported evicted")
+	}
+	h.release("r1")
+	if h.evicted() {
+		t.Fatal("released slot reported evicted")
+	}
+	h2, _ := s.claim("t")
+	h2.attach("r2")
+	s.evict("t")
+	if !h2.evicted() {
+		t.Fatal("evicted slot not reported evicted")
 	}
 }
 

@@ -249,6 +249,7 @@ func finishedRunEnv(t *testing.T, restartPolicy string, status string) (*Engine,
 	// only appears because the engine set DaemonRunning before the body
 	// crashed.
 	eng.setDaemonState(spec.ID, DaemonRunning)
+	seedSlot(eng, spec.ID, runID)
 	return eng, spec, runID
 }
 

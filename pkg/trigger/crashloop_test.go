@@ -171,7 +171,8 @@ func crashloopEnv(t *testing.T) (*Engine, *task.Spec, db.DB) {
 
 // quickFailureRun seeds a run row that started recently and finished with the
 // given status — i.e. a quick exit (< crashloopSustainWindow) as seen by
-// onDaemonRunFinished's elapsed computation.
+// onDaemonRunFinished's elapsed computation — and binds the daemon slot to it,
+// as a live body's slot would be.
 func quickFailureRun(t *testing.T, eng *Engine, taskID, status string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -182,6 +183,7 @@ func quickFailureRun(t *testing.T, eng *Engine, taskID, status string) string {
 	if err := eng.registry.FinishRun(ctx, runID, status); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
+	seedSlot(eng, taskID, runID)
 	return runID
 }
 

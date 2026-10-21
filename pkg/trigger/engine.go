@@ -698,7 +698,7 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 	e.daemonMu.Unlock()
 	runID := e.slots.evict(id)
 
-	// Unregistration wipes crash-loop tracking (#458): a removed (or
+	// Unregistration wipes crash-loop tracking: a removed (or
 	// reloaded-with-new-content) task starts with a fresh failure counter,
 	// mirroring how daemonStates entries don't outlive the registration.
 	e.crashloops.reset(id)

@@ -53,10 +53,8 @@ func suspendDaemonEnv(t *testing.T, restart string) (*Engine, *registry.Registry
 
 func slotRunID(eng *Engine, id string) string { return eng.slots.runID(id) }
 
-// TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts checks that a
-// restart:always standalone daemon that suspended and timed out must have its
-// slot released and restart per policy — not stay pinned to the
-// cancelled run.
+// A restart:always daemon whose suspension timed out releases its slot and
+// restarts, rather than staying pinned to the cancelled run.
 func TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts(t *testing.T) {
 	eng, reg, spec, suspendedRunID := suspendDaemonEnv(t, "always")
 
@@ -112,10 +110,7 @@ func TestSweep_SuspendedDaemonTimeout_RestartNever_NoRestart(t *testing.T) {
 	}
 }
 
-// TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered pins the
-// slot-match guard: if a resume continuation has already adopted the slot
-// (the slot points at a different run than the swept one), the sweep's slot
-// handling must leave it alone rather than delete the continuation's slot.
+// The sweep leaves a slot that a resume continuation already adopted alone.
 func TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered(t *testing.T) {
 	eng, reg, spec, suspendedRunID := suspendDaemonEnv(t, "always")
 
@@ -137,11 +132,8 @@ func TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered(t *testing.T) 
 	}
 }
 
-// TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonSlot confirms a
-// pipeline-stage daemon run (TriggerPipelineStage) that suspends and is swept is
-// NOT treated as a standalone daemon: the standalone daemon's parked slot for
-// the SAME task must be left untouched, since a pipeline stage is owned by the
-// PipelineRunner, not the standalone-daemon machinery.
+// A swept pipeline-stage daemon run is owned by the PipelineRunner and must not
+// touch the standalone daemon slot of the same task.
 func TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonSlot(t *testing.T) {
 	exec := &suspendExec{firstDeadline: time.Now().Add(-time.Hour).UnixMilli()}
 	eng, reg := newSuspendEnv(t, exec)
