@@ -92,7 +92,7 @@ func (e *Engine) suspendRun(spec *task.Spec, opts *pkgruntime.RunOptions, result
 			return false, fmt.Errorf("marshal resume params: %w", err)
 		}
 	}
-	// #570: when a ResumeStateStore is wired and result.ResumeState exceeds
+	// When a ResumeStateStore is wired and result.ResumeState exceeds
 	// resumeStateThresholdBytes, the state is durably written to the storage
 	// task FIRST and only its {store,key} handle is persisted on the runs
 	// row — never the reverse order. If the blob write fails, suspendRun
@@ -332,7 +332,7 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		chainDepth = carry.ChainDepth
 	}
 
-	// #570: rehydrate an offloaded resume state BEFORE consuming the token —
+	// Rehydrate an offloaded resume state BEFORE consuming the token —
 	// same rationale as the fire-guard probe above. If the blob is missing or
 	// the store isn't wired, resume must fail loudly rather than hand the
 	// resumed task an empty/wrong state, and the token must stay usable so a
@@ -369,8 +369,8 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		ChainDepth:  chainDepth,
 	}
 
-	// A daemon body's continuation must re-enter the #470 slot accounting: it
-	// adopts the slot the suspended body kept reserved so a reconciler reload
+	// A daemon body's continuation must re-enter the daemon slot accounting: it
+	// adopts the slot the suspended body kept claimed so a reconciler reload
 	// can't start a second body alongside the continuation, and its
 	// onDaemonRunFinished frees the slot correctly. Plain (non-daemon) tasks
 	// have no slot to manage and fire directly.
@@ -389,7 +389,7 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		zap.String("continuation_run", newRunID),
 	)
 
-	// #570: best-effort eager GC. The offloaded blob (if any) was single-use —
+	// Best-effort eager GC. The offloaded blob (if any) was single-use —
 	// this specific row's token is now spent and nothing will ever fetch it
 	// again — so free it immediately rather than waiting for the TTL sweep.
 	// Failure here is non-fatal: the resume already succeeded and the

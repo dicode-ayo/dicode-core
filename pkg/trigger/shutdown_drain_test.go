@@ -1,6 +1,6 @@
 package trigger
 
-// Shutdown-drain regression tests (issue #520).
+// Shutdown-drain regression tests.
 //
 // On shutdown the engine killed in-flight daemon runs but returned before their
 // per-run goroutines finished FinishRun/status writes. The daemon then closed

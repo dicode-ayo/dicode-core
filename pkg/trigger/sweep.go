@@ -36,7 +36,7 @@ func (e *Engine) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]st
 		e.emitRunFinished(run.TaskID, run.ID, registry.StatusCancelled, string(run.TriggerSource), 0)
 		e.FireChain(context.Background(), run.TaskID, run.ID, registry.StatusCancelled, nil, nil)
 
-		// A standalone daemon body that suspended kept its #470 run slot parked
+		// A standalone daemon body that suspended kept its slot parked
 		// (DaemonSuspended) for a resume that never came; the sweep just made the
 		// run terminal but its goroutine is long gone, so onDaemonRunFinished
 		// won't release the slot or apply the restart policy. Route it back

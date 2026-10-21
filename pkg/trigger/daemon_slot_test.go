@@ -185,3 +185,57 @@ func TestUnregister_DoesNotClobberSupersedingClaim(t *testing.T) {
 		t.Fatalf("slot = %q, want superseding run left untouched", got)
 	}
 }
+
+// TestDaemonSlots_EmptyRunIDNeverMatchesFreshClaim: a fresh claim has runID "",
+// which holding/releaseRun/adopt must not treat as a match.
+func TestDaemonSlots_EmptyRunIDNeverMatchesFreshClaim(t *testing.T) {
+	s := newDaemonSlots()
+	h, ok := s.claim("t")
+	if !ok {
+		t.Fatal("claim failed")
+	}
+	if _, ok := s.holding("t", ""); ok {
+		t.Fatal("holding(\"\") matched a fresh claim")
+	}
+	if s.releaseRun("t", "") {
+		t.Fatal("releaseRun(\"\") freed a fresh claim")
+	}
+	if _, ok := s.claim("t"); ok {
+		t.Fatal("fresh claim was released by an empty run ID")
+	}
+	if err := h.adopt("r1"); err == nil {
+		t.Fatal("adopt from an unbound claim succeeded")
+	}
+	h.attach("r1")
+	hold, ok := s.holding("t", "r1")
+	if !ok {
+		t.Fatal("holding(r1) failed")
+	}
+	if err := hold.adopt(""); err == nil {
+		t.Fatal("adopt(\"\") succeeded")
+	}
+	if got := s.runID("t"); got != "r1" {
+		t.Fatalf("slot run = %q, want r1", got)
+	}
+}
+
+// TestDaemonSlot_ZeroValueHandleIsInert: the handle returned by a failed claim
+// or holding must be safe to use.
+func TestDaemonSlot_ZeroValueHandleIsInert(t *testing.T) {
+	var h daemonSlot
+	if h.attach("r") {
+		t.Error("attach on zero handle succeeded")
+	}
+	if h.park() {
+		t.Error("park on zero handle succeeded")
+	}
+	if err := h.adopt("r"); err == nil {
+		t.Error("adopt on zero handle succeeded")
+	}
+	if h.release("r") || h.release("") {
+		t.Error("release on zero handle succeeded")
+	}
+	if h.bound("r") {
+		t.Error("bound on zero handle is true")
+	}
+}

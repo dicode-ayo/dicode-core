@@ -1,18 +1,11 @@
 package trigger
 
-// Regression tests for issue #502: a standalone daemon that suspends via
-// dicode.suspend() and is never resumed used to wedge permanently once its
-// resume deadline lapsed. onDaemonRunFinished parked the #470 run slot and set
-// DaemonSuspended for a resume that never came; the body goroutine had already
-// exited, so when the #509 sweep flipped the run suspended→cancelled it left
-// the slot pinned to a now-cancelled run. registerDaemon then read
-// alreadyRunning=true and a reconciler reload refused to restart — the restart
-// policy bypassed until a full process restart cleared the fresh map.
-//
-// The fix routes a swept standalone-daemon suspension back through the daemon
-// lifecycle (SweepExpiredSuspensions → onDaemonSuspensionSwept): release the
-// slot under the same slot-match guard, clear DaemonSuspended, and let the
-// restart policy decide.
+// Tests for sweeping a standalone daemon's expired suspension. The body
+// goroutine has already exited, so the sweep (suspended→cancelled) must route
+// the daemon back through its lifecycle (SweepExpiredSuspensions →
+// onDaemonSuspensionSwept): release the slot under the slot-match guard, clear
+// DaemonSuspended, and let the restart policy decide. Otherwise the slot stays
+// pinned to the cancelled run and the daemon never restarts.
 
 import (
 	"context"
@@ -60,9 +53,9 @@ func suspendDaemonEnv(t *testing.T, restart string) (*Engine, *registry.Registry
 
 func slotRunID(eng *Engine, id string) string { return eng.slots.runID(id) }
 
-// TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts is the #502 wedge
-// regression: a restart:always standalone daemon that suspended and timed out
-// must have its slot released and restart per policy — not stay pinned to the
+// TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts checks that a
+// restart:always standalone daemon that suspended and timed out must have its
+// slot released and restart per policy — not stay pinned to the
 // cancelled run.
 func TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts(t *testing.T) {
 	eng, reg, spec, suspendedRunID := suspendDaemonEnv(t, "always")

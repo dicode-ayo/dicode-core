@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Daemon crash-loop exponential backoff constants (Fix 4, #387).
+// Daemon crash-loop exponential backoff constants.
 // A daemon that exits within daemonStableThreshold is considered crashed;
 // one that outlasts it is considered stable and resets the backoff.
 const (
@@ -79,6 +79,13 @@ func (e *Engine) launchDaemon(spec *task.Spec, slot daemonSlot) {
 			zap.String("task", spec.ID),
 			zap.Error(err),
 		)
+		return
+	}
+
+	// An Unregister between attach and fireAsync evicted the slot before the
+	// run was killable, so its KillRun missed; kill the body here.
+	if !slot.bound(runID) {
+		e.KillRun(runID)
 	}
 }
 
@@ -109,12 +116,15 @@ func (e *Engine) resumeDaemonBody(spec *task.Spec, suspendedRunID string, opts p
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		return "", err
 	}
+	if !slot.bound(runID) {
+		e.KillRun(runID)
+	}
 	return newRunID, nil
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	// Resolve the run status BEFORE releasing the slot: a suspended body must
-	// keep its #470 reservation (see below), so the slot decision depends on
+	// keep its slot (see below), so the slot decision depends on
 	// the outcome.
 	run, err := e.registry.GetRun(context.Background(), runID)
 	if err != nil {
@@ -125,10 +135,9 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		return
 	}
 
-	// A suspended run is non-terminal (#95): the subprocess exited to await
-	// user input, not because the daemon crashed or stopped. Keep the run slot
-	// reserved so the #470 "one body in flight" invariant holds across the
-	// suspended gap — a reconciler reload must not start a second body while
+	// A suspended run is non-terminal: the subprocess exited to await user
+	// input, not because the daemon crashed or stopped. Keep the slot claimed so
+	// the "one body in flight" invariant holds across the suspended gap — a reconciler reload must not start a second body while
 	// this one is parked — and publish DaemonSuspended instead of leaving a
 	// stale "running". The resume continuation (resumeDaemonBody) adopts the
 	// slot and drives the next transition. Crash-loop tracking and the restart
@@ -165,12 +174,11 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		// Operator-initiated cancellation (e.g. per-run kill button).
 		// The daemon was running; treat the deliberate stop as a clean
 		// transition to DaemonStopped so the WebUI doesn't pin a stale
-		// "Running" pill on a daemon whose body has been killed (issue
-		// #332). This sits ahead of the restart-policy decision because
+		// "Running" pill on a daemon whose body has been killed. This sits ahead of the restart-policy decision because
 		// cancellation short-circuits it entirely — a killed daemon
 		// stays stopped regardless of restart=always/on-failure/never.
 		//
-		// Cancellation also clears crash-loop tracking (#458): a kill is
+		// Cancellation also clears crash-loop tracking: a kill is
 		// deliberate operator intent, not another crashed start, and the
 		// stopped daemon must not keep reporting "crashlooping".
 		e.crashloops.reset(spec.ID)
@@ -183,7 +191,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 
 // restartDaemonAfterExit applies crash-loop accounting and the restart policy
 // for a daemon body that has left the running state with a non-cancelled exit,
-// re-launching it (through the shared restart gate, after backoff) when the
+// re-launching it (after backoff, through the daemon slot) when the
 // policy calls for it. The caller must have already released the run slot and
 // confirmed the task is still registered and the engine is not shutting down.
 //
@@ -192,7 +200,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 // daemon (out-of-band, where the run goroutine is already gone) — so both take
 // the identical restart decision.
 func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed time.Duration) {
-	// Crash-loop accounting (#458): a quick non-success exit bumps the
+	// Crash-loop accounting: a quick non-success exit bumps the
 	// consecutive-failure counter; a clean or sustained exit resets it.
 	// Tracked for every non-cancelled exit regardless of restart policy so
 	// the rule stays a single invariant; in practice only auto-restarting
@@ -211,7 +219,7 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 	}
 	// noRestartTransition records the terminal state when the engine
 	// will NOT spawn an automatic restart for this exit. Status-aware
-	// split (issue #325):
+	// split:
 	//   - success exit, no restart  → DaemonStopped (clean shutdown)
 	//   - non-success exit, no restart → DaemonCrashed (operator
 	//     attention required)
@@ -320,7 +328,7 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 
 // onDaemonSuspensionSwept routes a standalone daemon body whose suspension
 // timed out — swept suspended→cancelled by SweepExpiredSuspensions — back
-// through the daemon lifecycle. onDaemonRunFinished parked the #470 run slot on
+// through the daemon lifecycle. onDaemonRunFinished parked the slot on
 // the suspended run and published DaemonSuspended, expecting a resume to adopt
 // the slot; but the body goroutine exited cleanly on suspend, so
 // onDaemonRunFinished will never run again for this run. Without this the slot

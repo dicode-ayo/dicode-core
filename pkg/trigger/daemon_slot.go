@@ -61,7 +61,11 @@ func (s *daemonSlots) claimPipeline(pipelineID string) (daemonSlot, bool) {
 }
 
 // holding returns a handle on taskID's slot if it is currently bound to runID.
+// An empty runID never matches: a fresh claim has no run yet.
 func (s *daemonSlots) holding(taskID, runID string) (daemonSlot, bool) {
+	if runID == "" {
+		return daemonSlot{}, false
+	}
 	k := slotKey{id: taskID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,7 +76,8 @@ func (s *daemonSlots) holding(taskID, runID string) (daemonSlot, bool) {
 	return daemonSlot{s: s, k: k, e: e, run: runID}, true
 }
 
-// releaseRun frees taskID's slot if it is bound to runID.
+// releaseRun frees taskID's slot if it is bound to runID; an empty runID never
+// matches.
 func (s *daemonSlots) releaseRun(taskID, runID string) bool {
 	h, ok := s.holding(taskID, runID)
 	return ok && h.release(runID)
@@ -115,12 +120,28 @@ func (s *daemonSlots) runs() map[string]string {
 	return out
 }
 
+// owned reports whether the handle's entry is still the one in the map. The
+// caller holds h.s.mu.
 func (h daemonSlot) owned() bool {
-	return h.s != nil && h.s.m[h.k] == h.e
+	return h.s.m[h.k] == h.e
+}
+
+// bound reports whether the slot is still owned by the handle and bound to
+// runID.
+func (h daemonSlot) bound(runID string) bool {
+	if h.s == nil {
+		return false
+	}
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	return h.owned() && h.e.runID == runID
 }
 
 // attach binds the claimed slot to runID. False if the slot was evicted.
 func (h daemonSlot) attach(runID string) bool {
+	if h.s == nil {
+		return false
+	}
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	if !h.owned() {
@@ -134,6 +155,9 @@ func (h daemonSlot) attach(runID string) bool {
 // park marks the slot as held by a suspended body awaiting resume. False if
 // the slot is no longer bound to the run the handle was obtained for.
 func (h daemonSlot) park() bool {
+	if h.s == nil {
+		return false
+	}
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	if !h.owned() || h.e.runID != h.run {
@@ -146,8 +170,12 @@ func (h daemonSlot) park() bool {
 var errSlotSuperseded = errors.New("slot no longer bound to the expected run")
 
 // adopt rebinds the slot from the run the handle was obtained for to
-// newRunID, failing if the slot was evicted or taken over meanwhile.
+// newRunID, failing if the slot was evicted or taken over meanwhile, or if
+// either run ID is empty.
 func (h daemonSlot) adopt(newRunID string) error {
+	if h.s == nil || h.run == "" || newRunID == "" {
+		return errSlotSuperseded
+	}
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	if !h.owned() || h.e.runID != h.run {
@@ -161,6 +189,9 @@ func (h daemonSlot) adopt(newRunID string) error {
 // release frees the slot if it is still bound to runID; a no-op (false) when
 // it was evicted or rebound.
 func (h daemonSlot) release(runID string) bool {
+	if h.s == nil {
+		return false
+	}
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	if !h.owned() || h.e.runID != runID {

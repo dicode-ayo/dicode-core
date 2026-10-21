@@ -37,7 +37,7 @@ const (
 	// i.e. the fireAsync call to launch the body returned an error. Distinct
 	// from DaemonStopped so operators can tell "daemon body broke" apart from
 	// "operator deliberately stopped it / never started it". Reachable only
-	// from startDaemon's launch-error branch (issue #318).
+	// from startDaemon's launch-error branch.
 	//
 	// The const name and wire value "failed_after_preflight" are kept as-is:
 	// they are a live API/WebUI enum value, so renaming would be a breaking
@@ -62,8 +62,8 @@ const (
 	DaemonCrashed DaemonState = "crashed"
 
 	// DaemonSuspended indicates the daemon body exited to await user input
-	// via dicode.suspend() (#95) — non-terminal, distinct from a crash or a
-	// stop. The daemon run slot stays reserved while suspended so the #470
+	// via dicode.suspend() — non-terminal, distinct from a crash or a
+	// stop. The daemon slot stays claimed while suspended so the
 	// "one body in flight" invariant holds across the suspended gap (a
 	// reconciler reload must not start a second body), and the resume
 	// continuation drives the next transition. Reported instead of the stale
@@ -72,7 +72,7 @@ const (
 
 	// DaemonCrashLooping indicates the daemon's body has failed
 	// crashloopThreshold consecutive starts, each dying within
-	// crashloopSustainWindow (issue #458). Unlike DaemonCrashed the engine IS
+	// crashloopSustainWindow. Unlike DaemonCrashed the engine IS
 	// still restarting the body (restart=always / on-failure), so a
 	// point-in-time snapshot would intermittently land in the brief
 	// spawn-before-crash window and report a hard-failing task as "running".
@@ -122,7 +122,7 @@ func (d *daemonStateMap) set(taskID string, s DaemonState) {
 // DaemonState returns the current lifecycle phase of the daemon with the
 // given task ID. Returns DaemonStopped for unknown / never-started tasks.
 //
-// Crash-loop override (issue #458): while the crash-loop tracker is tripped
+// Crash-loop override: while the crash-loop tracker is tripped
 // for this task, the reported state is DaemonCrashLooping even if the
 // underlying map says DaemonRunning — a crash-looping daemon's respawns set
 // DaemonRunning for the brief spawn-before-crash window, and surfacing that
