@@ -301,7 +301,7 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 	// The backoff sleep is long enough for an Unregister to have landed; it
 	// must not resurrect the daemon.
 	e.daemonMu.Lock()
-	_, stillRegistered := e.daemonSpecs[spec.ID]
+	cur, stillRegistered := e.daemonSpecs[spec.ID]
 	e.daemonMu.Unlock()
 	if !stillRegistered {
 		slot.release("")
@@ -311,7 +311,7 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 	}
 
 	e.log.Info("restarting daemon task", zap.String("task", spec.ID))
-	e.launchDaemon(spec, slot)
+	e.launchDaemon(cur, slot)
 }
 
 // onDaemonSuspensionSwept routes a standalone daemon body whose suspension
