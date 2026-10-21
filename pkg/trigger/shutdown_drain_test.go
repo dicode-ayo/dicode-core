@@ -101,7 +101,7 @@ func drainDaemonSpec() *task.Spec {
 }
 
 // runningDaemonRunID waits until the daemon body has begun and returns its run
-// ID from the engine's daemonRuns slot.
+// ID from the engine's daemon slot.
 func runningDaemonRunID(t *testing.T, eng *Engine, exec *drainExec, taskID string) string {
 	t.Helper()
 	select {
@@ -111,9 +111,7 @@ func runningDaemonRunID(t *testing.T, eng *Engine, exec *drainExec, taskID strin
 	}
 	var runID string
 	waitUntil(t, 2*time.Second, func() bool {
-		eng.daemonMu.Lock()
-		runID = eng.daemonRuns[taskID]
-		eng.daemonMu.Unlock()
+		runID = eng.slots.runID(taskID)
 		return runID != ""
 	}, "daemon run slot never populated")
 	return runID

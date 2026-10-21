@@ -52,19 +52,13 @@ func suspendDaemonEnv(t *testing.T, restart string) (*Engine, *registry.Registry
 
 	var suspendedRunID string
 	waitUntil(t, 5*time.Second, func() bool {
-		eng.daemonMu.Lock()
-		suspendedRunID = eng.daemonRuns[spec.ID]
-		eng.daemonMu.Unlock()
+		suspendedRunID = eng.slots.runID(spec.ID)
 		return suspendedRunID != "" && eng.DaemonState(spec.ID) == DaemonSuspended
 	}, "daemon never parked in DaemonSuspended with a reserved slot")
 	return eng, reg, spec, suspendedRunID
 }
 
-func daemonSlot(eng *Engine, id string) string {
-	eng.daemonMu.Lock()
-	defer eng.daemonMu.Unlock()
-	return eng.daemonRuns[id]
-}
+func slotRunID(eng *Engine, id string) string { return eng.slots.runID(id) }
 
 // TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts is the #502 wedge
 // regression: a restart:always standalone daemon that suspended and timed out
@@ -84,7 +78,7 @@ func TestSweep_SuspendedDaemonTimeout_ReleasesSlotAndRestarts(t *testing.T) {
 	// The restart fires a fresh body (which suspends again), so the slot must end
 	// up parked on a DIFFERENT run than the swept, now-cancelled one.
 	waitUntil(t, 5*time.Second, func() bool {
-		slot := daemonSlot(eng, spec.ID)
+		slot := slotRunID(eng, spec.ID)
 		return slot != "" && slot != suspendedRunID
 	}, "daemon slot never re-parked on a restarted body — it wedged on the cancelled run")
 
@@ -111,7 +105,7 @@ func TestSweep_SuspendedDaemonTimeout_RestartNever_NoRestart(t *testing.T) {
 	}
 
 	waitUntil(t, 5*time.Second, func() bool {
-		return daemonSlot(eng, spec.ID) == "" && eng.DaemonState(spec.ID) == DaemonCrashed
+		return slotRunID(eng, spec.ID) == "" && eng.DaemonState(spec.ID) == DaemonCrashed
 	}, "restart:never daemon did not release its slot / reach DaemonCrashed")
 
 	// No restart: only the original suspended body ever ran.
@@ -127,7 +121,7 @@ func TestSweep_SuspendedDaemonTimeout_RestartNever_NoRestart(t *testing.T) {
 
 // TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered pins the
 // slot-match guard: if a resume continuation has already adopted the slot
-// (daemonRuns points at a different run than the swept one), the sweep's slot
+// (the slot points at a different run than the swept one), the sweep's slot
 // handling must leave it alone rather than delete the continuation's slot.
 func TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered(t *testing.T) {
 	eng, reg, spec, suspendedRunID := suspendDaemonEnv(t, "always")
@@ -140,24 +134,22 @@ func TestOnDaemonSuspensionSwept_ConcurrentResumeSlotNotClobbered(t *testing.T) 
 	// Model a resume continuation that adopted the slot before the sweep's
 	// out-of-band slot handling ran.
 	const continuationRunID = "continuation-run"
-	eng.daemonMu.Lock()
-	eng.daemonRuns[spec.ID] = continuationRunID
-	eng.daemonMu.Unlock()
+	seedSlot(eng, spec.ID, continuationRunID)
 
 	// Drive the sweep's daemon handler directly with the swept (old) run.
 	eng.onDaemonSuspensionSwept(spec, run)
 
-	if slot := daemonSlot(eng, spec.ID); slot != continuationRunID {
+	if slot := slotRunID(eng, spec.ID); slot != continuationRunID {
 		t.Fatalf("daemon slot = %q, want the continuation's %q left untouched", slot, continuationRunID)
 	}
 }
 
-// TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonRuns confirms a
+// TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonSlot confirms a
 // pipeline-stage daemon run (TriggerPipelineStage) that suspends and is swept is
 // NOT treated as a standalone daemon: the standalone daemon's parked slot for
 // the SAME task must be left untouched, since a pipeline stage is owned by the
 // PipelineRunner, not the standalone-daemon machinery.
-func TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonRuns(t *testing.T) {
+func TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonSlot(t *testing.T) {
 	exec := &suspendExec{firstDeadline: time.Now().Add(-time.Hour).UnixMilli()}
 	eng, reg := newSuspendEnv(t, exec)
 
@@ -175,8 +167,8 @@ func TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonRuns(t *testing.T)
 	const standaloneRunID = "standalone-body"
 	eng.daemonMu.Lock()
 	eng.daemonSpecs[spec.ID] = spec
-	eng.daemonRuns[spec.ID] = standaloneRunID
 	eng.daemonMu.Unlock()
+	seedSlot(eng, spec.ID, standaloneRunID)
 
 	// Fire the SAME task as a pipeline stage; it suspends with a past deadline.
 	// The run.go finish gate skips onDaemonRunFinished for pipeline-stage runs,
@@ -198,7 +190,7 @@ func TestSweep_SuspendedPipelineStageDaemon_DoesNotTouchDaemonRuns(t *testing.T)
 	// The standalone daemon's slot must be exactly as it was — the pipeline-stage
 	// sweep must not release or restart it.
 	time.Sleep(50 * time.Millisecond)
-	if slot := daemonSlot(eng, spec.ID); slot != standaloneRunID {
+	if slot := slotRunID(eng, spec.ID); slot != standaloneRunID {
 		t.Fatalf("standalone daemon slot = %q, want %q untouched by pipeline-stage sweep", slot, standaloneRunID)
 	}
 }

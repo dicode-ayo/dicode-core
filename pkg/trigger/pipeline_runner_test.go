@@ -708,9 +708,7 @@ func TestPipelineStageDaemonDoesNotFlipStandaloneDaemonState(t *testing.T) {
 
 	// Record the standalone daemon's own run ID so we can tell it apart from the
 	// pipeline-stage run of the same task.
-	env.engine.daemonMu.Lock()
-	standaloneRunID := env.engine.daemonRuns["shared"]
-	env.engine.daemonMu.Unlock()
+	standaloneRunID := env.engine.slots.runID("shared")
 	if standaloneRunID == "" {
 		t.Fatalf("no standalone daemon run recorded for 'shared'")
 	}
@@ -764,10 +762,8 @@ func TestPipelineStageDaemonDoesNotFlipStandaloneDaemonState(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// And its standalone run row must be untouched (still the same run, not
-	// removed from daemonRuns).
-	env.engine.daemonMu.Lock()
-	stillTracked := env.engine.daemonRuns["shared"]
-	env.engine.daemonMu.Unlock()
+	// released from the daemon slot).
+	stillTracked := env.engine.slots.runID("shared")
 	if stillTracked != standaloneRunID {
 		t.Fatalf("standalone daemon run tracking changed: %q != %q", stillTracked, standaloneRunID)
 	}

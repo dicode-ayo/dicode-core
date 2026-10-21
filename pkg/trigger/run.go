@@ -356,7 +356,7 @@ func (e *Engine) runTask(runCtx context.Context, h *runHandle, spec *task.Spec, 
 	// standalone daemons. A pipeline's terminal stage is dispatched as a
 	// daemon-kind run too (source=pipeline-stage), but it is owned by the
 	// PipelineRunner, not the standalone-daemon machinery: its lifetime,
-	// restarts, and DaemonState are not tracked in daemonRuns/daemonStates.
+	// restarts, and DaemonState are not tracked in the daemon slots/daemonStates.
 	// Routing a pipeline-stage daemon run through onDaemonRunFinished would,
 	// when the stage task ALSO happens to be a registered standalone daemon,
 	// flip that standalone daemon's global DaemonState and possibly schedule an

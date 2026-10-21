@@ -686,7 +686,7 @@ func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 
 // registerLivePipeline records a runner whose terminal daemon stage is up, so
 // handlePipelineStageRerun can find it. Keyed by pipeline ID; the latest fire
-// wins (restart coalescing via restartGates ensures at most one in-flight
+// wins (restart coalescing via the pipeline slot ensures at most one in-flight
 // re-fire per pipeline, and a pipeline only has one live daemon-terminal fire
 // at a time).
 func (e *Engine) registerLivePipeline(r *PipelineRunner) {
@@ -705,14 +705,6 @@ func (e *Engine) unregisterLivePipeline(pipelineID string, r *PipelineRunner) {
 		delete(e.livePipelines, pipelineID)
 	}
 	e.livePipelineMu.Unlock()
-}
-
-// pipelineRestartGateKey namespaces a pipeline ID for use as a restartGates
-// key. restartGates is shared with the standalone-daemon restart path, which
-// keys it by daemon task ID; the prefix prevents a pipeline whose ID equals a
-// daemon task ID from cross-coalescing with that daemon's gate (#344).
-func pipelineRestartGateKey(pipelineID string) string {
-	return "pipeline:" + pipelineID
 }
 
 // pipelineContainsStage reports whether the pipeline lists taskID as a stage.
@@ -734,7 +726,7 @@ func pipelineContainsStage(p *task.PipelineTask, taskID string) bool {
 // ${input} (seeded from the re-fired stage's output) and then restarts the
 // terminal daemon so it picks up the freshly-rendered descendants.
 //
-// Coalescing + shutdown/unregister handling: restartGates.tryAcquire (keyed by
+// Coalescing + shutdown/unregister handling: claimPipeline (keyed by
 // pipeline ID) → defer release → bail on shutdown / not-live → descendant loop
 // with per-iteration re-checks → kill+wait the old daemon run → re-fire the
 // terminal daemon stage.
@@ -761,22 +753,18 @@ func (e *Engine) handlePipelineStageRerun(completedTaskID string, output interfa
 }
 
 // propagatePipelineStageRerun replays the descendants of a re-fired pipeline
-// stage and restarts the terminal daemon: coalesce via restartGates, bail on
+// stage and restarts the terminal daemon: coalesce via the pipeline slot, bail on
 // shutdown / the pipeline no longer being live, replay descendants with fresh
 // ${input}, then kill+wait the old daemon run and re-fire the terminal stage.
 func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID string, reranReturn interface{}) {
 	pipelineID := runner.spec.ID
-	// restartGates is shared with the daemon restart path, which keys it by
-	// daemon TASK ID. Namespace the pipeline key so a pipeline whose ID happens
-	// to equal a daemon task ID can't cross-coalesce with that daemon's restart
-	// gate (#344, LOW).
-	gateKey := pipelineRestartGateKey(pipelineID)
-	if !e.restartGates.tryAcquire(gateKey) {
+	slot, ok := e.slots.claimPipeline(pipelineID)
+	if !ok {
 		// A propagation/restart is already queued or in flight; coalesce.
 		e.log.Debug("pipeline stage re-fire coalesced", zap.String("pipeline", pipelineID))
 		return
 	}
-	go e.runPipelineStageRerun(runner, reranTaskID, reranReturn, pipelineID, gateKey)
+	go e.runPipelineStageRerun(runner, reranTaskID, reranReturn, pipelineID, slot)
 }
 
 // pipelineReplayAborted reports whether a mid-stage replay must stop: either
@@ -803,9 +791,9 @@ func (e *Engine) pipelineReplayAborted(pipelineID string, r *PipelineRunner, wha
 // replay the non-terminal descendants of the re-fired stage with fresh
 // ${input}, then kill+wait the old terminal daemon run and re-fire the
 // terminal stage via the restart handshake. The caller has already acquired
-// the restartGates slot for gateKey; it is released when this returns.
-func (e *Engine) runPipelineStageRerun(runner *PipelineRunner, reranTaskID string, reranReturn interface{}, pipelineID, gateKey string) {
-	defer e.restartGates.release(gateKey)
+// the pipeline slot; it is released when this returns.
+func (e *Engine) runPipelineStageRerun(runner *PipelineRunner, reranTaskID string, reranReturn interface{}, pipelineID string, slot daemonSlot) {
+	defer slot.release("")
 
 	// Find the re-fired stage's index in the pipeline's stages.
 	startIdx := -1
@@ -985,7 +973,7 @@ func (e *Engine) runPipelineStageRerun(runner *PipelineRunner, reranTaskID strin
 
 // pipelineStillLive reports whether the given runner is still the live
 // registration for pipelineID AND has not yet finished. Used as the
-// propagation-loop guard (analogue of daemonRegistered for the daemon path).
+// propagation-loop guard.
 func (e *Engine) pipelineStillLive(pipelineID string, r *PipelineRunner) bool {
 	e.livePipelineMu.Lock()
 	cur := e.livePipelines[pipelineID]

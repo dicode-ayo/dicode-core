@@ -468,8 +468,8 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 
 	eng.daemonMu.Lock()
 	eng.daemonSpecs[spec.ID] = spec
-	eng.daemonRuns[spec.ID] = runID
 	eng.daemonMu.Unlock()
+	seedSlot(eng, spec.ID, runID)
 	eng.setDaemonState(spec.ID, DaemonRunning)
 
 	eng.onDaemonRunFinished(spec, runID)
@@ -482,9 +482,8 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	}
 	// The slot stays reserved: a reconciler reload's registerDaemon must see the
 	// daemon as still in flight, and a resume must find the slot parked here.
-	eng.daemonMu.Lock()
-	slot, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
+	ok := slot != ""
 	if !ok || slot != runID {
 		t.Errorf("daemon slot = %q (present=%v), want it kept at %q across the suspended gap", slot, ok, runID)
 	}
@@ -598,9 +597,8 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 		return eng.DaemonState(spec.ID) == DaemonSuspended
 	}, "daemon never parked in DaemonSuspended")
 
-	eng.daemonMu.Lock()
-	firstRun, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	firstRun := eng.slots.runID(spec.ID)
+	ok := firstRun != ""
 	if !ok {
 		t.Fatal("suspended daemon dropped its run slot")
 	}
@@ -616,9 +614,8 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 	if err := eng.Register(spec); err != nil {
 		t.Fatalf("reload eng.Register: %v", err)
 	}
-	eng.daemonMu.Lock()
-	freshRun, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	freshRun := eng.slots.runID(spec.ID)
+	ok = freshRun != ""
 	if !ok || freshRun == firstRun {
 		t.Fatalf("reload did not start a fresh body: slot=%q present=%v (pre-reload %q)", freshRun, ok, firstRun)
 	}
@@ -629,9 +626,7 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 	}
 
 	// The slot still belongs to the fresh body; no continuation adopted it.
-	eng.daemonMu.Lock()
-	slot := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
 	if slot != freshRun {
 		t.Fatalf("slot = %q after the fenced resume, want the fresh body %q left untouched", slot, freshRun)
 	}
@@ -684,9 +679,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 		return eng.DaemonState(spec.ID) == DaemonSuspended
 	}, "daemon never parked in DaemonSuspended")
 
-	eng.daemonMu.Lock()
-	firstRun := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	firstRun := eng.slots.runID(spec.ID)
 	orig, err := reg.GetRun(context.Background(), firstRun)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
@@ -706,9 +699,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 	}
 
 	// It adopted the daemon slot, and the state reflects a live body again.
-	eng.daemonMu.Lock()
-	slot := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
 	if slot != contID {
 		t.Fatalf("continuation did not adopt the slot: slot=%q, want %q", slot, contID)
 	}
@@ -720,10 +711,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 	close(exec.release)
 	waitStatus(t, reg, contID, registry.StatusSuccess)
 	waitUntil(t, 5*time.Second, func() bool {
-		eng.daemonMu.Lock()
-		defer eng.daemonMu.Unlock()
-		_, reserved := eng.daemonRuns[spec.ID]
-		return !reserved
+		return eng.slots.runID(spec.ID) == ""
 	}, "continuation finished but the daemon slot leaked")
 	if got := exec.resumeRuns.Load(); got != 1 {
 		t.Fatalf("continuation bodies = %d, want exactly 1", got)

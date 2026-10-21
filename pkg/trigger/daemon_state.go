@@ -142,38 +142,3 @@ func (e *Engine) DaemonState(taskID string) DaemonState {
 func (e *Engine) setDaemonState(taskID string, s DaemonState) {
 	e.daemonStates.set(taskID, s)
 }
-
-// daemonRegistered reports whether taskID is currently tracked in
-// daemonSpecs — i.e. the engine still considers this task a live daemon.
-// Used by the propagation goroutine to bail out if Unregister has run
-// between the time the goroutine was launched and the time it gets
-// scheduled (or between successive descendant dispatches in a long
-// pipeline). Mirrors the stillRegistered check in onDaemonRunFinished.
-func (e *Engine) daemonRegistered(taskID string) bool {
-	e.daemonMu.Lock()
-	_, ok := e.daemonSpecs[taskID]
-	e.daemonMu.Unlock()
-	return ok
-}
-
-// restartGate is a per-task at-most-one-in-flight lock. Implemented as a
-// sync.Map keyed on task ID; values are unused (the presence/absence of
-// the key is the lock state).
-type restartGate struct {
-	gates sync.Map // map[string]struct{} — presence == locked
-}
-
-func newRestartGate() *restartGate { return &restartGate{} }
-
-// tryAcquire returns true if the caller now holds the lock for taskID,
-// false if another goroutine already does.
-func (g *restartGate) tryAcquire(taskID string) bool {
-	_, loaded := g.gates.LoadOrStore(taskID, struct{}{})
-	return !loaded
-}
-
-// release frees the lock for taskID. Must be called exactly once per
-// successful tryAcquire.
-func (g *restartGate) release(taskID string) {
-	g.gates.Delete(taskID)
-}

@@ -146,7 +146,6 @@ type Engine struct {
 	drainGrace time.Duration
 
 	daemonMu    sync.Mutex
-	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
 	// daemonStates tracks the lifecycle phase of each daemon task for
@@ -167,12 +166,9 @@ type Engine struct {
 	// like daemonBackoffs. See crashloop.go.
 	crashloops *crashloopTracker
 
-	// restartGates is a per-daemon at-most-one-in-flight lock for daemon
-	// restarts. See daemon_state.go for the coalescing rationale. Also reused
-	// by handlePipelineStageRerun, keyed by pipeline ID, so a flurry of
-	// mid-pipeline stage re-fires coalesces to at most one outstanding
-	// propagation per pipeline.
-	restartGates *restartGate
+	// slots owns the "at most one daemon body in flight" invariant and the
+	// pipeline stage re-fire coalescing. See daemon_slot.go.
+	slots *daemonSlots
 
 	// livePipelines tracks PipelineRunners whose terminal daemon stage is
 	// currently running — i.e. the pipeline parent run is 'running' for the
@@ -258,11 +254,10 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		cronArmed:                 make(map[string]cronArm),
 		webhooks:                  make(map[string]string),
 		webhookReplayCache:        newReplayCache(1 * time.Hour),
-		daemonRuns:                make(map[string]string),
 		daemonSpecs:               make(map[string]*task.Spec),
 		daemonStates:              newDaemonStateMap(),
 		crashloops:                newCrashloopTracker(),
-		restartGates:              newRestartGate(),
+		slots:                     newDaemonSlots(),
 		livePipelines:             make(map[string]*PipelineRunner),
 		deferredPipelines:         make(map[string]*task.PipelineTask),
 		guards:                    newChainGuards(),
@@ -481,19 +476,14 @@ func (e *Engine) Start(ctx context.Context) error {
 	// race the drain's Wait below.
 	e.beginShutdown()
 
-	e.daemonMu.Lock()
-	killList := make(map[string]string, len(e.daemonRuns))
-	for k, v := range e.daemonRuns {
-		killList[k] = v
-	}
-	e.daemonMu.Unlock()
+	killList := e.slots.runs()
 
 	for taskID, runID := range killList {
 		e.log.Info("stopping daemon on shutdown", zap.String("task", taskID), zap.String("run", runID))
 		e.KillRun(runID)
 	}
 
-	// Pipeline terminal-daemon runs are not tracked in daemonRuns (they are
+	// Pipeline terminal-daemon runs are not tracked in the daemon slots (they are
 	// owned by the PipelineRunner, not the standalone-daemon machinery), so the
 	// loop above misses them. Kill them explicitly so their run goroutines exit
 	// and finalize within the drain window below instead of running past DB
@@ -705,9 +695,8 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 
 	e.daemonMu.Lock()
 	delete(e.daemonSpecs, id)
-	runID := e.daemonRuns[id]
-	delete(e.daemonRuns, id)
 	e.daemonMu.Unlock()
+	runID := e.slots.evict(id)
 
 	// Unregistration wipes crash-loop tracking (#458): a removed (or
 	// reloaded-with-new-content) task starts with a fresh failure counter,
