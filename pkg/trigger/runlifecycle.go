@@ -78,7 +78,7 @@ func runKindOf(k task.Kinded) string {
 // run:started hook, and registers the run's cancellation, trigger source,
 // completion channel and chain depth.
 //
-// opts.RunID is honored when set — startDaemon (#470) reserves the daemonRuns
+// opts.RunID is honored when set — startDaemon attaches the run to the daemon
 // slot before the run goroutine can exit, so it must know the ID up front — and
 // generated otherwise. parent roots the returned run context, so a caller with a
 // deadline (fireSync's prereq ceiling) propagates it and one without passes

@@ -37,7 +37,7 @@ const (
 	// i.e. the fireAsync call to launch the body returned an error. Distinct
 	// from DaemonStopped so operators can tell "daemon body broke" apart from
 	// "operator deliberately stopped it / never started it". Reachable only
-	// from startDaemon's launch-error branch (issue #318).
+	// from startDaemon's launch-error branch.
 	//
 	// The const name and wire value "failed_after_preflight" are kept as-is:
 	// they are a live API/WebUI enum value, so renaming would be a breaking
@@ -62,8 +62,8 @@ const (
 	DaemonCrashed DaemonState = "crashed"
 
 	// DaemonSuspended indicates the daemon body exited to await user input
-	// via dicode.suspend() (#95) — non-terminal, distinct from a crash or a
-	// stop. The daemon run slot stays reserved while suspended so the #470
+	// via dicode.suspend() — non-terminal, distinct from a crash or a
+	// stop. The daemon slot stays claimed while suspended so the
 	// "one body in flight" invariant holds across the suspended gap (a
 	// reconciler reload must not start a second body), and the resume
 	// continuation drives the next transition. Reported instead of the stale
@@ -72,7 +72,7 @@ const (
 
 	// DaemonCrashLooping indicates the daemon's body has failed
 	// crashloopThreshold consecutive starts, each dying within
-	// crashloopSustainWindow (issue #458). Unlike DaemonCrashed the engine IS
+	// crashloopSustainWindow. Unlike DaemonCrashed the engine IS
 	// still restarting the body (restart=always / on-failure), so a
 	// point-in-time snapshot would intermittently land in the brief
 	// spawn-before-crash window and report a hard-failing task as "running".
@@ -122,7 +122,7 @@ func (d *daemonStateMap) set(taskID string, s DaemonState) {
 // DaemonState returns the current lifecycle phase of the daemon with the
 // given task ID. Returns DaemonStopped for unknown / never-started tasks.
 //
-// Crash-loop override (issue #458): while the crash-loop tracker is tripped
+// Crash-loop override: while the crash-loop tracker is tripped
 // for this task, the reported state is DaemonCrashLooping even if the
 // underlying map says DaemonRunning — a crash-looping daemon's respawns set
 // DaemonRunning for the brief spawn-before-crash window, and surfacing that
@@ -141,39 +141,4 @@ func (e *Engine) DaemonState(taskID string) DaemonState {
 // to DaemonStopped removes the entry from the map.
 func (e *Engine) setDaemonState(taskID string, s DaemonState) {
 	e.daemonStates.set(taskID, s)
-}
-
-// daemonRegistered reports whether taskID is currently tracked in
-// daemonSpecs — i.e. the engine still considers this task a live daemon.
-// Used by the propagation goroutine to bail out if Unregister has run
-// between the time the goroutine was launched and the time it gets
-// scheduled (or between successive descendant dispatches in a long
-// pipeline). Mirrors the stillRegistered check in onDaemonRunFinished.
-func (e *Engine) daemonRegistered(taskID string) bool {
-	e.daemonMu.Lock()
-	_, ok := e.daemonSpecs[taskID]
-	e.daemonMu.Unlock()
-	return ok
-}
-
-// restartGate is a per-task at-most-one-in-flight lock. Implemented as a
-// sync.Map keyed on task ID; values are unused (the presence/absence of
-// the key is the lock state).
-type restartGate struct {
-	gates sync.Map // map[string]struct{} — presence == locked
-}
-
-func newRestartGate() *restartGate { return &restartGate{} }
-
-// tryAcquire returns true if the caller now holds the lock for taskID,
-// false if another goroutine already does.
-func (g *restartGate) tryAcquire(taskID string) bool {
-	_, loaded := g.gates.LoadOrStore(taskID, struct{}{})
-	return !loaded
-}
-
-// release frees the lock for taskID. Must be called exactly once per
-// successful tryAcquire.
-func (g *restartGate) release(taskID string) {
-	g.gates.Delete(taskID)
 }

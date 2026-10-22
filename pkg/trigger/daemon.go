@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Daemon crash-loop exponential backoff constants (Fix 4, #387).
+// Daemon crash-loop exponential backoff constants.
 // A daemon that exits within daemonStableThreshold is considered crashed;
 // one that outlasts it is considered stable and resets the backoff.
 const (
@@ -29,172 +29,119 @@ const (
 func (e *Engine) registerDaemon(spec *task.Spec) {
 	e.daemonMu.Lock()
 	e.daemonSpecs[spec.ID] = spec
-	_, alreadyRunning := e.daemonRuns[spec.ID]
 	e.daemonMu.Unlock()
 
-	if alreadyRunning {
-		return
-	}
-	// Gate the start path with the same per-daemon lock used for restart
-	// coalescing. Two concurrent registerDaemon calls (e.g. the reconciler
-	// firing OnRegister twice, or a manual re-register racing the reconciler)
-	// would otherwise both observe `alreadyRunning=false` and both spawn a
-	// daemon body. The lock ensures at most one in-flight start per task ID.
-	// The backoff-restart path in onDaemonRunFinished routes through the same
-	// gate (#470, race 2). Released once startDaemon has recorded the daemon's
-	// run slot (or logged a launch failure).
-	if !e.restartGates.tryAcquire(spec.ID) {
-		e.log.Debug("daemon start coalesced — another start is already in flight",
-			zap.String("task", spec.ID))
-		return
-	}
-	defer e.restartGates.release(spec.ID)
 	e.startDaemon(spec)
 }
 
-// startDaemon brings a daemon up: it fires the daemon body and records the
-// run + DaemonRunning state. Daemons that need config rendered before they
-// start are expressed as a kind: PipelineTask whose terminal stage is this
-// daemon Task — the render stages run in the pipeline runner, not here.
+// startDaemon claims the daemon's slot and launches its body; it coalesces
+// when a body is already in flight or being started.
 func (e *Engine) startDaemon(spec *task.Spec) {
-	// Record the spawn time for lazy crash-loop recovery BEFORE the body can
-	// possibly exit: fireAsync launches the run goroutine, so a very fast
-	// crash could otherwise run noteExit first and a late noteSpawn would
-	// stamp a spawn time onto a dead run — which isCrashLooping's lazy
-	// recovery would later misread as a sustained run and wrongly clear the
-	// crash-loop state (#458).
+	slot, ok := e.slots.claim(spec.ID)
+	if !ok {
+		e.log.Debug("daemon start coalesced — a body is already in flight",
+			zap.String("task", spec.ID))
+		return
+	}
+	e.launchDaemon(spec, slot)
+}
+
+// launchDaemon fires the daemon body on a claimed slot and publishes
+// DaemonRunning.
+func (e *Engine) launchDaemon(spec *task.Spec, slot daemonSlot) {
+	// Must precede the body: a late noteSpawn would stamp a spawn time onto a
+	// dead run, which crash-loop recovery misreads as sustained.
 	e.crashloops.noteSpawn(spec.ID)
 
-	// Reserve the run slot and publish DaemonRunning BEFORE firing the body
-	// (#470, race 1). fireAsync launches the run goroutine and returns; an
-	// instant crash can drive onDaemonRunFinished before control returns
-	// here. If the slot were written after fireAsync (as it used to be), the
-	// finish path's `daemonRuns[spec.ID] == runID` cleanup would miss —
-	// leaving a stale slot that makes registerDaemon think the daemon is
-	// still up — and the late setDaemonState(DaemonRunning) would overwrite
-	// the terminal DaemonStopped/DaemonCrashed the finish path just
-	// recorded. Pre-generating the run ID (fireAsync honors a non-empty
-	// opts.RunID) makes the reservation observable before the body can
-	// possibly exit, and leaves nothing to do after fireAsync succeeds.
+	// Attach and publish DaemonRunning before firing: an instant exit drives
+	// onDaemonRunFinished before fireAsync returns. fireAsync honors opts.RunID.
 	runID := uuid.New().String()
-	e.daemonMu.Lock()
-	e.daemonRuns[spec.ID] = runID
-	e.daemonMu.Unlock()
+	if !slot.attach(runID) {
+		// Unregistered while the start was in flight.
+		e.crashloops.clearSpawn(spec.ID)
+		return
+	}
 	e.setDaemonState(spec.ID, DaemonRunning)
 
 	if _, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{RunID: runID}, registry.TriggerDaemon); err != nil {
-		// fireAsync error here is a daemon-body launch failure — binary
-		// missing, port already bound, runtime resource exhaustion. Distinct
-		// from DaemonStopped so operators can tell "deliberately stopped /
-		// never started" apart from "daemon body broke" in the WebUI. See
-		// issue #318.
-		//
-		// No run is live: roll back the reservation made above. The
-		// slot-matches guard mirrors onDaemonRunFinished so a concurrent
-		// starter's fresh reservation is never clobbered.
-		e.daemonMu.Lock()
-		if e.daemonRuns[spec.ID] == runID {
-			delete(e.daemonRuns, spec.ID)
-		}
-		e.daemonMu.Unlock()
-		// Drop the spawn timestamp recorded above — it must not age into a
-		// fake "sustained run".
+		// A launch failure (binary missing, port bound, resource exhaustion) is
+		// distinct from DaemonStopped so the WebUI can tell it from a deliberate
+		// stop. No run is live, so give the slot back.
+		slot.release(runID)
 		e.crashloops.clearSpawn(spec.ID)
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		e.log.Error("daemon start failed",
 			zap.String("task", spec.ID),
 			zap.Error(err),
 		)
+		return
+	}
+
+	// Unregister's KillRun misses a run that was not yet registered.
+	if slot.evicted() {
+		e.KillRun(runID)
 	}
 }
 
-// resumeDaemonBody spawns the continuation of a suspended daemon body while
-// keeping the #470 "slot present == one body in flight" invariant honest across
-// the suspend→resume hop. onDaemonRunFinished parked the slot on the suspended
-// run; this adopts it for the continuation BEFORE the body fires (mirroring
-// startDaemon's pre-reservation, which fireAsync honors via opts.RunID) so a
-// reconciler reload during the continuation observes alreadyRunning and won't
-// start a second body, and the continuation's onDaemonRunFinished slot-match
-// frees the slot correctly. The compare-and-swap is the safety interlock: if
-// the slot is no longer parked on the suspended run (the task was unregistered,
-// or another start took over), coalesce rather than double-start.
+// resumeDaemonBody spawns the continuation of a suspended daemon body, adopting
+// the slot parked on the suspended run. It fails if the slot is no longer bound
+// to that run.
 func (e *Engine) resumeDaemonBody(spec *task.Spec, suspendedRunID string, opts pkgruntime.RunOptions) (string, error) {
 	runID := uuid.New().String()
 	opts.RunID = runID
 
-	e.daemonMu.Lock()
-	if e.daemonRuns[spec.ID] != suspendedRunID {
-		e.daemonMu.Unlock()
+	slot, ok := e.slots.holding(spec.ID, suspendedRunID)
+	if !ok {
 		return "", fmt.Errorf("resume: daemon %q slot no longer parked on suspended run %q", spec.ID, suspendedRunID)
 	}
-	e.daemonRuns[spec.ID] = runID
-	e.daemonMu.Unlock()
+	if err := slot.adopt(runID); err != nil {
+		return "", fmt.Errorf("resume: daemon %q: %w (suspended run %q)", spec.ID, err, suspendedRunID)
+	}
 
-	// Record the spawn before fireAsync for the same reason startDaemon does:
-	// an instant exit could otherwise run noteExit before a late noteSpawn,
-	// stamping a spawn time onto a dead run (#458).
 	e.crashloops.noteSpawn(spec.ID)
 	e.setDaemonState(spec.ID, DaemonRunning)
 
 	newRunID, err := e.fireAsync(context.Background(), spec, opts, registry.TriggerResume)
 	if err != nil {
-		// No body is live: roll back the adoption. The slot-match guard mirrors
-		// onDaemonRunFinished so a concurrent starter's reservation is never
-		// clobbered.
-		e.daemonMu.Lock()
-		if e.daemonRuns[spec.ID] == runID {
-			delete(e.daemonRuns, spec.ID)
-		}
-		e.daemonMu.Unlock()
+		slot.release(runID)
 		e.crashloops.clearSpawn(spec.ID)
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		return "", err
+	}
+	if slot.evicted() {
+		e.KillRun(runID)
 	}
 	return newRunID, nil
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
-	// Resolve the run status BEFORE releasing the slot: a suspended body must
-	// keep its #470 reservation (see below), so the slot decision depends on
-	// the outcome.
+	// A suspended body keeps its slot, so resolve the status before releasing.
 	run, err := e.registry.GetRun(context.Background(), runID)
 	if err != nil {
 		// Free the slot even on a lookup failure so a dead body can't pin the
 		// "body in flight" reservation forever.
-		e.daemonMu.Lock()
-		if e.daemonRuns[spec.ID] == runID {
-			delete(e.daemonRuns, spec.ID)
-		}
-		e.daemonMu.Unlock()
+		e.slots.releaseRun(spec.ID, runID)
 		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
 		return
 	}
 
-	// A suspended run is non-terminal (#95): the subprocess exited to await
-	// user input, not because the daemon crashed or stopped. Keep the run slot
-	// reserved so the #470 "one body in flight" invariant holds across the
-	// suspended gap — a reconciler reload must not start a second body while
-	// this one is parked — and publish DaemonSuspended instead of leaving a
-	// stale "running". The resume continuation (resumeDaemonBody) adopts the
-	// slot and drives the next transition. Crash-loop tracking and the restart
-	// policy are deliberately untouched. The slot-ownership check guards the
-	// unregister race: if Unregister already freed the slot (and killed the
-	// body), there is nothing to park and no state to publish for a task the
-	// engine no longer tracks.
+	// A suspended run is non-terminal: keep the slot parked so a reload cannot
+	// start a second body, and publish DaemonSuspended. resumeDaemonBody adopts
+	// the slot. Crash-loop tracking and the restart policy are untouched. If
+	// Unregister already evicted the slot there is nothing to park.
 	if run.Status == registry.StatusSuspended {
-		e.daemonMu.Lock()
-		slotOwned := e.daemonRuns[spec.ID] == runID
-		e.daemonMu.Unlock()
-		if slotOwned {
+		if slot, ok := e.slots.holding(spec.ID, runID); ok && slot.park() {
 			e.setDaemonState(spec.ID, DaemonSuspended)
 		}
 		return
 	}
 
-	e.daemonMu.Lock()
-	if e.daemonRuns[spec.ID] == runID {
-		delete(e.daemonRuns, spec.ID)
+	// A slot that is no longer bound to this run was evicted or taken over; a
+	// stale finish must not touch the newer body's state.
+	if !e.slots.releaseRun(spec.ID, runID) {
+		return
 	}
+	e.daemonMu.Lock()
 	_, stillRegistered := e.daemonSpecs[spec.ID]
 	e.daemonMu.Unlock()
 
@@ -215,12 +162,11 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		// Operator-initiated cancellation (e.g. per-run kill button).
 		// The daemon was running; treat the deliberate stop as a clean
 		// transition to DaemonStopped so the WebUI doesn't pin a stale
-		// "Running" pill on a daemon whose body has been killed (issue
-		// #332). This sits ahead of the restart-policy decision because
+		// "Running" pill on a daemon whose body has been killed. This sits ahead of the restart-policy decision because
 		// cancellation short-circuits it entirely — a killed daemon
 		// stays stopped regardless of restart=always/on-failure/never.
 		//
-		// Cancellation also clears crash-loop tracking (#458): a kill is
+		// Cancellation also clears crash-loop tracking: a kill is
 		// deliberate operator intent, not another crashed start, and the
 		// stopped daemon must not keep reporting "crashlooping".
 		e.crashloops.reset(spec.ID)
@@ -233,7 +179,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 
 // restartDaemonAfterExit applies crash-loop accounting and the restart policy
 // for a daemon body that has left the running state with a non-cancelled exit,
-// re-launching it (through the shared restart gate, after backoff) when the
+// re-launching it (after backoff, through the daemon slot) when the
 // policy calls for it. The caller must have already released the run slot and
 // confirmed the task is still registered and the engine is not shutting down.
 //
@@ -242,7 +188,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 // daemon (out-of-band, where the run goroutine is already gone) — so both take
 // the identical restart decision.
 func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed time.Duration) {
-	// Crash-loop accounting (#458): a quick non-success exit bumps the
+	// Crash-loop accounting: a quick non-success exit bumps the
 	// consecutive-failure counter; a clean or sustained exit resets it.
 	// Tracked for every non-cancelled exit regardless of restart policy so
 	// the rule stays a single invariant; in practice only auto-restarting
@@ -261,7 +207,7 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 	}
 	// noRestartTransition records the terminal state when the engine
 	// will NOT spawn an automatic restart for this exit. Status-aware
-	// split (issue #325):
+	// split:
 	//   - success exit, no restart  → DaemonStopped (clean shutdown)
 	//   - non-success exit, no restart → DaemonCrashed (operator
 	//     attention required)
@@ -343,52 +289,34 @@ func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed 
 		return
 	}
 
-	// Route the backoff restart through the same per-daemon gate as
-	// registerDaemon (#470, race 2). Without it, a re-register during the
-	// backoff sleep (e.g. the reconciler firing OnRegister after a content
-	// reload) could start the daemon body while this goroutine also calls
-	// startDaemon — a double-start of the same task body. When the gate is
-	// held, the concurrent starter owns the daemon now: coalesce and exit
-	// without touching any state.
-	if !e.restartGates.tryAcquire(spec.ID) {
-		e.log.Debug("daemon start coalesced — another start is already in flight",
+	// Claim the slot: a concurrent starter or a re-register that already
+	// completed owns the daemon now, so coalesce without touching any state.
+	slot, ok := e.slots.claim(spec.ID)
+	if !ok {
+		e.log.Debug("daemon restart skipped — a body is already in flight",
 			zap.String("task", spec.ID))
 		return
 	}
-	defer e.restartGates.release(spec.ID)
 
-	// Re-check under the gate: the backoff sleep is up to daemonBackoffMax,
-	// plenty of time for the world to have moved on.
-	//   - An Unregister during the sleep must not resurrect the daemon (the
-	//     caller's stillRegistered check predates the sleep, so it cannot
-	//     cover this).
-	//   - A re-register that already completed (gate released) has a live
-	//     run slot; starting again would double-start the body. With the
-	//     slot now reserved before the body fires (race 1 fix above), slot
-	//     presence is a reliable "body in flight" signal — the same check
-	//     registerDaemon uses.
+	// The backoff sleep is long enough for an Unregister to have landed; it
+	// must not resurrect the daemon.
 	e.daemonMu.Lock()
-	_, stillRegistered := e.daemonSpecs[spec.ID]
-	_, alreadyRunning := e.daemonRuns[spec.ID]
+	cur, stillRegistered := e.daemonSpecs[spec.ID]
 	e.daemonMu.Unlock()
 	if !stillRegistered {
+		slot.release("")
 		e.log.Debug("daemon restart skipped — task unregistered during backoff",
-			zap.String("task", spec.ID))
-		return
-	}
-	if alreadyRunning {
-		e.log.Debug("daemon restart skipped — daemon already restarted concurrently",
 			zap.String("task", spec.ID))
 		return
 	}
 
 	e.log.Info("restarting daemon task", zap.String("task", spec.ID))
-	e.startDaemon(spec)
+	e.launchDaemon(cur, slot)
 }
 
 // onDaemonSuspensionSwept routes a standalone daemon body whose suspension
 // timed out — swept suspended→cancelled by SweepExpiredSuspensions — back
-// through the daemon lifecycle. onDaemonRunFinished parked the #470 run slot on
+// through the daemon lifecycle. onDaemonRunFinished parked the slot on
 // the suspended run and published DaemonSuspended, expecting a resume to adopt
 // the slot; but the body goroutine exited cleanly on suspend, so
 // onDaemonRunFinished will never run again for this run. Without this the slot
@@ -406,12 +334,10 @@ func (e *Engine) onDaemonSuspensionSwept(spec *task.Spec, run *registry.Run) {
 	// same run (a resumed run is excluded from the swept set), so a resume that
 	// adopted the slot is not in play here — but the guard keeps slot ownership
 	// consistent with that outcome regardless.
-	e.daemonMu.Lock()
-	if e.daemonRuns[spec.ID] != run.ID {
-		e.daemonMu.Unlock()
+	if !e.slots.releaseRun(spec.ID, run.ID) {
 		return
 	}
-	delete(e.daemonRuns, spec.ID)
+	e.daemonMu.Lock()
 	_, stillRegistered := e.daemonSpecs[spec.ID]
 	e.daemonMu.Unlock()
 

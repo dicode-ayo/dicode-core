@@ -187,7 +187,7 @@ func TestResumeRun_SeedsContinuationAndConsumesToken(t *testing.T) {
 	}
 }
 
-// TestResumeRun_ContinuationSharesRoot verifies #569: a resume continuation's
+// TestResumeRun_ContinuationSharesRoot verifies a resume continuation's
 // root_run_id is the ORIGINAL suspended run's ID (which is its own root,
 // since it has no parent), not the continuation's own ID. This is what lets
 // the WebUI collapse a whole suspend/resume conversation into one group.
@@ -449,7 +449,7 @@ func TestResumeRun_MultiStepWizardChains(t *testing.T) {
 // TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended verifies that a daemon
 // body which suspends (a) does not count as a crash-loop exit, (b) reports the
 // distinct DaemonSuspended state instead of a stale "running", and (c) keeps
-// its #470 run slot reserved so the "one body in flight" invariant holds across
+// its slot claimed so the "one body in flight" invariant holds across
 // the suspended gap.
 func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	eng, reg := newSuspendEnv(t, &suspendExec{})
@@ -468,8 +468,8 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 
 	eng.daemonMu.Lock()
 	eng.daemonSpecs[spec.ID] = spec
-	eng.daemonRuns[spec.ID] = runID
 	eng.daemonMu.Unlock()
+	seedSlot(eng, spec.ID, runID)
 	eng.setDaemonState(spec.ID, DaemonRunning)
 
 	eng.onDaemonRunFinished(spec, runID)
@@ -482,9 +482,8 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	}
 	// The slot stays reserved: a reconciler reload's registerDaemon must see the
 	// daemon as still in flight, and a resume must find the slot parked here.
-	eng.daemonMu.Lock()
-	slot, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
+	ok := slot != ""
 	if !ok || slot != runID {
 		t.Errorf("daemon slot = %q (present=%v), want it kept at %q across the suspended gap", slot, ok, runID)
 	}
@@ -493,7 +492,7 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	}
 }
 
-// TestResumeRun_PreservesFireTimeParams pins #502: a run fired with a param
+// TestResumeRun_PreservesFireTimeParams pins that a run fired with a param
 // override that suspends must resume with the SAME override, not the spec
 // defaults. Without preservation the continuation's opts.Params is nil and
 // MergeParams(spec.Params, nil) silently reverts ctx.params mid-wizard.
@@ -530,7 +529,7 @@ func TestResumeRun_PreservesFireTimeParams(t *testing.T) {
 	}
 }
 
-// TestResumeRun_PreservesChainDepth pins #502: the chain-depth ceiling must
+// TestResumeRun_PreservesChainDepth pins that the chain-depth ceiling must
 // survive a suspend hop. A run fired at depth 3 that suspends and resumes into
 // a continuation which suspends again must carry depth 3 forward — if the hop
 // reset it, the persisted depth of the second suspension would be 0.
@@ -576,7 +575,7 @@ func decodeCarryDepth(t *testing.T, blob []byte) int {
 }
 
 // TestSuspendedDaemon_ReloadFencesStaleResume is the double-start regression
-// (#502 item 2 / #470). A daemon body suspends; a reconciler content reload
+// A daemon body suspends; a reconciler content reload
 // (eng.Register) tears the daemon down and restarts a fresh body, re-pointing
 // the run slot. Resuming the now-stale pre-reload suspension must be fenced off
 // — otherwise its continuation would run as a SECOND concurrent body next to
@@ -598,9 +597,8 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 		return eng.DaemonState(spec.ID) == DaemonSuspended
 	}, "daemon never parked in DaemonSuspended")
 
-	eng.daemonMu.Lock()
-	firstRun, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	firstRun := eng.slots.runID(spec.ID)
+	ok := firstRun != ""
 	if !ok {
 		t.Fatal("suspended daemon dropped its run slot")
 	}
@@ -611,14 +609,13 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 	staleToken := orig.ResumeToken
 
 	// Reconciler content reload: eng.Register tears down + restarts. The fresh
-	// body re-points the slot (reserved before the body fires, #470 race 1), so
+	// body re-points the slot (claimed before the body fires), so
 	// the pre-reload suspension is now stale.
 	if err := eng.Register(spec); err != nil {
 		t.Fatalf("reload eng.Register: %v", err)
 	}
-	eng.daemonMu.Lock()
-	freshRun, ok := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	freshRun := eng.slots.runID(spec.ID)
+	ok = freshRun != ""
 	if !ok || freshRun == firstRun {
 		t.Fatalf("reload did not start a fresh body: slot=%q present=%v (pre-reload %q)", freshRun, ok, firstRun)
 	}
@@ -629,9 +626,7 @@ func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
 	}
 
 	// The slot still belongs to the fresh body; no continuation adopted it.
-	eng.daemonMu.Lock()
-	slot := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
 	if slot != freshRun {
 		t.Fatalf("slot = %q after the fenced resume, want the fresh body %q left untouched", slot, freshRun)
 	}
@@ -664,7 +659,7 @@ func (b *blockingResumeDaemonExec) Execute(_ context.Context, _ *task.Spec, opts
 }
 
 // TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight verifies the resume half
-// of the #470 invariant: a suspended daemon body's continuation adopts the run
+// of the one-body-in-flight invariant: a suspended daemon body's continuation adopts the run
 // slot (so it participates in "one body in flight") and the state reflects a
 // live body again — asserted while the continuation is deterministically parked
 // mid-execution.
@@ -684,9 +679,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 		return eng.DaemonState(spec.ID) == DaemonSuspended
 	}, "daemon never parked in DaemonSuspended")
 
-	eng.daemonMu.Lock()
-	firstRun := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	firstRun := eng.slots.runID(spec.ID)
 	orig, err := reg.GetRun(context.Background(), firstRun)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
@@ -706,9 +699,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 	}
 
 	// It adopted the daemon slot, and the state reflects a live body again.
-	eng.daemonMu.Lock()
-	slot := eng.daemonRuns[spec.ID]
-	eng.daemonMu.Unlock()
+	slot := eng.slots.runID(spec.ID)
 	if slot != contID {
 		t.Fatalf("continuation did not adopt the slot: slot=%q, want %q", slot, contID)
 	}
@@ -720,10 +711,7 @@ func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
 	close(exec.release)
 	waitStatus(t, reg, contID, registry.StatusSuccess)
 	waitUntil(t, 5*time.Second, func() bool {
-		eng.daemonMu.Lock()
-		defer eng.daemonMu.Unlock()
-		_, reserved := eng.daemonRuns[spec.ID]
-		return !reserved
+		return eng.slots.runID(spec.ID) == ""
 	}, "continuation finished but the daemon slot leaked")
 	if got := exec.resumeRuns.Load(); got != 1 {
 		t.Fatalf("continuation bodies = %d, want exactly 1", got)
