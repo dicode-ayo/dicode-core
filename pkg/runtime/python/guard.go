@@ -4,12 +4,11 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dicode/dicode/pkg/ipc"
-	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/perms"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -69,24 +68,24 @@ type guardRun struct {
 func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) guardPolicy {
 	var pol guardPolicy
 
-	net := spec.Permissions.Net
-	switch {
-	case len(net) == 1 && net[0] == "*":
+	eff := perms.Resolve(spec)
+
+	switch eff.NetMode {
+	case perms.NetUnrestricted:
 		pol.Net.Mode = "unrestricted"
-	case len(net) > 0:
+	case perms.NetAllowlist:
 		pol.Net.Mode = "allowlist"
-		pol.Net.Hosts = net
+		pol.Net.Hosts = eff.NetHosts
 	default:
 		pol.Net.Mode = "deny"
 	}
 
-	run := spec.Permissions.Run
-	switch {
-	case len(run) == 1 && run[0] == "*":
+	switch eff.RunMode {
+	case perms.RunAllow:
 		pol.Run.Mode = "allow"
-	case len(run) > 0:
+	case perms.RunAllowlist:
 		pol.Run.Mode = "allowlist"
-		pol.Run.Commands = run
+		pol.Run.Commands = eff.RunCommands
 	default:
 		pol.Run.Mode = "deny"
 	}
@@ -97,16 +96,7 @@ func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) 
 	if ipcAddr != "" && !ipc.IsLoopbackAddr(ipcAddr) {
 		pol.FSWrite = append(pol.FSWrite, ipcAddr)
 	}
-	for _, entry := range spec.Permissions.FS {
-		if entry.Permission != "w" && entry.Permission != "rw" {
-			continue
-		}
-		p := expandHome(entry.Path)
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(spec.TaskDir, p)
-		}
-		pol.FSWrite = append(pol.FSWrite, p)
-	}
+	pol.FSWrite = append(pol.FSWrite, eff.WritePaths...)
 	for _, p := range protectedPaths {
 		if p == "" {
 			continue
@@ -117,7 +107,9 @@ func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) 
 	// Env-read guardrail: when env_read_exposed is false (the default), restrict
 	// os.environ reads to the declared env var names plus a runtime-essential set.
 	// When env_read_exposed is true, leave EnvAllowed nil (no filter).
-	if !spec.Permissions.EnvReadExposed {
+	if !eff.EnvReadExposed {
+		// Larger than the Deno sandbox's baseline (see package perms): the
+		// interpreter and uv read these themselves.
 		essential := []string{
 			// Process basics.
 			"PATH", "HOME", "USER", "LOGNAME", "TMPDIR",
@@ -135,24 +127,15 @@ func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) 
 			// IPC handshake coordinates.
 			"DICODE_SOCKET", "DICODE_TOKEN",
 		}
-		seen := make(map[string]bool, len(essential)+len(spec.Permissions.Env))
-		allowed := make([]string, 0, len(essential)+len(spec.Permissions.Env))
+		seen := make(map[string]bool, len(essential)+len(eff.EnvNames))
+		allowed := make([]string, 0, len(essential)+len(eff.EnvNames))
 		for _, name := range essential {
 			if !seen[name] {
 				seen[name] = true
 				allowed = append(allowed, name)
 			}
 		}
-		for _, e := range spec.Permissions.Env {
-			// A pattern entry's literal name ("GITHUB_*") is not a readable var;
-			// its expanded matches are appended below.
-			if e.Name == "" || seen[e.Name] || pkgruntime.IsWildcardEnvEntry(e) {
-				continue
-			}
-			seen[e.Name] = true
-			allowed = append(allowed, e.Name)
-		}
-		for _, name := range pkgruntime.WildcardEnvNames(spec) {
+		for _, name := range eff.EnvNames {
 			if seen[name] {
 				continue
 			}
@@ -182,14 +165,4 @@ func buildGuard(pol guardPolicy) (string, error) {
 		return "", fmt.Errorf("guard template missing policy placeholder")
 	}
 	return out, nil
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") || p == "~" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return home + p[1:]
-		}
-	}
-	return p
 }
