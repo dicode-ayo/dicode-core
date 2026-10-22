@@ -24,6 +24,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
+	"github.com/dicode/dicode/pkg/runtime/perms"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -525,16 +526,6 @@ func moduleURL(p string) string {
 	return u.String()
 }
 
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") || p == "~" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return home + p[1:]
-		}
-	}
-	return p
-}
-
 // findDenoLockFile walks up from dir (at most maxParents levels) looking for
 // a deno.lock file. Returns the absolute path on the first match, or "".
 // maxParents=2 covers a taskset laid out as <set>/<name>/ → <set>/../deno.lock.
@@ -575,16 +566,17 @@ func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protec
 	// entry scoped to the daemon's own socket path, prepended the same way.
 	// This is NOT general network access — it does not widen what hosts the
 	// task can reach, only lets it open this one local socket.
-	net := spec.Permissions.Net
+	eff := perms.Resolve(spec)
+	net := eff.NetHosts
 	needsUnixScope := !loopbackIPC && denopkg.RequiresUnixNetScope(version)
 	switch {
-	case len(net) == 1 && net[0] == "*":
+	case eff.NetMode == perms.NetUnrestricted:
 		args = append(args, "--allow-net")
 	case loopbackIPC:
 		args = append(args, "--allow-net="+strings.Join(append([]string{ipcAddr}, net...), ","))
 	case needsUnixScope:
 		args = append(args, "--allow-net="+strings.Join(append([]string{"unix:" + ipcAddr}, net...), ","))
-	case len(net) > 0:
+	case eff.NetMode == perms.NetAllowlist:
 		args = append(args, "--allow-net="+strings.Join(net, ","))
 	}
 	// nil or explicit empty list, loopback/unix-scope not needed → no
@@ -599,28 +591,19 @@ func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protec
 	// process.env keys at module init. Otherwise the explicit list: the
 	// internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME (required by
 	// deno.land/x/cache for vendored binary downloads) plus declared names.
-	if spec.Permissions.EnvReadExposed {
+	if eff.EnvReadExposed {
 		args = append(args, "--allow-env")
 	} else {
 		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
-		for _, e := range spec.Permissions.Env {
-			// A pattern entry's literal name ("GITHUB_*") is not a readable var;
-			// its expanded matches are appended below so they reach the sandbox.
-			if pkgruntime.IsWildcardEnvEntry(e) {
-				continue
-			}
-			envVars = append(envVars, e.Name)
-		}
-		envVars = append(envVars, pkgruntime.WildcardEnvNames(spec)...)
+		envVars = append(envVars, eff.EnvNames...)
 		args = append(args, "--allow-env="+strings.Join(envVars, ","))
 	}
 
 	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
-	sys := spec.Permissions.Sys
-	if len(sys) == 1 && sys[0] == "*" {
+	if eff.SysAll {
 		args = append(args, "--allow-sys")
-	} else if len(sys) > 0 {
-		args = append(args, "--allow-sys="+strings.Join(sys, ","))
+	} else if len(eff.SysNames) > 0 {
+		args = append(args, "--allow-sys="+strings.Join(eff.SysNames, ","))
 	}
 
 	// The shim needs read permission since it is imported. The entire task
@@ -632,24 +615,8 @@ func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protec
 		readPaths = append([]string{ipcAddr}, readPaths...)
 		writePaths = append(writePaths, ipcAddr)
 	}
-	for _, entry := range spec.Permissions.FS {
-		path := expandHome(entry.Path)
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(spec.TaskDir, path)
-		}
-		// Clean every declared path so "../" segments and redundant separators
-		// resolve before they reach Deno, keeping the grant set canonical.
-		path = filepath.Clean(path)
-		switch entry.Permission {
-		case "r":
-			readPaths = append(readPaths, path)
-		case "w":
-			writePaths = append(writePaths, path)
-		case "rw":
-			readPaths = append(readPaths, path)
-			writePaths = append(writePaths, path)
-		}
-	}
+	readPaths = append(readPaths, eff.ReadPaths...)
+	writePaths = append(writePaths, eff.WritePaths...)
 	args = append(args, "--allow-read="+strings.Join(readPaths, ","))
 	// Deno rejects an empty value, so a task with no write grant and no socket
 	// file to write gets no flag at all — which is the same denial.
@@ -664,11 +631,11 @@ func buildDenoArgs(spec *task.Spec, ipcAddr, shimPath, runnerPath string, protec
 		args = append(args, "--deny-write="+strings.Join(protectedPaths, ","))
 	}
 
-	run := spec.Permissions.Run
-	if len(run) == 1 && run[0] == "*" {
+	switch eff.RunMode {
+	case perms.RunAllow:
 		args = append(args, "--allow-run")
-	} else if len(run) > 0 {
-		args = append(args, "--allow-run="+strings.Join(run, ","))
+	case perms.RunAllowlist:
+		args = append(args, "--allow-run="+strings.Join(eff.RunCommands, ","))
 	}
 
 	args = append(args, runnerPath)
