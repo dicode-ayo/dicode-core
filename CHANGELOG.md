@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.6](https://github.com/dicode-ayo/dicode-core/compare/v0.6.5...v0.6.6) (2026-10-22)
+
+
+### Features
+
+* **webui:** let /api/ai/chat open the suspend/resume conversation ([#908](https://github.com/dicode-ayo/dicode-core/issues/908)) ([b1fb18c](https://github.com/dicode-ayo/dicode-core/commit/b1fb18c0ec8d51b4a7d30920883459c9024008c2))
+
 ## [0.6.5](https://github.com/dicode-ayo/dicode-core/compare/v0.6.4...v0.6.5) (2026-10-04)
 
 
