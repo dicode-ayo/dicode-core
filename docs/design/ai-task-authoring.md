@@ -259,7 +259,7 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
 | 2 | **Skill-truth fix** — real MCP tool surface in the shared `.md`s | `dicode-buildin/skills/` |
 | 3 | ~~**#570** — `resume_state` offload in Go~~ — done | `InputStore`/`InputCrypto`, `local-storage`, `root_run_id` |
 | 4 | **Seam + #571a** — extract `ai-agent-core/chat.ts`; migrate `ai-agent` onto it | claude-cli envelope, #569, #570 |
-| 5 | **#571b** — drivers (`handleAI` / `/api/ai/chat` / `dicode ai`) drive suspend→resume | shipped CLI resume loop |
+| 5 | **#571b** — drivers (`handleAI` / `/api/ai/chat` / `dicode ai`) drive suspend→resume | shipped CLI resume loop. `handleAI` / `dicode ai` shipped; `/api/ai/chat` now accepts a blank prompt and, only when the forwarded run ends suspended, answers `202 {runId, status: "suspended"}` for the resume endpoint |
 | 6 | **Suspend-notify** — `suspendNotifier` on `runFinishedHook` | `approval_notify` pattern, `buildin/notify` |
 | 7 | ~~**`task-create` + prompt-threading** — kills #288~~ — done (#568) | `auto-fix` override, `handleAI` |
 | 8 | ~~Follow-up — `hash_include` for shared-module hash coverage~~ — done (#585) | — |

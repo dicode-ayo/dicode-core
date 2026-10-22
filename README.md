@@ -1364,6 +1364,14 @@ curl -X POST http://localhost:8080/api/ai/chat \
   -H "Cookie: dicode_secrets_sess=<your-session>" \
   -d '{"prompt": "ping my API every 5 minutes"}'
 
+# Open a conversation instead: a blank/absent prompt is forwarded, and when the
+# run ends suspended the response is 202 with its run id, which
+# POST /api/runs/<run-id>/resume then continues.
+curl -X POST http://localhost:8080/api/ai/chat \
+  -H "Content-Type: application/json" \
+  -H "Cookie: dicode_secrets_sess=<your-session>" \
+  -d '{}'
+
 # Force an immediate git sync
 curl -X POST http://localhost:8080/api/sync
 ```

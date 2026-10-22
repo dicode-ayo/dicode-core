@@ -233,20 +233,76 @@ func TestAIChat_RejectsNonHookWebhook(t *testing.T) {
 	}
 }
 
-// TestAIChat_RequiresPrompt rejects bodies missing prompt upfront so the
-// configured task never sees an obviously-malformed request.
-func TestAIChat_RequiresPrompt(t *testing.T) {
+// TestAIChat_BlankPromptForwards: a missing prompt opens a suspend/resume
+// conversation, so it is forwarded rather than rejected.
+func TestAIChat_BlankPromptForwards(t *testing.T) {
 	srv, gw := newAIServer(t, "test/echo")
 	registerEchoWebhook(t, srv, gw, "test/echo", "/hooks/test/echo")
 
-	body, _ := json.Marshal(map[string]any{"session_id": "x"})
-	req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", bytes.NewReader(body))
+	for _, body := range []string{`{"session_id":"x"}`, `{"prompt":""}`, ``} {
+		req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("body %q: expected 200, got %d: %s", body, w.Code, w.Body)
+		}
+	}
+}
+
+// TestAIChat_MalformedJSONRejected keeps the one remaining upfront check.
+func TestAIChat_MalformedJSONRejected(t *testing.T) {
+	srv, gw := newAIServer(t, "test/echo")
+	registerEchoWebhook(t, srv, gw, "test/echo", "/hooks/test/echo")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader("{nope"))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body)
+	}
+}
+
+// TestAIChat_SuspendedRunReturnsRunID: when the forwarded task suspends, the
+// client gets 202 with the suspended run id instead of the webhook layer's
+// failure envelope.
+func TestAIChat_SuspendedRunReturnsRunID(t *testing.T) {
+	srv, gw := newAIServer(t, "test/echo")
+	runID := seedSuspendedRun(t, srv.registry, nil, "tok")
+	spec := &task.Spec{
+		ID:      "test/echo",
+		Name:    "test/echo",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Webhook: "/hooks/test/echo"},
+		Timeout: 5 * time.Second,
+	}
+	if err := srv.registry.Register(spec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	gw.Register("/hooks/test/echo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Run-Id", runID)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"runId": runID, "status": "failure", "error": "run suspended"})
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body)
+	}
+	var got map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["runId"] != runID || got["status"] != "suspended" {
+		t.Errorf("got %v, want runId=%s status=suspended", got, runID)
+	}
+	if strings.Contains(w.Body.String(), "tok") {
+		t.Error("response leaks the resume token")
 	}
 }
 
