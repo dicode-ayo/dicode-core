@@ -108,8 +108,8 @@ func buildGuardPolicy(spec *task.Spec, ipcAddr string, protectedPaths []string) 
 	// os.environ reads to the declared env var names plus a runtime-essential set.
 	// When env_read_exposed is true, leave EnvAllowed nil (no filter).
 	if !eff.EnvReadExposed {
-		// Deliberately larger than the Deno sandbox's baseline (see package
-		// perms): the interpreter and uv read these themselves.
+		// Larger than the Deno sandbox's baseline (see package perms): the
+		// interpreter and uv read these themselves.
 		essential := []string{
 			// Process basics.
 			"PATH", "HOME", "USER", "LOGNAME", "TMPDIR",

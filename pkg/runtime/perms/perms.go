@@ -4,13 +4,12 @@
 // policy). Parsing the "*" wildcard, expanding "~" and canonicalising paths
 // live here and nowhere else.
 //
-// Script-visible env divergence (deliberate): the Deno sandbox grants only
-// DICODE_SOCKET, DICODE_TOKEN, HOME, DENO_DIR and XDG_CACHE_HOME plus the
-// declared names, while the Python guard's allowlist is the larger
-// runtime-essential set (PATH, locale, proxies, TLS, uv locations, ...).
-// Python's interpreter reads those itself, so they cannot be hidden from it.
-// Each renderer owns its baseline; EffectivePermissions carries only the
-// declared names.
+// Script-visible env: the Deno sandbox grants only DICODE_SOCKET, DICODE_TOKEN,
+// HOME, DENO_DIR and XDG_CACHE_HOME plus the declared names, while the Python
+// guard's allowlist is the larger runtime-essential set (PATH, locale, proxies,
+// TLS, uv locations, ...) because the interpreter reads those itself. Each
+// renderer owns its baseline; EffectivePermissions carries only the declared
+// names.
 package perms
 
 import (
@@ -80,7 +79,7 @@ func Resolve(spec *task.Spec) EffectivePermissions {
 		e.NetMode = NetUnrestricted
 	case len(p.Net) > 0:
 		e.NetMode = NetAllowlist
-		e.NetHosts = p.Net
+		e.NetHosts = append([]string(nil), p.Net...)
 	}
 
 	switch {
@@ -88,13 +87,13 @@ func Resolve(spec *task.Spec) EffectivePermissions {
 		e.RunMode = RunAllow
 	case len(p.Run) > 0:
 		e.RunMode = RunAllowlist
-		e.RunCommands = p.Run
+		e.RunCommands = append([]string(nil), p.Run...)
 	}
 
 	if isWildcard(p.Sys) {
 		e.SysAll = true
 	} else {
-		e.SysNames = p.Sys
+		e.SysNames = append([]string(nil), p.Sys...)
 	}
 
 	for _, entry := range p.FS {
@@ -123,7 +122,9 @@ func Resolve(spec *task.Spec) EffectivePermissions {
 		}
 		e.EnvNames = append(e.EnvNames, entry.Name)
 	}
-	e.EnvNames = append(e.EnvNames, pkgruntime.WildcardEnvNames(spec)...)
+	if !e.EnvReadExposed {
+		e.EnvNames = append(e.EnvNames, pkgruntime.WildcardEnvNames(spec)...)
+	}
 	return e
 }
 
