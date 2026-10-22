@@ -15,12 +15,14 @@ func TestBuildGuardPolicy_FSWriteCleaned(t *testing.T) {
 	spec := specWithPerms(task.Permissions{FS: []task.FSEntry{
 		{Path: "../../etc", Permission: "w"},
 		{Path: "a//b/../c/", Permission: "rw"},
+		{Path: "/var/data/../log//", Permission: "w"},
 	}})
 	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
 	want := []string{
 		"/tmp/dicode.sock",
 		"/srv/etc",
 		filepath.Join(spec.TaskDir, "a", "c"),
+		"/var/log",
 	}
 	if !reflect.DeepEqual(pol.FSWrite, want) {
 		t.Errorf("fs_write = %v, want %v", pol.FSWrite, want)
