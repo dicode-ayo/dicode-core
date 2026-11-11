@@ -5,7 +5,7 @@ VERSION ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
+.PHONY: build test test-verbose test-race lint vet-windows fmt format format-check clean run tidy help \
 	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install \
 	test-tasks proto proto-tools reset-passphrase
 
@@ -58,6 +58,10 @@ format-check:
 ## lint: format and vet all Go source files
 lint: fmt
 	$(GO) vet ./...
+
+## vet-windows: vet all packages, tests included, as built for Windows
+vet-windows:
+	GOOS=windows $(GO) vet ./...
 
 E2E_WEBHOOK_SECRET ?= e2e-test-webhook-secret-xyz
 

@@ -143,6 +143,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Catches POSIX-only test code that would stop a package's tests from
+      # compiling for the windows-latest job.
+      - name: go vet (GOOS=windows)
+        run: GOOS=windows go vet ./...
+
       - name: Check go.mod and go.sum are tidy
         run: |
           if ! go mod tidy -diff; then
