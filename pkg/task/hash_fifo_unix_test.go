@@ -45,7 +45,8 @@ func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
 
 // TestHash_InDirFifoIsSkipped: a FIFO directly in the walked dir is skipped.
 // walkTree classifies entries by a real stat (d.Info()) because d.Type() can
-// report 0 on filesystems without d_type.
+// report 0 on filesystems without d_type; that condition is filesystem-
+// dependent, so this test does not reproduce it.
 func TestHash_InDirFifoIsSkipped(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "task-a")
 	writeTaskFiles(t, dir, "name: a\n", "js")
