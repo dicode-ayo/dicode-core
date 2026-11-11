@@ -143,6 +143,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Catches platform-specific test code that would stop a package's tests
+      # from compiling for a GOOS the release ships (windows, darwin).
+      - name: go vet (GOOS=windows, darwin)
+        run: make vet-cross
+
       - name: Check go.mod and go.sum are tidy
         run: |
           if ! go mod tidy -diff; then

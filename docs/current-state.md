@@ -328,6 +328,7 @@ make build   # compiles ./dicode binary
 make run     # builds and runs dicode daemon — web UI on :8080, control socket at ~/.dicode/daemon.sock
 make test    # go test ./...
 make lint    # go fmt + go vet
+make vet-cross  # go vet for GOOS=windows and darwin (catches platform-only test code)
 make clean   # removes the binary
 ```
 

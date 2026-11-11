@@ -11,6 +11,7 @@ make test         # go test ./... -timeout 60s
 make test-verbose # with -v flag
 make test-race    # with race detector
 make lint         # go vet ./...
+make vet-cross    # go vet ./... for GOOS=windows and darwin (catches platform-only test code)
 make tidy         # go mod tidy
 make clean        # remove binary
 ```
