@@ -4,21 +4,19 @@ package task
 
 import (
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-// TestHash_IncludeFifoIsSkippedNotRead is the regression for a hang caught
-// in review: a hash_include entry naming a non-regular, non-symlink,
-// non-directory path (a FIFO here) must be silently skipped, exactly like
-// walkTree already does for the same file types found during a normal dir
-// walk — not read via os.ReadFile, which blocks indefinitely on a FIFO with
-// no writer.
+// TestHash_IncludeFifoIsSkippedNotRead: a hash_include entry naming a FIFO
+// must be skipped, not read — os.ReadFile blocks forever on a FIFO with no
+// writer.
 func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
 	tasksRoot := t.TempDir()
 	fifoPath := filepath.Join(tasksRoot, "a.fifo")
-	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 
@@ -45,20 +43,14 @@ func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
 	}
 }
 
-// TestHash_InDirFifoIsSkipped covers walkTree's own entry classification
-// (used for the main dir walk and directory includes) with a real stat
-// (d.Info()) rather than the raw directory-entry type (d.Type()) — the
-// latter can report 0 ("unknown", indistinguishable from "regular") on
-// filesystems that don't populate d_type, which would otherwise let a FIFO
-// slip through IsRegular() and into a blocking os.ReadFile. This doesn't
-// reproduce the DT_UNKNOWN condition itself (filesystem-dependent, not
-// under test control), but pins that a FIFO sitting directly in the walked
-// dir is still skipped, not hashed as content, after the d.Info() switch.
+// TestHash_InDirFifoIsSkipped: a FIFO directly in the walked dir is skipped.
+// walkTree classifies entries by a real stat (d.Info()) because d.Type() can
+// report 0 on filesystems without d_type.
 func TestHash_InDirFifoIsSkipped(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "task-a")
 	writeTaskFiles(t, dir, "name: a\n", "js")
 	fifoPath := filepath.Join(dir, "a.fifo")
-	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 
