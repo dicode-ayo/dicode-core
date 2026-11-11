@@ -143,10 +143,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # Catches POSIX-only test code that would stop a package's tests from
-      # compiling for the windows-latest job.
-      - name: go vet (GOOS=windows)
-        run: make vet-windows
+      # Catches platform-specific test code that would stop a package's tests
+      # from compiling for a GOOS the release ships (windows, darwin).
+      - name: go vet (GOOS=windows, darwin)
+        run: make vet-cross
 
       - name: Check go.mod and go.sum are tidy
         run: |
