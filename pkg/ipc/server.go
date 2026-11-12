@@ -1501,7 +1501,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			if httpH == nil {
-				httpH = &ipcHandler{push: func(msg any) error { return writeMsg(conn, msg) }}
+				httpH = &ipcHandler{runID: s.runID, push: func(msg any) error { return writeMsg(conn, msg) }}
 			}
 			// Claim the new pattern before releasing the old one so the path
 			// never transiently 404s.

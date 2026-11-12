@@ -239,7 +239,8 @@ and each path can only be claimed by one task. A claim of a path another task
 already holds — a second webhook task loaded from a watched git repo, or a
 daemon task calling `http.register` on another task's path — is rejected and
 the original task keeps serving it. The one exception: a webhook declared in
-`task.yaml` takes its path over from another task's `http.register` route (a
+`task.yaml` takes its path over from another task's `http.register` route,
+unless that task is a builtin (`buildin/…`) (a
 `webhook trigger took over another task's http.register route` warning is
 logged), so a daemon cannot squat a path before the task that declares it is
 armed. The daemon is not given the path back when that task is later removed;
@@ -328,8 +329,9 @@ handshakes with `DICODE_TOKEN`, and exchanges length-prefixed JSON frames
   within 60 s.
 
 Registering a new pattern releases the previous one. The route is released
-when the daemon's IPC connection closes — including when the run is stopped
-because the task was removed, changed, or held for approval.
+when the task is unregistered (removed, or a change held for approval) —
+immediately, before its daemon run has finished stopping — and otherwise when
+the daemon's IPC connection closes.
 
 **Auth:** an `http.register` route inherits the daemon task's `trigger.auth`.
 With `auth: true` (or `"session"`) every request below the path needs a dicode

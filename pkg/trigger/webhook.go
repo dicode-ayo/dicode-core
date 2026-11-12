@@ -460,12 +460,14 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
 		// This applies to any webhook task that ships an index.html,
 		// not just the built-in webui — it is the standard "SPA shell" pattern.
+		// A task held for approval serves nothing from its directory; checked
+		// once, before any file is read.
+		if (assetPath != "" || r.Method == http.MethodGet) && e.checkFireGuard(taskID) != nil {
+			http.NotFound(w, r)
+			return
+		}
+
 		if assetPath != "" {
-			// A task held for approval serves nothing from its directory.
-			if e.checkFireGuard(taskID) != nil {
-				http.NotFound(w, r)
-				return
-			}
 			// Block path traversal before any extension check; the SPA fallback
 			// must not silently swallow traversal attempts by serving index.html.
 			if strings.Contains(assetPath, "..") {
@@ -504,9 +506,6 @@ type WebhookAuthInfo struct {
 	IsAsset   bool
 }
 
-// Matched reports whether a route claims the path.
-func (i WebhookAuthInfo) Matched() bool { return i.Route.Kind != 0 }
-
 // ResolveWebhookAuth reports the auth posture of the route claiming urlPath,
 // read from the owning task's trigger.auth and webhook_secret. An http.register
 // route inherits its daemon task's trigger.auth; HasSecret is always false for
@@ -543,10 +542,6 @@ func (e *Engine) serveTaskUI(w http.ResponseWriter, r *http.Request, spec *task.
 	data, err := os.ReadFile(indexFile)
 	if err != nil {
 		return false
-	}
-	if e.checkFireGuard(taskID) != nil {
-		http.NotFound(w, r)
-		return true
 	}
 	if logServe {
 		e.log.Info("webhook UI served", zap.String("path", r.URL.Path), zap.String("task", taskID))

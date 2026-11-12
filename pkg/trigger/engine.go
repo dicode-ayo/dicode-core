@@ -637,7 +637,17 @@ func (e *Engine) Unregister(id string) {
 	e.registerMu.Lock()
 	delete(e.deferredPipelines, id)
 	e.registerMu.Unlock()
+	// The daemon run is killed asynchronously; its http.register routes go now
+	// so the guard never reads a replacement spec's trigger.auth for them.
+	runID := e.slots.runID(id)
 	e.unregisterTriggers(id)
+	e.routes.ReleaseRun(id, runID)
+	e.claimRejections.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), id+"\x00") {
+			e.claimRejections.Delete(k)
+		}
+		return true
+	})
 }
 
 // unregisterTriggers removes all trigger registrations (cron, webhook, daemon)

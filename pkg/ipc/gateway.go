@@ -98,7 +98,8 @@ func (k RouteKind) declared() bool { return k == RouteTaskWebhook || k == RouteP
 // replaces the handler and kind. A claim of a pattern another owner holds
 // fails with ErrRouteClaimed and leaves the existing route serving — except
 // that a declared webhook (task or pipeline trigger) takes the pattern over
-// from another task's http.register route; displaced names that task. An
+// from another non-builtin task's http.register route; displaced names that
+// task. An
 // http.register claim also fails when its pattern is above or below another
 // owner's route; declared webhooks may nest.
 func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (displaced string, err error) {
@@ -129,7 +130,7 @@ func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (
 			continue
 		}
 		if r.owner != owner {
-			if !kind.declared() || r.kind != RouteHTTPRegister {
+			if !kind.declared() || r.kind != RouteHTTPRegister || strings.HasPrefix(r.owner, buildinSourcePrefix) {
 				return "", fmt.Errorf("%w: %s is held by %s", ErrRouteClaimed, p, r.owner)
 			}
 			displaced = r.owner
@@ -153,6 +154,23 @@ func (g *Gateway) ReleaseWebhooks(owner, keep string) {
 	defer g.mu.Unlock()
 	g.routes = slices.DeleteFunc(g.routes, func(r gatewayRoute) bool {
 		return r.owner == owner && r.kind.declared() && (keep == "" || r.pattern != keep)
+	})
+}
+
+// RunID reports the task run this handler forwards to.
+func (h *ipcHandler) RunID() string { return h.runID }
+
+// ReleaseRun drops owner's http.register routes served by run runID, ahead of
+// that run's IPC connection closing.
+func (g *Gateway) ReleaseRun(owner, runID string) {
+	if runID == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.routes = slices.DeleteFunc(g.routes, func(r gatewayRoute) bool {
+		rb, ok := r.handler.(interface{ RunID() string })
+		return r.owner == owner && r.kind == RouteHTTPRegister && ok && rb.RunID() == runID
 	})
 }
 
@@ -232,6 +250,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // its open IPC connection. The gateway pushes an HTTPInboundRequest; the task
 // replies with http.respond. A 60-second timeout applies per request.
 type ipcHandler struct {
+	runID   string              // the task run whose connection this is
 	writeMu sync.Mutex          // serialises concurrent writes to push
 	push    func(msg any) error // writes to the task's IPC connection
 	pending sync.Map            // requestID → chan ipcResponse

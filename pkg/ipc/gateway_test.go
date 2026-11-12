@@ -253,6 +253,39 @@ func TestGateway_HTTPRegisterCannotNestWithOtherOwner(t *testing.T) {
 	}
 }
 
+// A builtin task's http.register route is never taken over by a declared
+// webhook.
+func TestGateway_DeclaredWebhookCannotPreemptBuiltin(t *testing.T) {
+	g := NewGateway()
+	if _, err := g.Claim("buildin/svc", "/hooks/svc", RouteHTTPRegister, named("builtin")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Claim("repo/task", "/hooks/svc", RouteTaskWebhook, named("repo")); !errors.Is(err, ErrRouteClaimed) {
+		t.Fatalf("declared webhook over a builtin http.register route = %v; want ErrRouteClaimed", err)
+	}
+	if _, body := serve(g, http.MethodGet, "/hooks/svc"); body != "builtin|" {
+		t.Fatalf("builtin route replaced: %q", body)
+	}
+}
+
+func TestGateway_ReleaseRun(t *testing.T) {
+	g := NewGateway()
+	a := &ipcHandler{runID: "r1", push: func(any) error { return nil }}
+	b := &ipcHandler{runID: "r2", push: func(any) error { return nil }}
+	_, _ = g.Claim("d", "/hooks/d1", RouteHTTPRegister, a)
+	_, _ = g.Claim("d", "/hooks/d2", RouteHTTPRegister, b)
+	_, _ = g.Claim("d", "/hooks/d3", RouteTaskWebhook, named("d"))
+	g.ReleaseRun("d", "r1")
+	if _, ok := g.Resolve("/hooks/d1"); ok {
+		t.Error("ReleaseRun kept the run's route")
+	}
+	for _, p := range []string{"/hooks/d2", "/hooks/d3"} {
+		if _, ok := g.Resolve(p); !ok {
+			t.Errorf("ReleaseRun dropped %s", p)
+		}
+	}
+}
+
 func TestGateway_PinnedNoRouteIs404(t *testing.T) {
 	g := NewGateway()
 	_, _ = g.Claim("late", "/hooks/late", RouteHTTPRegister, named("late"))

@@ -82,11 +82,11 @@ func TestResolveWebhookAuth_RouteTable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := eng.ResolveWebhookAuth(tc.path)
-		if got.Matched() != tc.matched || got.Deny != tc.deny || got.Route.TaskID != tc.taskID ||
+		if (got.Route.Kind != 0) != tc.matched || got.Deny != tc.deny || got.Route.TaskID != tc.taskID ||
 			got.Route.AssetPath != tc.assetPath || got.IsAsset != (tc.assetPath != "") ||
 			got.Mode != tc.mode || got.HasSecret != tc.hasSecret {
 			t.Errorf("ResolveWebhookAuth(%q) = {matched:%v deny:%v task:%q asset:%q mode:%q secret:%v}; want {matched:%v deny:%v task:%q asset:%q mode:%q secret:%v}",
-				tc.path, got.Matched(), got.Deny, got.Route.TaskID, got.Route.AssetPath, got.Mode, got.HasSecret,
+				tc.path, got.Route.Kind != 0, got.Deny, got.Route.TaskID, got.Route.AssetPath, got.Mode, got.HasSecret,
 				tc.matched, tc.deny, tc.taskID, tc.assetPath, tc.mode, tc.hasSecret)
 		}
 	}
@@ -280,5 +280,80 @@ func TestClaimWebhook_RepeatRejectionLoggedOnce(t *testing.T) {
 	debugs := logs.FilterMessage("rejecting webhook path").FilterLevelExact(zap.DebugLevel).Len()
 	if warns != 1 || debugs < 3 {
 		t.Fatalf("rejecting webhook path: %d WARN, %d DEBUG; want 1 WARN then DEBUG", warns, debugs)
+	}
+}
+
+type runHandler struct {
+	http.Handler
+	run string
+}
+
+func (h runHandler) RunID() string { return h.run }
+
+// TestUnregister_ReleasesDaemonRunHTTPRegisterRoutes: unregistering a task
+// drops the http.register routes of the daemon run it stops at once, not when
+// that run's connection eventually closes; a route served by another run of
+// the same task ID (a pipeline stage) stays.
+func TestUnregister_ReleasesDaemonRunHTTPRegisterRoutes(t *testing.T) {
+	eng, _ := newRouteEngine(t)
+	eng.slots.m[slotKey{id: "d"}] = &slotEntry{runID: "daemon-run"}
+	if _, err := eng.routes.Claim("d", "/hooks/d-daemon", ipc.RouteHTTPRegister, runHandler{http.NotFoundHandler(), "daemon-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.routes.Claim("d", "/hooks/d-stage", ipc.RouteHTTPRegister, runHandler{http.NotFoundHandler(), "stage-run"}); err != nil {
+		t.Fatal(err)
+	}
+	eng.Unregister("d")
+	if _, ok := eng.routes.Resolve("/hooks/d-daemon"); ok {
+		t.Error("stopped daemon run's http.register route survived Unregister")
+	}
+	if _, ok := eng.routes.Resolve("/hooks/d-stage"); !ok {
+		t.Error("Unregister dropped a route served by a run it did not stop")
+	}
+}
+
+// TestWebhookUI_FireGuardCheckedOncePerRequest: the SPA fallback consults the
+// fire guard once.
+func TestWebhookUI_FireGuardCheckedOncePerRequest(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html></html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &task.Spec{ID: "ui", Name: "ui", Enabled: true, Runtime: task.RuntimeDeno, TaskDir: dir,
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ui"}}
+	_ = reg.Register(s)
+	if err := eng.Register(s); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	eng.SetFireGuard(func(string) error { calls.Add(1); return nil })
+	for _, p := range []string{"/hooks/ui", "/hooks/ui/deep/route", "/hooks/ui/missing.css"} {
+		calls.Store(0)
+		w := httptest.NewRecorder()
+		eng.routes.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		if n := calls.Load(); n != 1 {
+			t.Errorf("GET %s consulted the fire guard %d times; want 1", p, n)
+		}
+	}
+}
+
+// TestClaimWebhook_RejectionWarnsAgainAfterUnregister: a removed and re-added
+// task's rejected claim is a fresh WARN.
+func TestClaimWebhook_RejectionWarnsAgainAfterUnregister(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.New(core))
+	registerWebhookTask(t, eng, reg, "holder", "/hooks/shared")
+	registerWebhookTask(t, eng, reg, "intruder", "/hooks/shared")
+	eng.Unregister("intruder")
+	registerWebhookTask(t, eng, reg, "intruder", "/hooks/shared")
+	if n := logs.FilterMessage("rejecting webhook path").FilterLevelExact(zap.WarnLevel).Len(); n != 2 {
+		t.Fatalf("got %d WARN; want one per registration lifetime (2)", n)
 	}
 }
