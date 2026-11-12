@@ -58,7 +58,7 @@ type Engine struct {
 	// (#550). Guarded by mu.
 	cronArmed map[string]cronArm
 
-	routes             *ipc.Gateway // webhook route table; shared with the daemon's gateway via SetGateway
+	routes             *ipc.Gateway // the daemon's HTTP route table; see Gateway()
 	webhookReplayCache *replayCache
 
 	// fireGuard, when set, can veto any run before it starts (approval gate,
@@ -675,7 +675,7 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 		}
 	}
 	e.mu.Unlock()
-	e.routes.Release(id, keepWebhookPath)
+	e.routes.ReleaseWebhooks(id, keepWebhookPath)
 
 	if hadCron && e.db != nil {
 		if dbErr := e.db.Exec(context.Background(), `DELETE FROM cron_jobs WHERE task_id=?`, id); dbErr != nil {

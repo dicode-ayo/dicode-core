@@ -31,24 +31,32 @@ import (
 	"go.uber.org/zap"
 )
 
-// SetGateway makes g the engine's webhook route table, so the routes the
-// engine claims are the ones the daemon's gateway serves. Must be called
-// before any Register.
-func (e *Engine) SetGateway(g *ipc.Gateway) { e.routes = g }
+// Gateway returns the engine's route table: the daemon's single HTTP gateway,
+// which the IPC servers and the web UI serve from.
+func (e *Engine) Gateway() *ipc.Gateway { return e.routes }
 
 func (e *Engine) registerWebhook(spec *task.Spec) {
 	e.claimWebhook(spec.ID, spec.Trigger.Webhook, ipc.RouteTaskWebhook, e.WebhookHandler())
 }
 
 // claimWebhook claims a webhook path on the gateway route table. A claim the
-// table refuses (another task's path, the reserved OAuth path) is logged and
-// the task stays registered without the route.
+// table refuses (another task's webhook, the reserved OAuth path) is logged
+// and the task stays registered without the route. A daemon task's
+// http.register route on the path is taken over.
 func (e *Engine) claimWebhook(id, path string, kind ipc.RouteKind, h http.Handler) {
-	if err := e.routes.Claim(id, path, kind, h); err != nil {
+	displaced, err := e.routes.Claim(id, path, kind, h)
+	if err != nil {
 		e.log.Warn("rejecting webhook path",
 			zap.String("task", id),
 			zap.String("path", path),
 			zap.Error(err))
+		return
+	}
+	if displaced != "" {
+		e.log.Warn("webhook trigger took over another task's http.register route",
+			zap.String("task", id),
+			zap.String("path", path),
+			zap.String("displaced_task", displaced))
 	}
 }
 
@@ -480,7 +488,6 @@ type WebhookAuthInfo struct {
 	Matched   bool
 	Deny      bool
 	Route     ipc.RouteMatch
-	TaskID    string
 	Mode      task.WebhookAuthMode
 	HasSecret bool
 	IsAsset   bool
@@ -495,7 +502,7 @@ func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
 	if !ok {
 		return WebhookAuthInfo{}
 	}
-	info := WebhookAuthInfo{Matched: true, Route: m, TaskID: m.TaskID, IsAsset: m.AssetPath != ""}
+	info := WebhookAuthInfo{Matched: true, Route: m, IsAsset: m.AssetPath != ""}
 	k, _ := e.registry.GetKinded(m.TaskID)
 	switch t := k.(type) {
 	case *task.Spec:

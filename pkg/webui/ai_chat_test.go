@@ -33,13 +33,12 @@ func newAIServer(t *testing.T, aiTask string) (*Server, *ipc.Gateway) {
 
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	gw := ipc.NewGateway()
-	eng.SetGateway(gw)
+	gw := eng.Gateway()
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
 		AI:     config.AIConfig{Task: aiTask},
 	}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, gw)
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -404,7 +403,7 @@ func TestAISettings_RequiresAuth(t *testing.T) {
 
 func claimRoute(t *testing.T, gw *ipc.Gateway, owner, pattern string, h http.Handler) {
 	t.Helper()
-	if err := gw.Claim(owner, pattern, ipc.RouteTaskWebhook, h); err != nil {
+	if _, err := gw.Claim(owner, pattern, ipc.RouteTaskWebhook, h); err != nil {
 		t.Fatalf("claim %s: %v", pattern, err)
 	}
 }

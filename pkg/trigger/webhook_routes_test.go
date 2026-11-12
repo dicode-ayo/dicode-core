@@ -42,7 +42,7 @@ func TestResolveWebhookAuth_RouteTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for owner, p := range map[string]string{"daemon": "/hooks/daemon", "gone": "/hooks/gone"} {
-		if err := eng.routes.Claim(owner, p, ipc.RouteHTTPRegister, nil); err != nil {
+		if _, err := eng.routes.Claim(owner, p, ipc.RouteHTTPRegister, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -74,36 +74,74 @@ func TestResolveWebhookAuth_RouteTable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := eng.ResolveWebhookAuth(tc.path)
-		if got.Matched != tc.matched || got.Deny != tc.deny || got.TaskID != tc.taskID ||
+		if got.Matched != tc.matched || got.Deny != tc.deny || got.Route.TaskID != tc.taskID ||
 			got.Route.AssetPath != tc.assetPath || got.IsAsset != (tc.assetPath != "") ||
 			got.Mode != tc.mode || got.HasSecret != tc.hasSecret {
 			t.Errorf("ResolveWebhookAuth(%q) = {matched:%v deny:%v task:%q asset:%q mode:%q secret:%v}; want {matched:%v deny:%v task:%q asset:%q mode:%q secret:%v}",
-				tc.path, got.Matched, got.Deny, got.TaskID, got.Route.AssetPath, got.Mode, got.HasSecret,
+				tc.path, got.Matched, got.Deny, got.Route.TaskID, got.Route.AssetPath, got.Mode, got.HasSecret,
 				tc.matched, tc.deny, tc.taskID, tc.assetPath, tc.mode, tc.hasSecret)
 		}
 	}
 }
 
-// TestRegister_WebhookCannotTakeHTTPRegisterRoute: the table rejects a task
-// webhook for a path a daemon task already serves.
-func TestRegister_WebhookCannotTakeHTTPRegisterRoute(t *testing.T) {
+func newRouteEngine(t *testing.T) (*Engine, *registry.Registry) {
+	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
-	eng := New(reg, nil, zap.NewNop())
-	if err := eng.routes.Claim("daemon", "/hooks/x", ipc.RouteHTTPRegister, nil); err != nil {
-		t.Fatal(err)
-	}
-	s := &task.Spec{ID: "t", Name: "t", Enabled: true, Runtime: task.RuntimeDeno,
-		Trigger: task.TriggerConfig{Webhook: "/hooks/x"}}
+	return New(reg, nil, zap.NewNop()), reg
+}
+
+func registerWebhookTask(t *testing.T, eng *Engine, reg *registry.Registry, id, path string) {
+	t.Helper()
+	s := &task.Spec{ID: id, Name: id, Enabled: true, Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Webhook: path}}
 	_ = reg.Register(s)
 	if err := eng.Register(s); err != nil {
 		t.Fatal(err)
 	}
-	if got := eng.routeOwner("/hooks/x"); got != "daemon" {
-		t.Fatalf("owner = %q; want daemon", got)
+}
+
+// TestRegister_WebhookPreemptsHTTPRegisterRoute: a task declaring a webhook
+// takes the path over from a daemon task that squatted it via http.register.
+func TestRegister_WebhookPreemptsHTTPRegisterRoute(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	if _, err := eng.routes.Claim("squatter", "/hooks/mcp", ipc.RouteHTTPRegister, nil); err != nil {
+		t.Fatal(err)
+	}
+	registerWebhookTask(t, eng, reg, "buildin/mcp", "/hooks/mcp")
+	if got := eng.routeOwner("/hooks/mcp"); got != "buildin/mcp" {
+		t.Fatalf("owner = %q; want buildin/mcp", got)
+	}
+	if _, err := eng.routes.Claim("squatter", "/hooks/mcp", ipc.RouteHTTPRegister, nil); err == nil {
+		t.Fatal("http.register re-took a declared webhook route")
+	}
+}
+
+// TestRegister_KeepsTasksHTTPRegisterRoutes: re-registering or unregistering
+// a task releases only its webhook routes; its http.register routes belong to
+// the IPC connection that claimed them.
+func TestRegister_KeepsTasksHTTPRegisterRoutes(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	if _, err := eng.routes.Claim("t", "/hooks/t-api", ipc.RouteHTTPRegister, nil); err != nil {
+		t.Fatal(err)
+	}
+	registerWebhookTask(t, eng, reg, "t", "/hooks/t")
+	registerWebhookTask(t, eng, reg, "t", "/hooks/t2")
+	if m, ok := eng.routes.Resolve("/hooks/t-api"); !ok || m.TaskID != "t" {
+		t.Fatal("re-register dropped the task's http.register route")
+	}
+	if eng.routeOwner("/hooks/t") != "" {
+		t.Fatal("re-register kept the old webhook route")
+	}
+	eng.Unregister("t")
+	if _, ok := eng.routes.Resolve("/hooks/t-api"); !ok {
+		t.Fatal("Unregister dropped the task's http.register route")
+	}
+	if eng.routeOwner("/hooks/t2") != "" {
+		t.Fatal("Unregister kept the webhook route")
 	}
 }

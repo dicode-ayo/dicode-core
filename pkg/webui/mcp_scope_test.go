@@ -781,7 +781,7 @@ func TestHandleMCP_ScopedKey_ForwardsBoundRunID(t *testing.T) {
 		forwarded, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(func() { srv.gateway.Release("buildin/mcp", "") })
+	t.Cleanup(func() { srv.gateway.ReleaseWebhooks("buildin/mcp", "") })
 
 	raw, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-mine",
 		pkgruntime.MCPScope{SetDevMode: true})

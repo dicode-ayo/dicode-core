@@ -19,7 +19,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -51,7 +50,7 @@ func newTestServerWithSourceMgr(t *testing.T, cfg *config.Config, cfgPath string
 	}
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New server: %v", err)
 	}
@@ -1859,7 +1858,7 @@ func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, nil, dir, NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, nil, dir, NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

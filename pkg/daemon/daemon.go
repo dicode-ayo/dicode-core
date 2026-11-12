@@ -289,11 +289,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 4. Task registry + startup cleanup.
 	reg := setupRegistry(ctx, database, log)
 
-	// 5. HTTP gateway.
-	gateway := ipc.NewGateway()
-
-	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	// 5–6. Managed runtimes + trigger engine (which owns the HTTP gateway).
+	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log)
 	if err != nil {
 		return err
 	}
@@ -324,7 +321,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 
 	// 8. Web UI (including the 8.5 relay env exports).
-	srv, err := buildWebUI(ctx, cfg, configPath, version, dataDir, database, reg, eng, localSecrets, rec, sourceMgr, gateway, logBroadcaster, managedRuntimes, approvalGate, replayer, log)
+	srv, err := buildWebUI(ctx, cfg, configPath, version, dataDir, database, reg, eng, localSecrets, rec, sourceMgr, logBroadcaster, managedRuntimes, approvalGate, replayer, log)
 	if err != nil {
 		return err
 	}
@@ -798,7 +795,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 
 // buildWebUI exports the relay-related env vars and builds the web UI server
 // with its approval / replay wiring (steps 8 + 8.5).
-func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
+func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -916,7 +913,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	}
 
 	webui.Version = version
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database)
 	if err != nil {
 		return nil, fmt.Errorf("build webui: %w", err)
 	}
@@ -1244,14 +1241,13 @@ func buildRuntimes(
 	secretsMgr secrets.Manager,
 	database db.DB,
 	log *zap.Logger,
-	gateway *ipc.Gateway,
 ) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, *pythonruntime.Runtime, error) {
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
-	eng.SetGateway(gateway)
+	gateway := eng.Gateway()
 	eng.SetDB(database)
 	eng.SetSecrets(secretsChain)
 	// Config value first, env var overrides when set. 0 = unlimited. Always

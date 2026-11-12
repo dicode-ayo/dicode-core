@@ -238,7 +238,11 @@ Webhook triggers and daemon-task `http.register` routes share one route table,
 and each path can only be claimed by one task. A claim of a path another task
 already holds — a second webhook task loaded from a watched git repo, or a
 daemon task calling `http.register` on another task's path — is rejected and
-the original task keeps serving it. For a webhook trigger a warning is logged:
+the original task keeps serving it. The one exception: a webhook declared in
+`task.yaml` takes its path over from another task's `http.register` route (a
+`webhook trigger took over another task's http.register route` warning is
+logged), so a daemon cannot squat a path before the task that declares it is
+armed. For a rejected webhook trigger a warning is logged:
 
 ```
 WARN rejecting webhook path  task=intruder-task path=/hooks/my-path
@@ -247,8 +251,10 @@ WARN rejecting webhook path  task=intruder-task path=/hooks/my-path
 
 and an `http.register` call returns the same error to the task. A task
 re-claiming its own path (a reconciler reload, a daemon restart) is allowed.
-`/hooks/oauth-complete` is reserved for `buildin/auth-relay`. A trailing slash
-is ignored: `/hooks/x/` and `/hooks/x` are the same path.
+`/hooks/oauth-complete` is reserved for `buildin/auth-relay`: no other task may
+claim it, no path that would prefix-match it (such as `/hooks`) can be claimed,
+and no shorter route ever answers for it. A trailing slash is ignored:
+`/hooks/x/` and `/hooks/x` are the same path.
 
 ### Route matching
 
@@ -307,8 +313,9 @@ handshakes with `DICODE_TOKEN`, and exchanges length-prefixed JSON frames
 (see `tests/e2e/fixtures/tasks/http-register-guarded/task.js`):
 
 - `{ "id": "1", "method": "http.register", "pattern": "/hooks/my-app" }` claims
-  the path and everything below it; the reply carries an `error` if the path is
-  invalid, reserved, or held by another task.
+  the path and everything below it. The pattern must be below `/hooks/`; the
+  reply carries an `error` if it is invalid, reserved, or held by another task.
+  A task that later declares the same path as its `trigger.webhook` takes it over.
 - Each request arrives as a push `{ requestID, httpMethod, path, query,
   reqHeaders, reqBody }` (`reqBody` base64), answered with
   `{ "method": "http.respond", requestID, status, respHeaders, respBody }`

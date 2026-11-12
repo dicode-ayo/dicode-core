@@ -7,7 +7,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -48,7 +47,7 @@ func TestBuildRuntimesWiresBothRuntimes(t *testing.T) {
 	reg := registry.New(database)
 	_, _, denoRT, pythonRT, err := buildRuntimes(
 		context.Background(), &config.Config{}, reg, secrets.Chain{}, stubSecretsManager{},
-		database, zap.NewNop(), ipc.NewGateway(),
+		database, zap.NewNop(),
 	)
 	if err != nil {
 		t.Fatalf("buildRuntimes: %v", err)
@@ -117,7 +116,7 @@ func TestExecutorSnapshotsDeps(t *testing.T) {
 
 	_, _, denoRT, pythonRT, err := buildRuntimes(
 		context.Background(), &config.Config{}, registry.New(database), secrets.Chain{},
-		stubSecretsManager{}, database, zap.NewNop(), ipc.NewGateway(),
+		stubSecretsManager{}, database, zap.NewNop(),
 	)
 	if err != nil {
 		t.Fatalf("buildRuntimes: %v", err)
@@ -161,7 +160,7 @@ func TestDenoExecutorHasRealIPCSecret(t *testing.T) {
 
 	_, _, denoRT, _, err := buildRuntimes(
 		context.Background(), &config.Config{}, registry.New(database), secrets.Chain{},
-		stubSecretsManager{}, database, zap.NewNop(), ipc.NewGateway(),
+		stubSecretsManager{}, database, zap.NewNop(),
 	)
 	if err != nil {
 		t.Fatalf("buildRuntimes: %v", err)

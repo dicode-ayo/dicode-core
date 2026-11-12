@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,11 +48,12 @@ func (k RouteKind) String() string {
 var (
 	// ErrRouteClaimed is returned by Claim when another task owns the pattern.
 	ErrRouteClaimed = errors.New("route already claimed by another task")
-	// ErrRouteReserved is returned by Claim for ReservedOAuthCompletePath.
+	// ErrRouteReserved is returned by Claim for ReservedOAuthCompletePath or
+	// a pattern that would prefix-match it.
 	ErrRouteReserved = errors.New("route is reserved")
 	// ErrRouteInvalid is returned by Claim for a pattern that is not an
-	// absolute path below "/".
-	ErrRouteInvalid = errors.New("route pattern must be an absolute path below /")
+	// absolute path below "/", or an http.register pattern outside /hooks/.
+	ErrRouteInvalid = errors.New("invalid route pattern")
 )
 
 // Gateway is the daemon's single HTTP route table. Every webhook trigger and
@@ -61,7 +63,8 @@ var (
 //
 // Matching: an exact pattern match, else the longest pattern p such that the
 // path starts with p+"/" (the remainder is the asset path). Patterns are
-// normalised once at Claim by trimming a trailing slash.
+// normalised once at Claim by trimming a trailing slash. No shorter pattern
+// ever matches ReservedOAuthCompletePath or a path below it.
 type Gateway struct {
 	mu     sync.RWMutex
 	routes []gatewayRoute // sorted longest pattern first
@@ -89,16 +92,26 @@ func NewGateway() *Gateway { return &Gateway{} }
 // NormalizePattern is the form Claim stores a pattern in.
 func NormalizePattern(pattern string) string { return strings.TrimSuffix(pattern, "/") }
 
+func (k RouteKind) declared() bool { return k == RouteTaskWebhook || k == RoutePipelineWebhook }
+
 // Claim binds pattern to owner's handler. A re-claim by the same owner
-// replaces the handler and kind; a claim of a pattern another owner holds
-// fails with ErrRouteClaimed and leaves the existing route serving.
-func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) error {
+// replaces the handler and kind. A claim of a pattern another owner holds
+// fails with ErrRouteClaimed and leaves the existing route serving — except
+// that a declared webhook (task or pipeline trigger) takes the pattern over
+// from another task's http.register route; displaced names that task.
+func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (displaced string, err error) {
 	p := NormalizePattern(pattern)
 	if p == "" || p[0] != '/' {
-		return fmt.Errorf("%w: %q", ErrRouteInvalid, pattern)
+		return "", fmt.Errorf("%w: %q must be an absolute path below /", ErrRouteInvalid, pattern)
+	}
+	if kind == RouteHTTPRegister && !strings.HasPrefix(p, "/hooks/") {
+		return "", fmt.Errorf("%w: http.register pattern %q must be below /hooks/", ErrRouteInvalid, pattern)
 	}
 	if p == ReservedOAuthCompletePath && owner != OAuthRelayBuiltinID {
-		return fmt.Errorf("%w: %s may only be claimed by %s", ErrRouteReserved, p, OAuthRelayBuiltinID)
+		return "", fmt.Errorf("%w: %s may only be claimed by %s", ErrRouteReserved, p, OAuthRelayBuiltinID)
+	}
+	if strings.HasPrefix(ReservedOAuthCompletePath, p+"/") {
+		return "", fmt.Errorf("%w: %s would match %s", ErrRouteReserved, p, ReservedOAuthCompletePath)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -107,34 +120,31 @@ func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) e
 			continue
 		}
 		if r.owner != owner {
-			return fmt.Errorf("%w: %s is held by %s", ErrRouteClaimed, p, r.owner)
+			if !kind.declared() || r.kind != RouteHTTPRegister {
+				return "", fmt.Errorf("%w: %s is held by %s", ErrRouteClaimed, p, r.owner)
+			}
+			displaced = r.owner
 		}
-		g.routes[i].kind = kind
-		g.routes[i].handler = h
-		return nil
+		g.routes[i] = gatewayRoute{pattern: p, owner: owner, kind: kind, handler: h}
+		return displaced, nil
 	}
 	g.routes = append(g.routes, gatewayRoute{pattern: p, owner: owner, kind: kind, handler: h})
 	sort.SliceStable(g.routes, func(i, j int) bool {
 		return len(g.routes[i].pattern) > len(g.routes[j].pattern)
 	})
-	return nil
+	return "", nil
 }
 
-// Release drops every route owner holds except the pattern keep (normalised
-// like Claim; "" keeps nothing).
-func (g *Gateway) Release(owner, keep string) {
+// ReleaseWebhooks drops the declared-webhook routes owner holds except the
+// pattern keep (normalised like Claim; "" keeps nothing). http.register routes
+// belong to their IPC connection and are left alone.
+func (g *Gateway) ReleaseWebhooks(owner, keep string) {
 	keep = NormalizePattern(keep)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	kept := g.routes[:0]
-	for _, r := range g.routes {
-		if r.owner == owner && (keep == "" || r.pattern != keep) {
-			continue
-		}
-		kept = append(kept, r)
-	}
-	clear(g.routes[len(kept):])
-	g.routes = kept
+	g.routes = slices.DeleteFunc(g.routes, func(r gatewayRoute) bool {
+		return r.owner == owner && r.kind.declared() && (keep == "" || r.pattern != keep)
+	})
 }
 
 // releaseHandler drops pattern only while it is still served by h, so a
@@ -149,7 +159,7 @@ func (g *Gateway) releaseHandler(pattern string, h *ipcHandler) {
 			continue
 		}
 		if cur, ok := r.handler.(*ipcHandler); ok && cur == h {
-			g.routes = append(g.routes[:i], g.routes[i+1:]...)
+			g.routes = slices.Delete(g.routes, i, i+1)
 		}
 		return
 	}
@@ -157,9 +167,13 @@ func (g *Gateway) releaseHandler(pattern string, h *ipcHandler) {
 
 // Resolve returns the route urlPath dispatches to.
 func (g *Gateway) Resolve(urlPath string) (RouteMatch, bool) {
+	reserved := urlPath == ReservedOAuthCompletePath || strings.HasPrefix(urlPath, ReservedOAuthCompletePath+"/")
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	for _, r := range g.routes {
+		if reserved && len(r.pattern) < len(ReservedOAuthCompletePath) {
+			break
+		}
 		if urlPath == r.pattern {
 			return RouteMatch{TaskID: r.owner, Kind: r.kind, Pattern: r.pattern, handler: r.handler}, true
 		}
@@ -173,7 +187,8 @@ func (g *Gateway) Resolve(urlPath string) (RouteMatch, bool) {
 type routeCtxKey struct{}
 
 // WithRoute pins the route a request dispatches to, so a caller that already
-// resolved it (the auth guard) and the gateway act on the same answer.
+// resolved it (the auth guard) and the gateway act on the same answer. A zero
+// RouteMatch pins "no route": the gateway answers 404 without re-resolving.
 func WithRoute(ctx context.Context, m RouteMatch) context.Context {
 	return context.WithValue(ctx, routeCtxKey{}, m)
 }
@@ -186,7 +201,8 @@ func RouteFromContext(ctx context.Context) (RouteMatch, bool) {
 }
 
 // ServeHTTP dispatches r to its route (pinned in the context, else resolved),
-// passing the match on in the request context. 404 if nothing matches.
+// passing the match on in the request context. 404 if nothing matches or the
+// pinned answer is "no route".
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m, ok := RouteFromContext(r.Context())
 	if !ok {

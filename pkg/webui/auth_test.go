@@ -30,8 +30,6 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	gw := ipc.NewGateway()
-	eng.SetGateway(gw)
 	mcpOn := true
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -41,7 +39,7 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 			MCP:    &mcpOn,
 		},
 	}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, gw)
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -190,7 +188,7 @@ func TestAuth_NoAuthConfig_AllEndpointsOpen(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Port: 8080, Auth: false}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -404,7 +402,7 @@ func TestCORS_DisallowedOrigin_NoHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -426,7 +424,7 @@ func TestCORS_AllowedOrigin_HasHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -446,7 +444,7 @@ func TestSecurityHeaders_Present(t *testing.T) {
 	defer d.Close()
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -596,7 +594,7 @@ func TestCORS_MalformedOrigin_IsSkipped(t *testing.T) {
 		// space-separated string is a common config typo — should be ignored
 		AllowedOrigins: []string{"https://good.example.com https://evil.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	// The malformed entry is skipped, so neither origin gets the CORS header.
@@ -949,7 +947,7 @@ func armDaemonRoute(t *testing.T, srv *Server, id, pattern string, mode task.Web
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("served by " + id))
 	})
-	if err := srv.gateway.Claim(id, pattern, ipc.RouteHTTPRegister, h); err != nil {
+	if _, err := srv.gateway.Claim(id, pattern, ipc.RouteHTTPRegister, h); err != nil {
 		t.Fatalf("claim %s: %v", pattern, err)
 	}
 }
@@ -993,6 +991,35 @@ func TestWebhookAuthGuard_HTTPRegisterRouteInheritsTaskAuth(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/open", nil))
 	if w.Code != http.StatusOK || w.Body.String() != "served by public-daemon" {
 		t.Errorf("public daemon route without session: got %d %q", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookAuthGuard_RouteClaimedAfterCheckNotServed: a route claimed
+// between the guard's "no route" answer and dispatch is not served unguarded.
+func TestWebhookAuthGuard_RouteClaimedAfterCheckNotServed(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	s := &task.Spec{ID: "late-daemon", Name: "late-daemon", Enabled: true,
+		Trigger: task.TriggerConfig{Daemon: true, WebhookAuth: task.WebhookAuthSession}}
+	if err := srv.registry.Register(s); err != nil {
+		t.Fatal(err)
+	}
+	claimThenDispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		armDaemonRoute(t, srv, "late-daemon", "/hooks/late", task.WebhookAuthSession, false)
+		srv.gateway.ServeHTTP(w, r)
+	})
+	w := httptest.NewRecorder()
+	srv.webhookAuthGuard(w, httptest.NewRequest(http.MethodPost, "/hooks/late", nil), claimThenDispatch)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("route claimed after the guard's check: got %d %q, want 404", w.Code, w.Body.String())
+	}
+}
+
+// TestNew_ServesEngineGateway: the web UI dispatches from the engine's route
+// table, so the routes the engine and IPC servers claim are the ones served.
+func TestNew_ServesEngineGateway(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	if srv.gateway != srv.engine.Gateway() {
+		t.Fatal("web UI gateway is not the engine's route table")
 	}
 }
 

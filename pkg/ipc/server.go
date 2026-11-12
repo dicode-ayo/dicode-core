@@ -1505,7 +1505,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			// Claim the new pattern before releasing the old one so the path
 			// never transiently 404s.
-			if err := s.gateway.Claim(s.taskID, req.Pattern, RouteHTTPRegister, httpH); err != nil {
+			if _, err := s.gateway.Claim(s.taskID, req.Pattern, RouteHTTPRegister, httpH); err != nil {
 				reply(req.ID, nil, "ipc: http.register: "+err.Error())
 				continue
 			}

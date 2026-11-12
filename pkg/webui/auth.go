@@ -116,7 +116,8 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 // `/hooks/ai/dicodai`. A daemon task's http.register route carries its task's
 // trigger.auth; a route whose owner is not in the registry is denied.
 //
-//   - No route, or a public one → pass through (the gateway 404s an unrouted path).
+//   - No route, or a public one → pass through (the gateway 404s an unrouted path,
+//     even if a route is claimed between this check and dispatch).
 //   - session → a valid dicode session is required for GET (UI) and POST (run).
 //   - any → session OR a valid HMAC signature. HMAC is the only credential that
 //     survives the relay, so a relayed non-GET falls through to the signature
@@ -134,9 +135,9 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		s.denyWebhook(w, r, relayed)
 		return
 	}
-	if info.Matched {
-		r = r.WithContext(ipc.WithRoute(r.Context(), info.Route))
-	}
+	// Pin the answer even when it is "no route", so a route claimed after this
+	// check is not dispatched unguarded.
+	r = r.WithContext(ipc.WithRoute(r.Context(), info.Route))
 	if !info.Mode.Enabled() {
 		next.ServeHTTP(w, r)
 		return

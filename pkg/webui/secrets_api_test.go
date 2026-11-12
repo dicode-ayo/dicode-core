@@ -13,7 +13,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -100,7 +99,6 @@ func newSecretsTestServer(t *testing.T) (*Server, *inMemSecretsMgr) {
 		NewLogBroadcaster(),
 		zap.NewNop(),
 		d,
-		ipc.NewGateway(),
 	)
 	if err != nil {
 		t.Fatalf("New server: %v", err)

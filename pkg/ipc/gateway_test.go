@@ -44,7 +44,7 @@ func TestGateway_Resolve(t *testing.T) {
 	}
 	g := NewGateway()
 	for _, c := range claims {
-		if err := g.Claim(c.owner, c.pattern, c.kind, named(c.owner)); err != nil {
+		if _, err := g.Claim(c.owner, c.pattern, c.kind, named(c.owner)); err != nil {
 			t.Fatalf("Claim(%s, %s): %v", c.owner, c.pattern, err)
 		}
 	}
@@ -89,18 +89,18 @@ func TestGateway_Resolve(t *testing.T) {
 
 func TestGateway_ClaimByOtherOwnerRejected(t *testing.T) {
 	g := NewGateway()
-	if err := g.Claim("a", "/hooks/shared", RouteTaskWebhook, named("a")); err != nil {
+	if _, err := g.Claim("a", "/hooks/shared", RouteTaskWebhook, named("a")); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"/hooks/shared", "/hooks/shared/"} {
-		if err := g.Claim("b", p, RouteHTTPRegister, named("b")); !errors.Is(err, ErrRouteClaimed) {
+		if _, err := g.Claim("b", p, RouteHTTPRegister, named("b")); !errors.Is(err, ErrRouteClaimed) {
 			t.Errorf("Claim(b, %q) = %v; want ErrRouteClaimed", p, err)
 		}
 	}
 	if _, body := serve(g, http.MethodPost, "/hooks/shared"); body != "a|" {
 		t.Errorf("rejected claim replaced the route: body %q", body)
 	}
-	if err := g.Claim("a", "/hooks/shared", RouteTaskWebhook, named("a2")); err != nil {
+	if _, err := g.Claim("a", "/hooks/shared", RouteTaskWebhook, named("a2")); err != nil {
 		t.Fatalf("same-owner re-claim: %v", err)
 	}
 	if _, body := serve(g, http.MethodPost, "/hooks/shared"); body != "a2|" {
@@ -110,38 +110,105 @@ func TestGateway_ClaimByOtherOwnerRejected(t *testing.T) {
 
 func TestGateway_ClaimRejectsReservedAndInvalid(t *testing.T) {
 	g := NewGateway()
-	if err := g.Claim("sneaky", ReservedOAuthCompletePath, RouteHTTPRegister, named("x")); !errors.Is(err, ErrRouteReserved) {
+	if _, err := g.Claim("sneaky", ReservedOAuthCompletePath, RouteHTTPRegister, named("x")); !errors.Is(err, ErrRouteReserved) {
 		t.Errorf("reserved path claim by non-builtin = %v; want ErrRouteReserved", err)
 	}
-	if err := g.Claim(OAuthRelayBuiltinID, ReservedOAuthCompletePath, RouteTaskWebhook, named("x")); err != nil {
+	if _, err := g.Claim(OAuthRelayBuiltinID, ReservedOAuthCompletePath, RouteTaskWebhook, named("x")); err != nil {
 		t.Errorf("reserved path claim by builtin: %v", err)
 	}
 	for _, p := range []string{"", "/", "hooks/x"} {
-		if err := g.Claim("t", p, RouteTaskWebhook, named("x")); !errors.Is(err, ErrRouteInvalid) {
+		if _, err := g.Claim("t", p, RouteTaskWebhook, named("x")); !errors.Is(err, ErrRouteInvalid) {
 			t.Errorf("Claim(%q) = %v; want ErrRouteInvalid", p, err)
 		}
+	}
+	for _, p := range []string{"/hooks", "/hooks/"} {
+		for _, k := range []RouteKind{RouteTaskWebhook, RoutePipelineWebhook} {
+			if _, err := g.Claim("t", p, k, named("x")); !errors.Is(err, ErrRouteReserved) {
+				t.Errorf("Claim(%q, %v) = %v; want ErrRouteReserved", p, k, err)
+			}
+		}
+	}
+	for _, p := range []string{"/hooks", "/other/x", "/hooksx/y"} {
+		if _, err := g.Claim("d", p, RouteHTTPRegister, named("x")); err == nil {
+			t.Errorf("http.register Claim(%q) accepted; want an error", p)
+		}
+	}
+	if _, err := g.Claim("t", "/github-push", RouteTaskWebhook, named("x")); err != nil {
+		t.Errorf("task webhook outside /hooks/ rejected: %v", err)
+	}
+}
+
+// A shorter route never answers for the reserved OAuth path, whether or not
+// buildin/auth-relay has claimed it.
+func TestGateway_ReservedPathNeverPrefixMatched(t *testing.T) {
+	g := NewGateway()
+	// Insert an ancestor route directly; Claim refuses it.
+	g.routes = []gatewayRoute{{pattern: "/hooks", owner: "squatter", kind: RouteTaskWebhook, handler: named("squatter")}}
+	for _, p := range []string{ReservedOAuthCompletePath, ReservedOAuthCompletePath + "/x"} {
+		if m, ok := g.Resolve(p); ok {
+			t.Errorf("Resolve(%q) = %+v via a prefix; want no route", p, m)
+		}
+	}
+	if m, ok := g.Resolve("/hooks/other"); !ok || m.TaskID != "squatter" {
+		t.Errorf("Resolve(/hooks/other) = %+v, %v; the ancestor should still serve other paths", m, ok)
+	}
+	if _, err := g.Claim(OAuthRelayBuiltinID, ReservedOAuthCompletePath, RouteTaskWebhook, named("relay")); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := g.Resolve(ReservedOAuthCompletePath); !ok || m.TaskID != OAuthRelayBuiltinID {
+		t.Errorf("Resolve(reserved) = %+v, %v; want the exact auth-relay claim", m, ok)
+	}
+}
+
+// A declared webhook takes a path over from another task's http.register
+// route; http.register never takes one from a declared webhook.
+func TestGateway_DeclaredWebhookPreemptsHTTPRegister(t *testing.T) {
+	g := NewGateway()
+	if _, err := g.Claim("squatter", "/hooks/mcp", RouteHTTPRegister, named("squatter")); err != nil {
+		t.Fatal(err)
+	}
+	displaced, err := g.Claim("buildin/mcp", "/hooks/mcp/", RouteTaskWebhook, named("mcp"))
+	if err != nil || displaced != "squatter" {
+		t.Fatalf("declared claim = %q, %v; want displaced squatter", displaced, err)
+	}
+	if m, _ := g.Resolve("/hooks/mcp"); m.TaskID != "buildin/mcp" || m.Kind != RouteTaskWebhook {
+		t.Fatalf("route after preemption: %+v", m)
+	}
+	if _, body := serve(g, http.MethodPost, "/hooks/mcp"); body != "mcp|" {
+		t.Fatalf("preempted route serves %q", body)
+	}
+	if _, err := g.Claim("squatter", "/hooks/mcp", RouteHTTPRegister, named("squatter")); !errors.Is(err, ErrRouteClaimed) {
+		t.Fatalf("http.register over a declared webhook = %v; want ErrRouteClaimed", err)
+	}
+	if _, err := g.Claim("other", "/hooks/mcp", RoutePipelineWebhook, named("other")); !errors.Is(err, ErrRouteClaimed) {
+		t.Fatalf("declared webhook over another declared webhook = %v; want ErrRouteClaimed", err)
 	}
 }
 
 func TestGateway_Release(t *testing.T) {
 	g := NewGateway()
-	_ = g.Claim("a", "/hooks/a1", RouteTaskWebhook, named("a"))
-	_ = g.Claim("a", "/hooks/a2", RouteHTTPRegister, named("a"))
-	_ = g.Claim("b", "/hooks/b", RouteTaskWebhook, named("b"))
+	_, _ = g.Claim("a", "/hooks/a1", RouteTaskWebhook, named("a"))
+	_, _ = g.Claim("a", "/hooks/a2", RouteHTTPRegister, named("a"))
+	_, _ = g.Claim("b", "/hooks/b", RouteTaskWebhook, named("b"))
 
-	g.Release("a", "/hooks/a1/")
+	_, _ = g.Claim("a", "/hooks/a3", RoutePipelineWebhook, named("a"))
+
+	g.ReleaseWebhooks("a", "/hooks/a1/")
 	if _, ok := g.Resolve("/hooks/a1"); !ok {
-		t.Error("Release dropped the kept pattern")
+		t.Error("ReleaseWebhooks dropped the kept pattern")
 	}
-	if _, ok := g.Resolve("/hooks/a2"); ok {
-		t.Error("Release kept a pattern it should drop")
+	if _, ok := g.Resolve("/hooks/a3"); ok {
+		t.Error("ReleaseWebhooks kept a webhook it should drop")
 	}
-	g.Release("a", "")
+	g.ReleaseWebhooks("a", "")
 	if _, ok := g.Resolve("/hooks/a1"); ok {
-		t.Error("Release(owner, \"\") kept a route")
+		t.Error("ReleaseWebhooks(owner, \"\") kept a webhook route")
+	}
+	if m, ok := g.Resolve("/hooks/a2"); !ok || m.Kind != RouteHTTPRegister {
+		t.Error("ReleaseWebhooks dropped the owner's http.register route")
 	}
 	if _, ok := g.Resolve("/hooks/b"); !ok {
-		t.Error("Release dropped another owner's route")
+		t.Error("ReleaseWebhooks dropped another owner's route")
 	}
 }
 
@@ -149,8 +216,8 @@ func TestGateway_ReleaseHandlerOnlyDropsOwnHandler(t *testing.T) {
 	g := NewGateway()
 	oldH := &ipcHandler{push: func(any) error { return nil }}
 	newH := &ipcHandler{push: func(any) error { return nil }}
-	_ = g.Claim("d", "/hooks/d", RouteHTTPRegister, oldH)
-	_ = g.Claim("d", "/hooks/d", RouteHTTPRegister, newH)
+	_, _ = g.Claim("d", "/hooks/d", RouteHTTPRegister, oldH)
+	_, _ = g.Claim("d", "/hooks/d", RouteHTTPRegister, newH)
 	g.releaseHandler("/hooks/d", oldH)
 	if _, ok := g.Resolve("/hooks/d"); !ok {
 		t.Fatal("stale handler's release removed the newer run's route")
@@ -161,11 +228,33 @@ func TestGateway_ReleaseHandlerOnlyDropsOwnHandler(t *testing.T) {
 	}
 }
 
+func TestGateway_PinnedNoRouteIs404(t *testing.T) {
+	g := NewGateway()
+	_, _ = g.Claim("late", "/hooks/late", RouteHTTPRegister, named("late"))
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/hooks/late", nil)
+	g.ServeHTTP(w, r.WithContext(WithRoute(r.Context(), RouteMatch{})))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("pinned no-route answer was re-resolved: %d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestGateway_ReleaseHandlerClearsSlot(t *testing.T) {
+	g := NewGateway()
+	h := &ipcHandler{push: func(any) error { return nil }}
+	_, _ = g.Claim("x", "/hooks/x1", RouteTaskWebhook, named("x"))
+	_, _ = g.Claim("d", "/hooks/d", RouteHTTPRegister, h)
+	g.releaseHandler("/hooks/d", h)
+	if spare := g.routes[len(g.routes):cap(g.routes)]; len(spare) > 0 && spare[0].handler != nil {
+		t.Error("released handler is still referenced from the slice's spare capacity")
+	}
+}
+
 func TestGateway_ServesPinnedRoute(t *testing.T) {
 	g := NewGateway()
-	_ = g.Claim("a", "/hooks/a", RouteTaskWebhook, named("a"))
+	_, _ = g.Claim("a", "/hooks/a", RouteTaskWebhook, named("a"))
 	m, _ := g.Resolve("/hooks/a")
-	_ = g.Claim("b", "/hooks/a/b", RouteTaskWebhook, named("b"))
+	_, _ = g.Claim("b", "/hooks/a/b", RouteTaskWebhook, named("b"))
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/hooks/a/b", nil)
 	g.ServeHTTP(w, r.WithContext(WithRoute(r.Context(), m)))
@@ -374,7 +463,7 @@ func startDaemonIPC(t *testing.T, g *Gateway, taskID string) (net.Conn, func()) 
 
 func TestServer_HTTPRegister_CannotTakeAnotherTasksRoute(t *testing.T) {
 	g := NewGateway()
-	if err := g.Claim("victim", "/hooks/shared", RouteTaskWebhook, named("victim")); err != nil {
+	if _, err := g.Claim("victim", "/hooks/shared", RouteTaskWebhook, named("victim")); err != nil {
 		t.Fatal(err)
 	}
 	conn, stop := startDaemonIPC(t, g, "evil")

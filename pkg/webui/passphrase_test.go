@@ -13,7 +13,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -162,7 +161,7 @@ func TestVerifyPassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "yaml-passphrase"}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	// Even if the DB has a (different) bcrypt hash, the YAML override wins.
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase", bcrypt.MinCost)
@@ -185,7 +184,7 @@ func TestVerifyPassphrase_DBHashUsedWhenNoYAML(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: ""}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass", bcrypt.MinCost)
 
@@ -207,7 +206,7 @@ func TestVerifyPassphrase_EmptyWhenNeitherSet(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	if srv.verifyPassphrase(context.Background(), "anything") {
 		t.Error("verifyPassphrase should reject any candidate when nothing is configured")
@@ -224,7 +223,7 @@ func TestVerifyPassphrase_RejectsEmptyCandidate(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "yaml"}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	if srv.verifyPassphrase(context.Background(), "") {
 		t.Error("empty candidate must never verify")
@@ -240,7 +239,7 @@ func TestVerifyPassphrase_LazyMigrationFromLegacyPlaintext(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	// Simulate an existing pre-bcrypt deployment: plaintext value in DB.
 	if err := srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass"); err != nil {
@@ -280,7 +279,7 @@ func TestVerifyPassphrase_LegacyMismatchDoesNotMigrate(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	_ = srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass")
 
@@ -304,7 +303,7 @@ func TestEnsurePassphrase_GeneratesAndStoresHash(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
@@ -328,7 +327,7 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
 	logs, observed := observer.New(zapcore.InfoLevel)
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.New(logs), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.New(logs), d)
 
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234", bcrypt.MinCost)
 	before, _ := srv.passphraseStore.get(context.Background())
@@ -361,7 +360,7 @@ func TestEnsurePassphrase_DoesNotOverwriteLegacyPlaintext(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	_ = srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass")
 
@@ -381,7 +380,7 @@ func TestEnsurePassphrase_NoopWhenAuthDisabled(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: false}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
@@ -400,7 +399,7 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "from-yaml"}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
@@ -776,7 +775,7 @@ func TestVerifyPassphrase_ConcurrentLegacyMigration_SingleWrite(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, BcryptCost: bcrypt.MinCost}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 
 	// Seed the legacy plaintext value via the underlying DB directly so the
 	// counting wrapper doesn't see this write.
