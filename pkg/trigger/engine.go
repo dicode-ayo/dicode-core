@@ -59,6 +59,7 @@ type Engine struct {
 	cronArmed map[string]cronArm
 
 	routes             *ipc.Gateway // the daemon's HTTP route table; see Gateway()
+	claimRejections    sync.Map     // task ID + "\x00" + path → last rejected-claim error, to log a repeat at DEBUG
 	webhookReplayCache *replayCache
 
 	// fireGuard, when set, can veto any run before it starts (approval gate,
@@ -463,9 +464,7 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.catchupMissedCronRuns(ctx)
 	}
 
-	for _, spec := range e.registry.All() {
-		e.Register(spec)
-	}
+	e.registerAdmitted()
 	e.cron.Start()
 
 	<-ctx.Done()
@@ -521,6 +520,18 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
+// registerAdmitted registers every registry task the fire guard admits. A task
+// held for approval is armed later by whoever lifts the hold, so registering
+// it here would hand it webhook routes and schedules it must not have yet.
+func (e *Engine) registerAdmitted() {
+	for _, spec := range e.registry.All() {
+		if e.checkFireGuard(spec.ID) != nil {
+			continue
+		}
+		e.Register(spec)
+	}
+}
+
 // shutdownDrainGrace bounds how long Start waits for in-flight run goroutines to
 // finalize after shutdown kills are issued. A wedged run cannot exceed this
 // ceiling, so shutdown always makes progress.
@@ -531,7 +542,8 @@ const shutdownDrainGrace = 10 * time.Second
 // follows the cron/webhook/daemon registration path. The call is serialized via
 // registerMu so concurrent registrations cannot admit a cycle through
 // interleaved registry snapshots. Returns a non-nil error if validation fails
-// (e.g. pipeline stage ref/cycle errors); on error, no triggers are modified.
+// (e.g. pipeline stage ref/cycle errors); on error the task holds no webhook
+// route, so a rejected spec is never served.
 // Callers may pass any task.Kinded;
 // *task.Spec satisfies it, so existing call sites are unaffected.
 func (e *Engine) Register(k task.Kinded) error {
@@ -583,6 +595,7 @@ func (e *Engine) Register(k task.Kinded) error {
 		}
 
 		if err := e.checkSuccessChainCycle(s); err != nil {
+			e.routes.ReleaseWebhooks(s.ID, "")
 			return err
 		}
 

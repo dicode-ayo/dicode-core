@@ -228,6 +228,31 @@ func TestGateway_ReleaseHandlerOnlyDropsOwnHandler(t *testing.T) {
 	}
 }
 
+// An http.register route may not sit above or below another task's route;
+// declared webhooks may nest.
+func TestGateway_HTTPRegisterCannotNestWithOtherOwner(t *testing.T) {
+	g := NewGateway()
+	_, _ = g.Claim("buildin/webui", "/hooks/webui", RouteTaskWebhook, named("webui"))
+	_, _ = g.Claim("other", "/hooks/svc/inner", RouteTaskWebhook, named("inner"))
+	for _, p := range []string{"/hooks/webui/runs", "/hooks/webui/a/b", "/hooks/svc"} {
+		if _, err := g.Claim("d", p, RouteHTTPRegister, named("d")); !errors.Is(err, ErrRouteClaimed) {
+			t.Errorf("http.register %s = %v; want ErrRouteClaimed", p, err)
+		}
+	}
+	if m, _ := g.Resolve("/hooks/webui/runs"); m.TaskID != "buildin/webui" {
+		t.Errorf("/hooks/webui/runs owner = %q", m.TaskID)
+	}
+	if _, err := g.Claim("buildin/webui", "/hooks/webui/api", RouteHTTPRegister, named("own")); err != nil {
+		t.Errorf("http.register below the task's own route: %v", err)
+	}
+	if _, err := g.Claim("d", "/hooks/webuix", RouteHTTPRegister, named("d")); err != nil {
+		t.Errorf("http.register of a sibling-prefix path: %v", err)
+	}
+	if _, err := g.Claim("preset", "/hooks/webui/preset", RouteTaskWebhook, named("p")); err != nil {
+		t.Errorf("declared webhook nested under another task's webhook: %v", err)
+	}
+}
+
 func TestGateway_PinnedNoRouteIs404(t *testing.T) {
 	g := NewGateway()
 	_, _ = g.Claim("late", "/hooks/late", RouteHTTPRegister, named("late"))

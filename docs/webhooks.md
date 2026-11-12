@@ -242,7 +242,11 @@ the original task keeps serving it. The one exception: a webhook declared in
 `task.yaml` takes its path over from another task's `http.register` route (a
 `webhook trigger took over another task's http.register route` warning is
 logged), so a daemon cannot squat a path before the task that declares it is
-armed. For a rejected webhook trigger a warning is logged:
+armed. The daemon is not given the path back when that task is later removed;
+it has to call `http.register` again. A task held for approval holds no route
+at all: its path answers 404, and its UI and assets are not served, until it is
+approved. For a rejected webhook trigger a warning is logged (once; repeats on
+later retries are logged at debug level):
 
 ```
 WARN rejecting webhook path  task=intruder-task path=/hooks/my-path
@@ -313,8 +317,10 @@ handshakes with `DICODE_TOKEN`, and exchanges length-prefixed JSON frames
 (see `tests/e2e/fixtures/tasks/http-register-guarded/task.js`):
 
 - `{ "id": "1", "method": "http.register", "pattern": "/hooks/my-app" }` claims
-  the path and everything below it. The pattern must be below `/hooks/`; the
-  reply carries an `error` if it is invalid, reserved, or held by another task.
+  the path and everything below it. The pattern must be below `/hooks/`, and
+  may not sit above or below another task's route (a daemon cannot claim
+  `/hooks/webui/runs` under the web UI's `/hooks/webui`); the reply carries an
+  `error` if it is invalid, reserved, held by another task, or nested with one.
   A task that later declares the same path as its `trigger.webhook` takes it over.
 - Each request arrives as a push `{ requestID, httpMethod, path, query,
   reqHeaders, reqBody }` (`reqBody` base64), answered with
@@ -322,14 +328,15 @@ handshakes with `DICODE_TOKEN`, and exchanges length-prefixed JSON frames
   within 60 s.
 
 Registering a new pattern releases the previous one. The route is released
-when the connection closes or the task is unregistered.
+when the daemon's IPC connection closes — including when the run is stopped
+because the task was removed, changed, or held for approval.
 
 **Auth:** an `http.register` route inherits the daemon task's `trigger.auth`.
 With `auth: true` (or `"session"`) every request below the path needs a dicode
 session — unauthenticated browsers are redirected to `/login`, API callers get
 401 — exactly as for a webhook task. Nothing on this route verifies an HMAC
 signature, so `auth: "any"` admits sessions only. A route whose owning task is
-no longer in the registry is refused.
+no longer in the registry answers 404.
 
 ```yaml
 trigger:

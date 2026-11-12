@@ -1024,14 +1024,27 @@ func TestNew_ServesEngineGateway(t *testing.T) {
 }
 
 // TestWebhookAuthGuard_RouteWithoutRegisteredOwnerDenied: a route whose owner
-// is not in the registry has no readable posture and is denied.
+// is not in the registry has no readable posture; it answers 404 for everyone,
+// with no login redirect a session could never satisfy.
 func TestWebhookAuthGuard_RouteWithoutRegisteredOwnerDenied(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	armDaemonRoute(t, srv, "unknown", "/hooks/orphan", task.WebhookAuthNone, false)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/orphan", nil))
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("orphan route: got %d %q, want 401", w.Code, w.Body.String())
+	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	for _, withSession := range []bool{false, true} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			req := httptest.NewRequest(method, "/hooks/orphan", nil)
+			req.Header.Set("Accept", "text/html")
+			if withSession {
+				req.AddCookie(cookie)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("%s orphan route (session=%v): got %d (Location %q), want 404",
+					method, withSession, w.Code, w.Header().Get("Location"))
+			}
+		}
 	}
 }
 

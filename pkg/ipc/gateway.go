@@ -98,7 +98,9 @@ func (k RouteKind) declared() bool { return k == RouteTaskWebhook || k == RouteP
 // replaces the handler and kind. A claim of a pattern another owner holds
 // fails with ErrRouteClaimed and leaves the existing route serving — except
 // that a declared webhook (task or pipeline trigger) takes the pattern over
-// from another task's http.register route; displaced names that task.
+// from another task's http.register route; displaced names that task. An
+// http.register claim also fails when its pattern is above or below another
+// owner's route; declared webhooks may nest.
 func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (displaced string, err error) {
 	p := NormalizePattern(pattern)
 	if p == "" || p[0] != '/' {
@@ -115,6 +117,13 @@ func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if kind == RouteHTTPRegister {
+		for _, r := range g.routes {
+			if r.owner != owner && (strings.HasPrefix(p, r.pattern+"/") || strings.HasPrefix(r.pattern, p+"/")) {
+				return "", fmt.Errorf("%w: %s nests with %s held by %s", ErrRouteClaimed, p, r.pattern, r.owner)
+			}
+		}
+	}
 	for i, r := range g.routes {
 		if r.pattern != p {
 			continue

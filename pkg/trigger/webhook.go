@@ -40,18 +40,25 @@ func (e *Engine) registerWebhook(spec *task.Spec) {
 }
 
 // claimWebhook claims a webhook path on the gateway route table. A claim the
-// table refuses (another task's webhook, the reserved OAuth path) is logged
-// and the task stays registered without the route. A daemon task's
+// table refuses (another task's webhook, the reserved OAuth path) is logged —
+// at WARN once per task, path and reason, then at DEBUG on retries — and the
+// task stays registered without the route. A daemon task's
 // http.register route on the path is taken over.
 func (e *Engine) claimWebhook(id, path string, kind ipc.RouteKind, h http.Handler) {
 	displaced, err := e.routes.Claim(id, path, kind, h)
+	key := id + "\x00" + path
 	if err != nil {
-		e.log.Warn("rejecting webhook path",
+		logf := e.log.Warn
+		if prev, seen := e.claimRejections.Swap(key, err.Error()); seen && prev == err.Error() {
+			logf = e.log.Debug
+		}
+		logf("rejecting webhook path",
 			zap.String("task", id),
 			zap.String("path", path),
 			zap.Error(err))
 		return
 	}
+	e.claimRejections.Delete(key)
 	if displaced != "" {
 		e.log.Warn("webhook trigger took over another task's http.register route",
 			zap.String("task", id),
@@ -454,6 +461,11 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// This applies to any webhook task that ships an index.html,
 		// not just the built-in webui — it is the standard "SPA shell" pattern.
 		if assetPath != "" {
+			// A task held for approval serves nothing from its directory.
+			if e.checkFireGuard(taskID) != nil {
+				http.NotFound(w, r)
+				return
+			}
 			// Block path traversal before any extension check; the SPA fallback
 			// must not silently swallow traversal attempts by serving index.html.
 			if strings.Contains(assetPath, "..") {
@@ -479,19 +491,21 @@ func (e *Engine) WebhookHandler() http.Handler {
 }
 
 // WebhookAuthInfo describes the auth posture of the route that claims a URL
-// path. Matched is false when no route claims the path. Deny is set when the
+// path; a zero Route means no route claims it. Deny is set when the
 // route's owner is not in the registry, so no posture can be read for it.
 // IsAsset is true when the path is below the claimed pattern rather than the
 // pattern itself — such requests must never fall through to HMAC, or an
 // auth: any webhook's UI assets would be served to unauthenticated callers.
 type WebhookAuthInfo struct {
-	Matched   bool
 	Deny      bool
 	Route     ipc.RouteMatch
 	Mode      task.WebhookAuthMode
 	HasSecret bool
 	IsAsset   bool
 }
+
+// Matched reports whether a route claims the path.
+func (i WebhookAuthInfo) Matched() bool { return i.Route.Kind != 0 }
 
 // ResolveWebhookAuth reports the auth posture of the route claiming urlPath,
 // read from the owning task's trigger.auth and webhook_secret. An http.register
@@ -502,7 +516,7 @@ func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
 	if !ok {
 		return WebhookAuthInfo{}
 	}
-	info := WebhookAuthInfo{Matched: true, Route: m, IsAsset: m.AssetPath != ""}
+	info := WebhookAuthInfo{Route: m, IsAsset: m.AssetPath != ""}
 	k, _ := e.registry.GetKinded(m.TaskID)
 	switch t := k.(type) {
 	case *task.Spec:
@@ -529,6 +543,10 @@ func (e *Engine) serveTaskUI(w http.ResponseWriter, r *http.Request, spec *task.
 	data, err := os.ReadFile(indexFile)
 	if err != nil {
 		return false
+	}
+	if e.checkFireGuard(taskID) != nil {
+		http.NotFound(w, r)
+		return true
 	}
 	if logServe {
 		e.log.Info("webhook UI served", zap.String("path", r.URL.Path), zap.String("task", taskID))

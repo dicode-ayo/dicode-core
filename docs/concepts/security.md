@@ -150,7 +150,7 @@ request came in through (#681).
 - `POST /api/auth/refresh` — silent session renewal (device cookie only, no session required)
 - `/app/*` — static SPA assets (JS, CSS) needed to render the login page
 - `/sw.js` — service worker
-- `/hooks/*` — webhooks; auth is per-route, not the global wall: `webhookAuthGuard` resolves the request through the gateway route table and applies the owning task's `trigger.auth` (session, HMAC, or public). This covers daemon-task `http.register` routes too, which inherit their task's `trigger.auth`; a route whose owner is not in the registry is denied. See [Webhooks](../webhooks.md#route-matching).
+- `/hooks/*` — webhooks; auth is per-route, not the global wall: `webhookAuthGuard` resolves the request through the gateway route table and applies the owning task's `trigger.auth` (session, HMAC, or public). This covers daemon-task `http.register` routes too, which inherit their task's `trigger.auth`; a route whose owner is not in the registry answers 404. See [Webhooks](../webhooks.md#route-matching).
 
 ### Security headers
 

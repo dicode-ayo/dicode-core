@@ -156,7 +156,12 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 //
 // NOTE: registerPipeline must be called with e.registerMu already held (Engine.Register does this),
 // which is also what guards deferredPipelines.
-func (e *Engine) registerPipeline(p *task.PipelineTask) error {
+func (e *Engine) registerPipeline(p *task.PipelineTask) (err error) {
+	defer func() {
+		if err != nil {
+			e.routes.ReleaseWebhooks(p.ID, "")
+		}
+	}()
 	if err := p.Validate(); err != nil {
 		return err
 	}
