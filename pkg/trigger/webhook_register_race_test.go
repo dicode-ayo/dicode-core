@@ -56,9 +56,9 @@ func webhookSpec(id, path string, enabled bool) *task.Spec {
 }
 
 // The invariant behind the fix: re-registering a task must never take its own
-// webhook path out of the routing map, even transiently. Registration is
-// serialised by registerMu but lookups only take e.mu, so a path deleted here
-// and re-added a moment later is a live 404 for any request in between.
+// webhook route out of the route table, even transiently. Registration is
+// serialised by registerMu but lookups never take it, so a route released here
+// and re-claimed a moment later is a live 404 for any request in between.
 func TestUnregisterTriggersKeeping_RetainsReclaimedPath(t *testing.T) {
 	eng, _, _ := raceEnv(t)
 	spec := webhookSpec("keep", "/hooks/keep", true)
@@ -68,11 +68,10 @@ func TestUnregisterTriggersKeeping_RetainsReclaimedPath(t *testing.T) {
 
 	eng.unregisterTriggersKeeping(spec.ID, spec.Trigger.Webhook, "")
 
-	eng.mu.Lock()
-	got, ok := eng.webhooks["/hooks/keep"]
-	eng.mu.Unlock()
+	got := eng.routeOwner("/hooks/keep")
+	ok := got != ""
 	if !ok || got != "keep" {
-		t.Fatalf("webhooks[/hooks/keep] = %q,%v; the re-claimed path must never be removed", got, ok)
+		t.Fatalf("route /hooks/keep owner = %q, claimed=%v; the re-claimed path must never be removed", got, ok)
 	}
 }
 
@@ -87,11 +86,9 @@ func TestUnregisterTriggersKeeping_DropsUnclaimedPath(t *testing.T) {
 
 	eng.unregisterTriggersKeeping(spec.ID, "/hooks/new", "")
 
-	eng.mu.Lock()
-	_, stillThere := eng.webhooks["/hooks/old"]
-	eng.mu.Unlock()
+	stillThere := eng.routeOwner("/hooks/old") != ""
 	if stillThere {
-		t.Fatal("webhooks[/hooks/old] survived; a path not being re-claimed must be dropped")
+		t.Fatal("route /hooks/old survived; a path not being re-claimed must be dropped")
 	}
 }
 
@@ -106,9 +103,7 @@ func TestRegister_DisabledTaskReleasesWebhookPath(t *testing.T) {
 		t.Fatalf("Register disabled: %v", err)
 	}
 
-	eng.mu.Lock()
-	_, stillThere := eng.webhooks["/hooks/toggle"]
-	eng.mu.Unlock()
+	stillThere := eng.routeOwner("/hooks/toggle") != ""
 	if stillThere {
 		t.Fatal("a disabled task kept its webhook route")
 	}

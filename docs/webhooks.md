@@ -234,16 +234,30 @@ short delay.
 
 ### Duplicate webhook paths are rejected
 
-Each webhook path can only be claimed by one task. If a second task (e.g., a
-task loaded from a watched git repo) tries to register a path that is already
-claimed, it is silently rejected and a warning is logged:
+Webhook triggers and daemon-task `http.register` routes share one route table,
+and each path can only be claimed by one task. A claim of a path another task
+already holds — a second webhook task loaded from a watched git repo, or a
+daemon task calling `http.register` on another task's path — is rejected and
+the original task keeps serving it. For a webhook trigger a warning is logged:
 
 ```
-WARN rejecting duplicate webhook path — already claimed by another task
-     path=/hooks/my-path existing_task=original-task rejected_task=intruder-task
+WARN rejecting webhook path  task=intruder-task path=/hooks/my-path
+     error="route already claimed by another task: /hooks/my-path is held by original-task"
 ```
 
-A task re-registering its own path during a reconciler reload is allowed.
+and an `http.register` call returns the same error to the task. A task
+re-claiming its own path (a reconciler reload, a daemon restart) is allowed.
+`/hooks/oauth-complete` is reserved for `buildin/auth-relay`. A trailing slash
+is ignored: `/hooks/x/` and `/hooks/x` are the same path.
+
+### Route matching
+
+A request is served by the task whose path equals the request path, otherwise
+by the longest claimed path that is a whole-segment prefix of it — with both
+`/hooks/ai` and `/hooks/ai/openai` claimed, `/hooks/ai/openai/chat.js` goes to
+the second and `/hooks/ai/other.js` to the first; `/hooks/aix` matches neither.
+The auth guard decides on the same match the request is then dispatched to, so
+a public `/hooks/ai` can never expose a protected `/hooks/ai/openai`.
 
 ---
 
@@ -286,26 +300,32 @@ https://your-public-host/hooks/<path>
 
 ## Daemon tasks that serve HTTP (http.register)
 
-A daemon task can register arbitrary HTTP patterns at startup via the
-`http.register` IPC method. This is used by daemon tasks that run a persistent
-HTTP server (e.g., a custom UI or API proxy):
+A daemon task (`trigger.daemon: true`) can claim an HTTP path with the
+`http.register` IPC method and answer the requests routed to it. There is no
+SDK wrapper yet: the task opens its own connection to `DICODE_SOCKET`,
+handshakes with `DICODE_TOKEN`, and exchanges length-prefixed JSON frames
+(see `tests/e2e/fixtures/tasks/http-register-guarded/task.js`):
 
-```typescript
-// task.ts — daemon task with mcp_port serving a custom UI
-// task.yaml: trigger: { daemon: true }
+- `{ "id": "1", "method": "http.register", "pattern": "/hooks/my-app" }` claims
+  the path and everything below it; the reply carries an `error` if the path is
+  invalid, reserved, or held by another task.
+- Each request arrives as a push `{ requestID, httpMethod, path, query,
+  reqHeaders, reqBody }` (`reqBody` base64), answered with
+  `{ "method": "http.respond", requestID, status, respHeaders, respBody }`
+  within 60 s.
 
-// Register a catch-all handler for this task's namespace.
-await dicode.http.register("/my-app/*")
+Registering a new pattern releases the previous one. The route is released
+when the connection closes or the task is unregistered.
 
-// The task SDK delivers each incoming request as an event:
-dicode.http.serve(async (req) => {
-  if (req.path === "/my-app/") {
-    return { status: 200, headers: { "Content-Type": "text/html" }, body: "<h1>My App</h1>" }
-  }
-  return { status: 404, body: "not found" }
-})
+**Auth:** an `http.register` route inherits the daemon task's `trigger.auth`.
+With `auth: true` (or `"session"`) every request below the path needs a dicode
+session — unauthenticated browsers are redirected to `/login`, API callers get
+401 — exactly as for a webhook task. Nothing on this route verifies an HMAC
+signature, so `auth: "any"` admits sessions only. A route whose owning task is
+no longer in the registry is refused.
+
+```yaml
+trigger:
+  daemon: true
+  auth: true
 ```
-
-Registered patterns are automatically unregistered when the daemon task exits.
-Pattern priority: exact match wins; for equal-length patterns, first-registered
-wins. Built-in daemon routes (`/health`, `/api/*`) always have priority.

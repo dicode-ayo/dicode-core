@@ -52,6 +52,11 @@ spec:
     login-heading-target:
       ref:
         path: FIXTURES_TASKS_DIR/login-heading-target/task.yaml
+    # Daemon task serving an http.register route under trigger.auth — see
+    # http-register-auth.spec.ts.
+    http-register-guarded:
+      ref:
+        path: FIXTURES_TASKS_DIR/http-register-guarded/task.yaml
     # approval.notify_task fixture — see notify-echo/task.yaml.
     notify-echo:
       ref:

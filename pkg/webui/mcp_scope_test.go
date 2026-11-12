@@ -777,11 +777,11 @@ func TestHandleMCP_ScopedKey_ForwardsBoundRunID(t *testing.T) {
 	h := srv.Handler()
 
 	var forwarded []byte
-	srv.gateway.Register("/hooks/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	claimRoute(t, srv.gateway, "buildin/mcp", "/hooks/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forwarded, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(func() { srv.gateway.Unregister("/hooks/mcp") })
+	t.Cleanup(func() { srv.gateway.Release("buildin/mcp", "") })
 
 	raw, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-mine",
 		pkgruntime.MCPScope{SetDevMode: true})

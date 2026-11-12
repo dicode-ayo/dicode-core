@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
@@ -159,39 +160,33 @@ func TestCheckWebhookReplay_SameTimestampAndBody_Rejected(t *testing.T) {
 }
 
 // Fix 4: A second task trying to register the same webhook path is rejected.
-func TestRegisterWebhookPath_DuplicatePath_Rejected(t *testing.T) {
+func TestClaimWebhook_DuplicatePath_Rejected(t *testing.T) {
 	e := newTestEnv(t)
 
-	e.engine.registerWebhookPath("task-a", "/hooks/shared")
+	e.engine.claimWebhook("task-a", "/hooks/shared", ipc.RouteTaskWebhook, e.engine.WebhookHandler())
 
-	e.engine.mu.Lock()
-	got := e.engine.webhooks["/hooks/shared"]
-	e.engine.mu.Unlock()
+	got := e.engine.routeOwner("/hooks/shared")
 	if got != "task-a" {
 		t.Fatalf("first registration should succeed, got %q", got)
 	}
 
 	// Second task tries to claim the same path.
-	e.engine.registerWebhookPath("task-b", "/hooks/shared")
+	e.engine.claimWebhook("task-b", "/hooks/shared", ipc.RouteTaskWebhook, e.engine.WebhookHandler())
 
-	e.engine.mu.Lock()
-	got = e.engine.webhooks["/hooks/shared"]
-	e.engine.mu.Unlock()
+	got = e.engine.routeOwner("/hooks/shared")
 	if got != "task-a" {
 		t.Errorf("duplicate registration should be rejected; owner is %q, want task-a", got)
 	}
 }
 
 // A task re-registering its own path (e.g. on reconciler reload) must succeed.
-func TestRegisterWebhookPath_SameTaskReregisters_Allowed(t *testing.T) {
+func TestClaimWebhook_SameTaskReregisters_Allowed(t *testing.T) {
 	e := newTestEnv(t)
 
-	e.engine.registerWebhookPath("task-a", "/hooks/mypath")
-	e.engine.registerWebhookPath("task-a", "/hooks/mypath") // re-register same task
+	e.engine.claimWebhook("task-a", "/hooks/mypath", ipc.RouteTaskWebhook, e.engine.WebhookHandler())
+	e.engine.claimWebhook("task-a", "/hooks/mypath", ipc.RouteTaskWebhook, e.engine.WebhookHandler()) // re-register same task
 
-	e.engine.mu.Lock()
-	got := e.engine.webhooks["/hooks/mypath"]
-	e.engine.mu.Unlock()
+	got := e.engine.routeOwner("/hooks/mypath")
 	if got != "task-a" {
 		t.Errorf("same-task re-registration should succeed, got %q", got)
 	}

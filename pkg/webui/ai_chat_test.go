@@ -34,6 +34,7 @@ func newAIServer(t *testing.T, aiTask string) (*Server, *ipc.Gateway) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	gw := ipc.NewGateway()
+	eng.SetGateway(gw)
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
 		AI:     config.AIConfig{Task: aiTask},
@@ -60,7 +61,7 @@ func registerEchoWebhook(t *testing.T, srv *Server, gw *ipc.Gateway, id, hookPat
 	if err := srv.registry.Register(spec); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	gw.Register(hookPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	claimRoute(t, gw, id, hookPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
 		b, _ := io.ReadAll(r.Body)
 		if len(b) > 0 {
@@ -279,7 +280,7 @@ func TestAIChat_SuspendedRunReturnsRunID(t *testing.T) {
 	if err := srv.registry.Register(spec); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	gw.Register("/hooks/test/echo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	claimRoute(t, gw, "test/echo", "/hooks/test/echo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Run-Id", runID)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -398,5 +399,12 @@ func TestAISettings_RequiresAuth(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without session, got %d", w.Code)
+	}
+}
+
+func claimRoute(t *testing.T, gw *ipc.Gateway, owner, pattern string, h http.Handler) {
+	t.Helper()
+	if err := gw.Claim(owner, pattern, ipc.RouteTaskWebhook, h); err != nil {
+		t.Fatalf("claim %s: %v", pattern, err)
 	}
 }

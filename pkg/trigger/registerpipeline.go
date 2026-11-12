@@ -3,8 +3,10 @@ package trigger
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
@@ -166,8 +168,7 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	// neither, forcing unregisterTriggersKeeping to fully tear down any
 	// previously-armed trigger.
 	keepWebhook := ""
-	if p.Enabled && p.Trigger.Webhook != "" &&
-		!(p.Trigger.Webhook == reservedOAuthCompletePath && p.ID != oauthRelayBuiltinID) {
+	if p.Enabled {
 		keepWebhook = p.Trigger.Webhook
 	}
 	keepCron := ""
@@ -203,6 +204,12 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 					zap.String("task", p.ID), zap.Error(err))
 			}
 			e.deferredPipelines[p.ID] = p
+			// Hold the route while deferred so the path stays this pipeline's;
+			// it answers 404 until the stages land and the re-claim below
+			// swaps in the webhook handler.
+			if p.Trigger.Webhook != "" {
+				e.claimWebhook(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, http.NotFoundHandler())
+			}
 			return nil
 		}
 		return err
@@ -220,7 +227,7 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 		e.registerPipelineCron(p, keptCron)
 	}
 	if p.Trigger.Webhook != "" {
-		e.registerWebhookPath(p.ID, p.Trigger.Webhook)
+		e.claimWebhook(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, e.WebhookHandler())
 	}
 	e.log.Info("pipeline registered", zap.String("task", p.ID), zap.Int("stages", len(p.Stages)))
 	return nil

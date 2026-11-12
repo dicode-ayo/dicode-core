@@ -97,6 +97,7 @@ export default defineConfig({
         '**/auth.spec.ts',
         '**/auth-providers.spec.ts',
         '**/webhook-auth-any.spec.ts',
+        '**/http-register-auth.spec.ts',
         '**/login-heading-overflow.spec.ts',
         '**/replay-params.spec.ts',
       ],

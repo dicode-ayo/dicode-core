@@ -109,13 +109,14 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 	return webhookDeny
 }
 
-// webhookAuthGuard enforces a webhook's trigger.auth posture. The matched
-// webhook is resolved through the engine's own path lookup (ResolveWebhookAuth),
-// the same one the gateway dispatches on, so the guard and the served route can
-// never disagree — a public `/hooks/ai` cannot shadow a protected
-// `/hooks/ai/dicodai`.
+// webhookAuthGuard enforces the trigger.auth posture of the route a /hooks/*
+// request resolves to, then dispatches through the gateway with that same
+// route pinned in the request context, so the guarded route and the served
+// route are one answer — a public `/hooks/ai` cannot shadow a protected
+// `/hooks/ai/dicodai`. A daemon task's http.register route carries its task's
+// trigger.auth; a route whose owner is not in the registry is denied.
 //
-//   - Public (no auth) → pass through.
+//   - No route, or a public one → pass through (the gateway 404s an unrouted path).
 //   - session → a valid dicode session is required for GET (UI) and POST (run).
 //   - any → session OR a valid HMAC signature. HMAC is the only credential that
 //     survives the relay, so a relayed non-GET falls through to the signature
@@ -128,12 +129,19 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 // (device-token renewal, cookie clearing) that must not be relay-drivable.
 func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	info := s.engine.ResolveWebhookAuth(r.URL.Path)
+	relayed := r.Header.Get("X-Relay-Base") != ""
+	if info.Deny {
+		s.denyWebhook(w, r, relayed)
+		return
+	}
+	if info.Matched {
+		r = r.WithContext(ipc.WithRoute(r.Context(), info.Route))
+	}
 	if !info.Mode.Enabled() {
 		next.ServeHTTP(w, r)
 		return
 	}
 
-	relayed := r.Header.Get("X-Relay-Base") != ""
 	hasSession := false
 	if !relayed {
 		hasSession = s.hasValidSession(w, r)

@@ -177,12 +177,9 @@ func TestPipelineCronReRegister_DisableTearsDownEntry(t *testing.T) {
 	}
 }
 
-// TestPipelineWebhookReRegister_PathChangeReleasesOldPath is the PipelineTask
-// analogue of the webhook half of review finding 1: registerPipeline used to
-// call registerWebhookPath unconditionally, and registerWebhookPath only ever
-// adds/overwrites e.webhooks[path] — never removing a previously-claimed path
-// for the same ID. Editing a pipeline's trigger.webhook must release the old
-// path so it doesn't stay permanently routed to the pipeline.
+// TestPipelineWebhookReRegister_PathChangeReleasesOldPath: editing a
+// pipeline's trigger.webhook must release the old path so it doesn't stay
+// permanently routed to the pipeline.
 func TestPipelineWebhookReRegister_PathChangeReleasesOldPath(t *testing.T) {
 	eng, reg, _ := raceEnv(t)
 	pipelineRaceStage(t, eng, reg, "s")
@@ -200,9 +197,7 @@ func TestPipelineWebhookReRegister_PathChangeReleasesOldPath(t *testing.T) {
 		t.Fatalf("eng.Register(pipe) (first): %v", err)
 	}
 
-	eng.mu.Lock()
-	got := eng.webhooks["/hooks/old"]
-	eng.mu.Unlock()
+	got := eng.routeOwner("/hooks/old")
 	if got != "wp" {
 		t.Fatalf("webhook path not claimed by pipeline before the change: got %q, want wp", got)
 	}
@@ -215,14 +210,12 @@ func TestPipelineWebhookReRegister_PathChangeReleasesOldPath(t *testing.T) {
 		t.Fatalf("eng.Register(pipe) (updated): %v", err)
 	}
 
-	eng.mu.Lock()
-	_, oldStillThere := eng.webhooks["/hooks/old"]
-	newOwner := eng.webhooks["/hooks/new"]
-	eng.mu.Unlock()
+	oldStillThere := eng.routeOwner("/hooks/old") != ""
+	newOwner := eng.routeOwner("/hooks/new")
 	if oldStillThere {
-		t.Error("webhooks[/hooks/old] survived a pipeline webhook path change — old path leaked (issue #550, pipeline case)")
+		t.Error("route /hooks/old survived a pipeline webhook path change — old path leaked (issue #550, pipeline case)")
 	}
 	if newOwner != "wp" {
-		t.Errorf("webhooks[/hooks/new] = %q; want wp", newOwner)
+		t.Errorf("route /hooks/new owner = %q; want wp", newOwner)
 	}
 }
