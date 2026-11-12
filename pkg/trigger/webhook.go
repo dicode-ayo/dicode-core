@@ -460,11 +460,13 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
 		// This applies to any webhook task that ships an index.html,
 		// not just the built-in webui — it is the standard "SPA shell" pattern.
-		// A task held for approval serves nothing from its directory; checked
-		// once, before any file is read.
-		if (assetPath != "" || r.Method == http.MethodGet) && e.checkFireGuard(taskID) != nil {
-			http.NotFound(w, r)
-			return
+		// A held task serves nothing from its directory. A GET that would run
+		// the task (no index.html) falls through to the fire path's veto.
+		if (assetPath != "" || r.Method == http.MethodGet) && e.isHeld(taskID) {
+			if _, err := os.Stat(filepath.Join(spec.TaskDir, "index.html")); assetPath != "" || err == nil {
+				http.NotFound(w, r)
+				return
+			}
 		}
 
 		if assetPath != "" {

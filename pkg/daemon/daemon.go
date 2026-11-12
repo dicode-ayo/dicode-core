@@ -685,6 +685,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 	// refused everywhere it can be invoked — REST (webui), CLI control
 	// socket, and the per-run dicode.tasks.test IPC capability.
 	eng.SetFireGuard(approvalGate.FireGuard)
+	eng.SetHoldCheck(approvalGate.Held)
 	denoRT.SetTestGuard(approvalGate.FireGuard)
 	pythonRT.SetTestGuard(approvalGate.FireGuard)
 

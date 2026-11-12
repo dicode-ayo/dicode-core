@@ -110,7 +110,7 @@ func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (
 	if kind == RouteHTTPRegister && !strings.HasPrefix(p, "/hooks/") {
 		return "", fmt.Errorf("%w: http.register pattern %q must be below /hooks/", ErrRouteInvalid, pattern)
 	}
-	if p == ReservedOAuthCompletePath && owner != OAuthRelayBuiltinID {
+	if (p == ReservedOAuthCompletePath || strings.HasPrefix(p, ReservedOAuthCompletePath+"/")) && owner != OAuthRelayBuiltinID {
 		return "", fmt.Errorf("%w: %s may only be claimed by %s", ErrRouteReserved, p, OAuthRelayBuiltinID)
 	}
 	if strings.HasPrefix(ReservedOAuthCompletePath, p+"/") {
@@ -157,9 +157,6 @@ func (g *Gateway) ReleaseWebhooks(owner, keep string) {
 	})
 }
 
-// RunID reports the task run this handler forwards to.
-func (h *ipcHandler) RunID() string { return h.runID }
-
 // ReleaseRun drops owner's http.register routes served by run runID, ahead of
 // that run's IPC connection closing.
 func (g *Gateway) ReleaseRun(owner, runID string) {
@@ -169,8 +166,8 @@ func (g *Gateway) ReleaseRun(owner, runID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.routes = slices.DeleteFunc(g.routes, func(r gatewayRoute) bool {
-		rb, ok := r.handler.(interface{ RunID() string })
-		return r.owner == owner && r.kind == RouteHTTPRegister && ok && rb.RunID() == runID
+		h, ok := r.handler.(*ipcHandler)
+		return r.owner == owner && r.kind == RouteHTTPRegister && ok && h.runID == runID
 	})
 }
 

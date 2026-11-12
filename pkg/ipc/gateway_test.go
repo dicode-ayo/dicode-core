@@ -113,6 +113,13 @@ func TestGateway_ClaimRejectsReservedAndInvalid(t *testing.T) {
 	if _, err := g.Claim("sneaky", ReservedOAuthCompletePath, RouteHTTPRegister, named("x")); !errors.Is(err, ErrRouteReserved) {
 		t.Errorf("reserved path claim by non-builtin = %v; want ErrRouteReserved", err)
 	}
+	for _, p := range []string{ReservedOAuthCompletePath + "/cb", ReservedOAuthCompletePath + "/a/b"} {
+		for _, k := range []RouteKind{RouteTaskWebhook, RouteHTTPRegister} {
+			if _, err := g.Claim("sneaky", p, k, named("x")); !errors.Is(err, ErrRouteReserved) {
+				t.Errorf("Claim(%q, %v) by non-builtin = %v; want ErrRouteReserved", p, k, err)
+			}
+		}
+	}
 	if _, err := g.Claim(OAuthRelayBuiltinID, ReservedOAuthCompletePath, RouteTaskWebhook, named("x")); err != nil {
 		t.Errorf("reserved path claim by builtin: %v", err)
 	}

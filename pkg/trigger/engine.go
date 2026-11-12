@@ -71,6 +71,7 @@ type Engine struct {
 	// this veto.
 	fireGuardMu sync.RWMutex
 	fireGuard   func(taskID string) error
+	holdCheck   func(taskID string) bool // cheap held check; see SetHoldCheck
 
 	// registerMu serializes the entire Register path so that concurrent
 	// registrations cannot admit a cycle through interleaved snapshots of
@@ -345,6 +346,21 @@ func (e *Engine) SetFireGuard(g func(taskID string) error) {
 	e.fireGuardMu.Unlock()
 }
 
+// SetHoldCheck installs the cheap, non-hashing "is this task held from arming"
+// check used per request and at boot. A nil check holds nothing.
+func (e *Engine) SetHoldCheck(f func(taskID string) bool) {
+	e.fireGuardMu.Lock()
+	e.holdCheck = f
+	e.fireGuardMu.Unlock()
+}
+
+func (e *Engine) isHeld(taskID string) bool {
+	e.fireGuardMu.RLock()
+	f := e.holdCheck
+	e.fireGuardMu.RUnlock()
+	return f != nil && f(taskID)
+}
+
 // checkFireGuard returns the guard's veto for taskID, or nil when no guard
 // is installed.
 func (e *Engine) checkFireGuard(taskID string) error {
@@ -520,12 +536,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// registerAdmitted registers every registry task the fire guard admits. A task
+// registerAdmitted registers every registry task that is not held. A task
 // held for approval is armed later by whoever lifts the hold, so registering
 // it here would hand it webhook routes and schedules it must not have yet.
 func (e *Engine) registerAdmitted() {
 	for _, spec := range e.registry.All() {
-		if e.checkFireGuard(spec.ID) != nil {
+		if e.isHeld(spec.ID) {
 			continue
 		}
 		e.Register(spec)
@@ -637,11 +653,7 @@ func (e *Engine) Unregister(id string) {
 	e.registerMu.Lock()
 	delete(e.deferredPipelines, id)
 	e.registerMu.Unlock()
-	// The daemon run is killed asynchronously; its http.register routes go now
-	// so the guard never reads a replacement spec's trigger.auth for them.
-	runID := e.slots.runID(id)
 	e.unregisterTriggers(id)
-	e.routes.ReleaseRun(id, runID)
 	e.claimRejections.Range(func(k, _ any) bool {
 		if strings.HasPrefix(k.(string), id+"\x00") {
 			e.claimRejections.Delete(k)
@@ -718,6 +730,9 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 	e.crashloops.reset(id)
 
 	if runID != "" {
+		// The run dies asynchronously; its http.register routes go now so the
+		// guard never reads a replacement spec's trigger.auth for them.
+		e.routes.ReleaseRun(id, runID)
 		e.log.Info("stopping daemon — task unregistered", zap.String("task", id), zap.String("run", runID))
 		e.KillRun(runID)
 	}
