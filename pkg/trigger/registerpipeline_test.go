@@ -1,6 +1,9 @@
 package trigger
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/task"
@@ -58,9 +61,7 @@ func TestPipelineWebhookRegistered(t *testing.T) {
 	}
 	registerStageAndPipeline(t, env, pipe)
 
-	env.engine.mu.Lock()
-	got := env.engine.webhooks["/hooks/pipe"]
-	env.engine.mu.Unlock()
+	got := env.engine.routeOwner("/hooks/pipe")
 	if got != "wp" {
 		t.Fatalf("webhook path not claimed by pipeline: got %q, want wp", got)
 	}
@@ -237,16 +238,10 @@ func TestColdStartDeferredPipeline(t *testing.T) {
 	}
 }
 
-// TestColdStartDeferredPipeline_Webhook is the webhook analogue of
-// TestColdStartDeferredPipeline and locks in the cross-layer behaviour the
-// daemon comment describes: a webhook-triggered pipeline registered before its
-// stage is deferred and does NOT claim its path in the engine's webhooks map.
-// At the daemon layer the gateway route is still claimed at defer time, so a
-// POST reaches the engine but misses this lookup and 404s — the engine
-// webhooks[path] entry only appears once the stage lands and the deferred
-// pipeline is retried/scheduled. We assert against the engine routing table
-// directly (no full daemon+gateway harness needed: the engine map is the
-// authority for whether the path actually routes).
+// TestColdStartDeferredPipeline_Webhook: a webhook pipeline registered before
+// its stage is deferred but already holds its route (so no other task can take
+// the path) and answers 404 through the gateway; once the stage lands the same
+// route dispatches to the pipeline.
 func TestColdStartDeferredPipeline_Webhook(t *testing.T) {
 	env := newTestEnv(t)
 
@@ -265,13 +260,13 @@ func TestColdStartDeferredPipeline_Webhook(t *testing.T) {
 	if err := env.engine.Register(pipe); err != nil {
 		t.Fatalf("Register(pipe) before stage should defer, not error: %v", err)
 	}
-	// The webhook path must NOT be routable yet (engine webhooks map has no
-	// entry — a POST would 404 from the engine layer).
-	env.engine.mu.Lock()
-	_, routed := env.engine.webhooks[path]
-	env.engine.mu.Unlock()
-	if routed {
-		t.Fatal("webhook path must not be in the engine routing table while the pipeline is deferred")
+	if got := env.engine.routeOwner(path); got != "wp" {
+		t.Fatalf("deferred pipeline must hold its route: owner %q, want wp", got)
+	}
+	w := httptest.NewRecorder()
+	env.engine.routes.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("deferred pipeline webhook: got %d, want 404", w.Code)
 	}
 	// And it must be recorded as deferred.
 	env.engine.registerMu.Lock()
@@ -293,11 +288,15 @@ func TestColdStartDeferredPipeline_Webhook(t *testing.T) {
 
 	// 3. The webhook path is now claimed by the pipeline (routable) and the
 	// pipeline is dropped from the deferred set.
-	env.engine.mu.Lock()
-	got := env.engine.webhooks[path]
-	env.engine.mu.Unlock()
+	got := env.engine.routeOwner(path)
 	if got != "wp" {
 		t.Fatalf("webhook path not routed to pipeline after stage registered: got %q, want wp", got)
+	}
+	w = httptest.NewRecorder()
+	env.engine.routes.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
+	if w.Code != http.StatusOK || w.Header().Get("X-Run-Id") == "" {
+		t.Fatalf("scheduled pipeline webhook: %d (X-Run-Id %q) %s; want 200 with a run ID",
+			w.Code, w.Header().Get("X-Run-Id"), w.Body.String())
 	}
 	env.engine.registerMu.Lock()
 	_, stillDeferred := env.engine.deferredPipelines["wp"]

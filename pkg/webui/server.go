@@ -252,7 +252,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // rec and dataDir enable live source management; pass nil/"" in tests.
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB) (*Server, error) {
 	sm := newSessionManager(database, secureCookiesFor(cfg))
 
 	wsHub := NewWSHub(log, wsOriginPatterns(cfg.Server.AllowedOrigins))
@@ -292,7 +292,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		ws:                wsHub,
 		log:               log,
 		port:              port,
-		gateway:           gateway,
+		gateway:           eng.Gateway(),
 		db:                database,
 		audit:             audit.NewStore(database),
 	}

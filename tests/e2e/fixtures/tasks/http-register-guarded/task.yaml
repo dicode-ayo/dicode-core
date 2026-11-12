@@ -1,0 +1,12 @@
+apiVersion: dicode/v1
+kind: Task
+name: HTTP Register Guarded
+description: >
+  A daemon task that serves /hooks/test-http-register through http.register
+  and declares trigger.auth, so its route must require a dicode session.
+  Fixture for http-register-auth.spec.ts.
+runtime: js
+trigger:
+  daemon: true
+  auth: true
+  restart: on-failure

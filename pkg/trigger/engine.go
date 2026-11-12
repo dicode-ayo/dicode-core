@@ -13,6 +13,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
@@ -57,7 +58,8 @@ type Engine struct {
 	// (#550). Guarded by mu.
 	cronArmed map[string]cronArm
 
-	webhooks           map[string]string // webhook path → taskID
+	routes             *ipc.Gateway // the daemon's HTTP route table; see Gateway()
+	claimRejections    sync.Map     // task ID + "\x00" + path → last rejected-claim error, to log a repeat at DEBUG
 	webhookReplayCache *replayCache
 
 	// fireGuard, when set, can veto any run before it starts (approval gate,
@@ -69,6 +71,7 @@ type Engine struct {
 	// this veto.
 	fireGuardMu sync.RWMutex
 	fireGuard   func(taskID string) error
+	holdCheck   func(taskID string) bool // cheap held check; see SetHoldCheck
 
 	// registerMu serializes the entire Register path so that concurrent
 	// registrations cannot admit a cycle through interleaved snapshots of
@@ -252,7 +255,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		cron:                      cron.New(),
 		log:                       log,
 		cronArmed:                 make(map[string]cronArm),
-		webhooks:                  make(map[string]string),
+		routes:                    ipc.NewGateway(),
 		webhookReplayCache:        newReplayCache(1 * time.Hour),
 		daemonSpecs:               make(map[string]*task.Spec),
 		daemonStates:              newDaemonStateMap(),
@@ -341,6 +344,21 @@ func (e *Engine) SetFireGuard(g func(taskID string) error) {
 	e.fireGuardMu.Lock()
 	e.fireGuard = g
 	e.fireGuardMu.Unlock()
+}
+
+// SetHoldCheck installs the cheap, non-hashing "is this task held from arming"
+// check used per request and at boot. A nil check holds nothing.
+func (e *Engine) SetHoldCheck(f func(taskID string) bool) {
+	e.fireGuardMu.Lock()
+	e.holdCheck = f
+	e.fireGuardMu.Unlock()
+}
+
+func (e *Engine) isHeld(taskID string) bool {
+	e.fireGuardMu.RLock()
+	f := e.holdCheck
+	e.fireGuardMu.RUnlock()
+	return f != nil && f(taskID)
 }
 
 // checkFireGuard returns the guard's veto for taskID, or nil when no guard
@@ -462,9 +480,7 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.catchupMissedCronRuns(ctx)
 	}
 
-	for _, spec := range e.registry.All() {
-		e.Register(spec)
-	}
+	e.registerAdmitted()
 	e.cron.Start()
 
 	<-ctx.Done()
@@ -520,6 +536,18 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
+// registerAdmitted registers every registry task that is not held. A task
+// held for approval is armed later by whoever lifts the hold, so registering
+// it here would hand it webhook routes and schedules it must not have yet.
+func (e *Engine) registerAdmitted() {
+	for _, spec := range e.registry.All() {
+		if e.isHeld(spec.ID) {
+			continue
+		}
+		e.Register(spec)
+	}
+}
+
 // shutdownDrainGrace bounds how long Start waits for in-flight run goroutines to
 // finalize after shutdown kills are issued. A wedged run cannot exceed this
 // ceiling, so shutdown always makes progress.
@@ -530,7 +558,8 @@ const shutdownDrainGrace = 10 * time.Second
 // follows the cron/webhook/daemon registration path. The call is serialized via
 // registerMu so concurrent registrations cannot admit a cycle through
 // interleaved registry snapshots. Returns a non-nil error if validation fails
-// (e.g. pipeline stage ref/cycle errors); on error, no triggers are modified.
+// (e.g. pipeline stage ref/cycle errors); on error the task's triggers are torn
+// down, so a rejected spec is neither served nor scheduled.
 // Callers may pass any task.Kinded;
 // *task.Spec satisfies it, so existing call sites are unaffected.
 func (e *Engine) Register(k task.Kinded) error {
@@ -547,13 +576,11 @@ func (e *Engine) Register(k task.Kinded) error {
 		// holds pipelines), but the delete is a cheap no-op safeguard if a
 		// pipeline is ever replaced in-place by a Task of the same ID.
 		delete(e.deferredPipelines, s.ID)
-		// Keep the webhook path this registration is about to re-claim, so a
-		// request in flight during a reload never sees it missing. Only when the
-		// path will actually be re-added below: a disabled task arms no triggers,
-		// and registerWebhookPath refuses the reserved OAuth path.
+		// Keep the webhook route this registration is about to re-claim, so a
+		// request in flight during a reload never sees it missing. A disabled
+		// task arms no triggers, so it keeps nothing.
 		keep := ""
-		if s.Enabled && s.Trigger.Webhook != "" &&
-			!(s.Trigger.Webhook == reservedOAuthCompletePath && s.ID != oauthRelayBuiltinID) {
+		if s.Enabled {
 			keep = s.Trigger.Webhook
 		}
 		// Same idea for cron (#550): only offer the new schedule as "keepable"
@@ -584,6 +611,7 @@ func (e *Engine) Register(k task.Kinded) error {
 		}
 
 		if err := e.checkSuccessChainCycle(s); err != nil {
+			e.unregisterTriggers(s.ID)
 			return err
 		}
 
@@ -626,6 +654,12 @@ func (e *Engine) Unregister(id string) {
 	delete(e.deferredPipelines, id)
 	e.registerMu.Unlock()
 	e.unregisterTriggers(id)
+	e.claimRejections.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), id+"\x00") {
+			e.claimRejections.Delete(k)
+		}
+		return true
+	})
 }
 
 // unregisterTriggers removes all trigger registrations (cron, webhook, daemon)
@@ -643,9 +677,9 @@ func (e *Engine) unregisterTriggers(id string) {
 // thread this into scheduleCron (via registerCron/registerPipelineCron) so it
 // doesn't have to re-derive the same fact under a second lock acquisition.
 //
-// registerMu serialises registrations but webhook lookups only take e.mu, so a
-// request racing a re-registration would otherwise find the path gone between
-// the delete here and the re-add in registerWebhookPath, and 404. Every
+// registerMu serialises registrations but webhook lookups never take it, so a
+// request racing a re-registration would otherwise find the route gone between
+// the release here and the re-claim in claimWebhook, and 404. Every
 // Register re-registers (Engine.Start at boot, the reconciler on every content
 // change), so a live webhook could 404 for no reason the caller could see.
 //
@@ -660,10 +694,6 @@ func (e *Engine) unregisterTriggers(id string) {
 // or keepCronExpr="" (task removed/disabled/no longer has a cron trigger), the
 // entry is removed and the cron_jobs row deleted exactly as before.
 func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr string) (keptCron bool) {
-	// Match the trailing-slash normalisation registerWebhookPath applies to map
-	// keys, so the keep comparison below doesn't delete (then transiently drop)
-	// a path the caller is about to re-claim.
-	keepWebhookPath = strings.TrimSuffix(keepWebhookPath, "/")
 	e.mu.Lock()
 	hadCron := false
 	if arm, ok := e.cronArmed[id]; ok {
@@ -679,12 +709,8 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 			hadCron = true
 		}
 	}
-	for path, tid := range e.webhooks {
-		if tid == id && path != keepWebhookPath {
-			delete(e.webhooks, path)
-		}
-	}
 	e.mu.Unlock()
+	e.routes.ReleaseWebhooks(id, keepWebhookPath)
 
 	if hadCron && e.db != nil {
 		if dbErr := e.db.Exec(context.Background(), `DELETE FROM cron_jobs WHERE task_id=?`, id); dbErr != nil {
@@ -704,6 +730,9 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr str
 	e.crashloops.reset(id)
 
 	if runID != "" {
+		// The run dies asynchronously; its http.register routes go now so the
+		// guard never reads a replacement spec's trigger.auth for them.
+		e.routes.ReleaseRun(id, runID)
 		e.log.Info("stopping daemon — task unregistered", zap.String("task", id), zap.String("run", runID))
 		e.KillRun(runID)
 	}

@@ -380,18 +380,14 @@ func TestEngine_Register_Unregister(t *testing.T) {
 	_ = e.reg.Register(spec)
 	e.engine.Register(spec)
 
-	e.engine.mu.Lock()
-	_, ok := e.engine.webhooks["/hooks/test"]
-	e.engine.mu.Unlock()
+	ok := e.engine.routeOwner("/hooks/test") != ""
 	if !ok {
 		t.Fatal("webhook not registered")
 	}
 
 	e.engine.Unregister("wh-task")
 
-	e.engine.mu.Lock()
-	_, ok = e.engine.webhooks["/hooks/test"]
-	e.engine.mu.Unlock()
+	ok = e.engine.routeOwner("/hooks/test") != ""
 	if ok {
 		t.Fatal("webhook should be unregistered")
 	}
@@ -407,9 +403,7 @@ func TestEngine_ReservesOAuthCompletePath(t *testing.T) {
 	_ = e.reg.Register(attacker)
 	e.engine.Register(attacker)
 
-	e.engine.mu.Lock()
-	bound := e.engine.webhooks["/hooks/oauth-complete"]
-	e.engine.mu.Unlock()
+	bound := e.engine.routeOwner("/hooks/oauth-complete")
 	if bound == "sneaky" {
 		t.Fatalf("non-buildin task was allowed to bind reserved OAuth delivery path")
 	}
@@ -420,9 +414,7 @@ func TestEngine_ReservesOAuthCompletePath(t *testing.T) {
 	_ = e.reg.Register(builtin)
 	e.engine.Register(builtin)
 
-	e.engine.mu.Lock()
-	bound = e.engine.webhooks["/hooks/oauth-complete"]
-	e.engine.mu.Unlock()
+	bound = e.engine.routeOwner("/hooks/oauth-complete")
 	if bound != "buildin/auth-relay" {
 		t.Fatalf("buildin/auth-relay should own /hooks/oauth-complete; got %q", bound)
 	}
@@ -1501,9 +1493,7 @@ func TestEngine_DisabledTask_NoWebhookRegistered(t *testing.T) {
 	_ = e.reg.Register(spec)
 	e.engine.Register(spec)
 
-	e.engine.mu.Lock()
-	_, hasWebhook := e.engine.webhooks["/hooks/disabled-hook"]
-	e.engine.mu.Unlock()
+	hasWebhook := e.engine.routeOwner("/hooks/disabled-hook") != ""
 
 	if hasWebhook {
 		t.Errorf("disabled task should NOT have a webhook route registered")

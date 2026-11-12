@@ -14,7 +14,7 @@ request
   └─▶ corsMiddleware            validates Origin against allowlist (always active)
   └─▶ requireAuth               gates routes behind session / device token (auth only)
         ├─ public paths bypass  /api/auth/login, /api/auth/refresh, /app/*, /sw.js
-        ├─ /hooks/* bypasses    webhook auth is HMAC-based, not session-based
+        ├─ /hooks/* bypasses    webhookAuthGuard applies the route's own trigger.auth
         └─ /mcp goes to requireAPIKey instead of requireAuth
 ```
 
@@ -150,7 +150,7 @@ request came in through (#681).
 - `POST /api/auth/refresh` — silent session renewal (device cookie only, no session required)
 - `/app/*` — static SPA assets (JS, CSS) needed to render the login page
 - `/sw.js` — service worker
-- `/hooks/*` — webhooks; auth is per-task HMAC, not global session
+- `/hooks/*` — webhooks; auth is per-route, not the global wall: `webhookAuthGuard` resolves the request through the gateway route table and applies the owning task's `trigger.auth` (session, HMAC, or public). This covers daemon-task `http.register` routes too, which inherit their task's `trigger.auth`; a route whose owner is not in the registry answers 404. See [Webhooks](../webhooks.md#route-matching).
 
 ### Security headers
 

@@ -15,7 +15,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
@@ -842,7 +841,7 @@ func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *re
 
 	sourceMgr := NewSourceManager(cfg, nil, reg, t.TempDir(), zap.NewNop())
 
-	srv, err := New(8080, reg, eng, cfg, "", nil, rec, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, "", nil, rec, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New server: %v", err)
 	}

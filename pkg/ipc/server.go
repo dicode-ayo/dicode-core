@@ -486,7 +486,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	)
 	defer func() {
 		if registeredPattern != "" && s.gateway != nil {
-			s.gateway.Unregister(registeredPattern)
+			s.gateway.releaseHandler(registeredPattern, httpH)
 		}
 	}()
 
@@ -1501,13 +1501,16 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			if httpH == nil {
-				httpH = &ipcHandler{push: func(msg any) error { return writeMsg(conn, msg) }}
+				httpH = &ipcHandler{runID: s.runID, push: func(msg any) error { return writeMsg(conn, msg) }}
 			}
-			// Register the new pattern before removing the old one to avoid
-			// a brief window where requests for the path return 404.
-			s.gateway.Register(req.Pattern, httpH)
-			if registeredPattern != "" && registeredPattern != req.Pattern {
-				s.gateway.Unregister(registeredPattern)
+			// Claim the new pattern before releasing the old one so the path
+			// never transiently 404s.
+			if _, err := s.gateway.Claim(s.taskID, req.Pattern, RouteHTTPRegister, httpH); err != nil {
+				reply(req.ID, nil, "ipc: http.register: "+err.Error())
+				continue
+			}
+			if registeredPattern != "" && NormalizePattern(registeredPattern) != NormalizePattern(req.Pattern) {
+				s.gateway.releaseHandler(registeredPattern, httpH)
 			}
 			registeredPattern = req.Pattern
 			reply(req.ID, true, "")
