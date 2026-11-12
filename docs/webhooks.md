@@ -243,7 +243,8 @@ the original task keeps serving it. The one exception: a webhook declared in
 unless that task is a builtin (`buildin/…`) (a
 `webhook trigger took over another task's http.register route` warning is
 logged), so a daemon cannot squat a path before the task that declares it is
-armed. The daemon is not given the path back when that task is later removed;
+armed. A pipeline still waiting for its stages does not take the path yet; it
+does once it can dispatch. The daemon is not given the path back when that task is later removed;
 it has to call `http.register` again. A task held for approval holds no route
 at all: its path answers 404, and its UI and assets are not served, until it is
 approved. For a rejected webhook trigger a warning is logged (once; repeats on

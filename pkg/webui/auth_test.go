@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1011,6 +1013,39 @@ func TestWebhookAuthGuard_RouteClaimedAfterCheckNotServed(t *testing.T) {
 	srv.webhookAuthGuard(w, httptest.NewRequest(http.MethodPost, "/hooks/late", nil), claimThenDispatch)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("route claimed after the guard's check: got %d %q, want 404", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookAuthGuard_ReloadAfterCheckNotServed: a task reloaded with a
+// stricter trigger.auth between the guard's decision and dispatch is not
+// served under the stale, public decision.
+func TestWebhookAuthGuard_ReloadAfterCheckNotServed(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>private ui</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec := func(mode task.WebhookAuthMode) *task.Spec {
+		return &task.Spec{ID: "flip", Name: "flip", Enabled: true, TaskDir: dir,
+			Trigger: task.TriggerConfig{Webhook: "/hooks/flip", WebhookAuth: mode}}
+	}
+	public := spec(task.WebhookAuthNone)
+	if err := srv.registry.Register(public); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.engine.Register(public); err != nil {
+		t.Fatal(err)
+	}
+	reloadThenDispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := srv.registry.Register(spec(task.WebhookAuthSession)); err != nil {
+			t.Fatal(err)
+		}
+		srv.gateway.ServeHTTP(w, r)
+	})
+	w := httptest.NewRecorder()
+	srv.webhookAuthGuard(w, httptest.NewRequest(http.MethodGet, "/hooks/flip", nil), reloadThenDispatch)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "private ui") {
+		t.Errorf("reloaded-to-session task served under the public decision: %d %q", w.Code, w.Body.String())
 	}
 }
 

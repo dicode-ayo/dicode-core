@@ -438,17 +438,23 @@ func (e *Engine) WebhookHandler() http.Handler {
 		}
 		taskID, matchedHook, assetPath := m.TaskID, m.Pattern, m.AssetPath
 
-		// kind: PipelineTask webhooks have no task directory, index.html, or
-		// assets — fire the runner directly and return the parent run ID. Stage
-		// UIs/assets belong to the individual stage tasks, not the pipeline.
-		if k, isKinded := e.registry.GetKinded(taskID); isKinded {
-			if pipe, isPipe := k.(*task.PipelineTask); isPipe {
-				e.handlePipelineWebhook(w, r, pipe, assetPath)
+		k, _ := e.registry.GetKinded(taskID)
+		if pinned, ok := r.Context().Value(authPostureCtxKey{}).(WebhookAuthInfo); ok {
+			if mode, hasSecret, _ := webhookPosture(k, m.Kind); mode != pinned.Mode || hasSecret != pinned.HasSecret {
+				http.NotFound(w, r)
 				return
 			}
 		}
 
-		spec, ok := e.registry.Get(taskID)
+		// kind: PipelineTask webhooks have no task directory, index.html, or
+		// assets — fire the runner directly and return the parent run ID. Stage
+		// UIs/assets belong to the individual stage tasks, not the pipeline.
+		if pipe, isPipe := k.(*task.PipelineTask); isPipe {
+			e.handlePipelineWebhook(w, r, pipe, assetPath)
+			return
+		}
+
+		spec, ok := k.(*task.Spec)
 		if !ok {
 			http.Error(w, "task not found", http.StatusNotFound)
 			return
@@ -519,18 +525,34 @@ func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
 	}
 	info := WebhookAuthInfo{Route: m, IsAsset: m.AssetPath != ""}
 	k, _ := e.registry.GetKinded(m.TaskID)
+	var known bool
+	info.Mode, info.HasSecret, known = webhookPosture(k, m.Kind)
+	info.Deny = !known || e.isHeld(m.TaskID)
+	return info
+}
+
+// webhookPosture is the auth posture route kind kind gets from its owner k;
+// ok is false when k is not a task that can own a route.
+func webhookPosture(k task.Kinded, kind ipc.RouteKind) (mode task.WebhookAuthMode, hasSecret, ok bool) {
 	switch t := k.(type) {
 	case *task.Spec:
-		info.Mode, info.HasSecret = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != ""
+		mode, hasSecret, ok = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != "", true
 	case *task.PipelineTask:
-		info.Mode, info.HasSecret = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != ""
-	default:
-		info.Deny = true
+		mode, hasSecret, ok = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != "", true
 	}
-	if m.Kind == ipc.RouteHTTPRegister {
-		info.HasSecret = false
+	if kind == ipc.RouteHTTPRegister {
+		hasSecret = false
 	}
-	return info
+	return mode, hasSecret, ok
+}
+
+type authPostureCtxKey struct{}
+
+// WithWebhookAuth pins the posture an auth guard decided on, so WebhookHandler
+// can refuse a request whose task was reloaded with a different posture after
+// the decision.
+func WithWebhookAuth(ctx context.Context, info WebhookAuthInfo) context.Context {
+	return context.WithValue(ctx, authPostureCtxKey{}, info)
 }
 
 // serveTaskUI serves the task directory's index.html with the dicode client

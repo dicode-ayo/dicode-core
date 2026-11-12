@@ -558,8 +558,8 @@ const shutdownDrainGrace = 10 * time.Second
 // follows the cron/webhook/daemon registration path. The call is serialized via
 // registerMu so concurrent registrations cannot admit a cycle through
 // interleaved registry snapshots. Returns a non-nil error if validation fails
-// (e.g. pipeline stage ref/cycle errors); on error the task holds no webhook
-// route, so a rejected spec is never served.
+// (e.g. pipeline stage ref/cycle errors); on error the task's triggers are torn
+// down, so a rejected spec is neither served nor scheduled.
 // Callers may pass any task.Kinded;
 // *task.Spec satisfies it, so existing call sites are unaffected.
 func (e *Engine) Register(k task.Kinded) error {
@@ -611,7 +611,7 @@ func (e *Engine) Register(k task.Kinded) error {
 		}
 
 		if err := e.checkSuccessChainCycle(s); err != nil {
-			e.routes.ReleaseWebhooks(s.ID, "")
+			e.unregisterTriggers(s.ID)
 			return err
 		}
 

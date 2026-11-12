@@ -294,8 +294,9 @@ func TestColdStartDeferredPipeline_Webhook(t *testing.T) {
 	}
 	w = httptest.NewRecorder()
 	env.engine.routes.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
-	if w.Code == http.StatusNotFound {
-		t.Fatal("scheduled pipeline webhook still 404s through the gateway")
+	if w.Code != http.StatusOK || w.Header().Get("X-Run-Id") == "" {
+		t.Fatalf("scheduled pipeline webhook: %d (X-Run-Id %q) %s; want 200 with a run ID",
+			w.Code, w.Header().Get("X-Run-Id"), w.Body.String())
 	}
 	env.engine.registerMu.Lock()
 	_, stillDeferred := env.engine.deferredPipelines["wp"]

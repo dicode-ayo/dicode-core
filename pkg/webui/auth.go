@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
 
@@ -111,8 +112,9 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 
 // webhookAuthGuard enforces the trigger.auth posture of the route a /hooks/*
 // request resolves to, then dispatches through the gateway with that same
-// route pinned in the request context, so the guarded route and the served
-// route are one answer — a public `/hooks/ai` cannot shadow a protected
+// route and posture pinned in the request context, so the guarded route and
+// the served route are one answer (a task reloaded with a different posture in
+// between answers 404) — a public `/hooks/ai` cannot shadow a protected
 // `/hooks/ai/dicodai`. A daemon task's http.register route carries its task's
 // trigger.auth; a route whose owner is not in the registry answers 404.
 //
@@ -139,7 +141,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 	relayed := r.Header.Get("X-Relay-Base") != ""
 	// Pin the answer even when it is "no route", so a route claimed after this
 	// check is not dispatched unguarded.
-	r = r.WithContext(ipc.WithRoute(r.Context(), info.Route))
+	r = r.WithContext(trigger.WithWebhookAuth(ipc.WithRoute(r.Context(), info.Route), info))
 	if !info.Mode.Enabled() {
 		next.ServeHTTP(w, r)
 		return

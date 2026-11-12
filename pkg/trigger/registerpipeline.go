@@ -159,7 +159,7 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 func (e *Engine) registerPipeline(p *task.PipelineTask) (err error) {
 	defer func() {
 		if err != nil {
-			e.routes.ReleaseWebhooks(p.ID, "")
+			e.unregisterTriggers(p.ID)
 		}
 	}()
 	if err := p.Validate(); err != nil {
@@ -209,11 +209,12 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) (err error) {
 					zap.String("task", p.ID), zap.Error(err))
 			}
 			e.deferredPipelines[p.ID] = p
-			// Hold the route while deferred so the path stays this pipeline's;
-			// it answers 404 until the stages land and the re-claim below
-			// swaps in the webhook handler.
+			// Hold a free path while deferred so it stays this pipeline's; it
+			// answers 404 until the stages land and the claim below swaps in the
+			// webhook handler. A path someone else serves is left to them until
+			// the pipeline can dispatch.
 			if p.Trigger.Webhook != "" {
-				e.claimWebhook(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, http.NotFoundHandler())
+				_ = e.routes.ClaimNoPreempt(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, http.NotFoundHandler())
 			}
 			return nil
 		}

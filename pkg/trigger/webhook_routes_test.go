@@ -281,8 +281,8 @@ func TestRegister_FailedReRegistrationReleasesRoute(t *testing.T) {
 	}
 }
 
-// TestClaimWebhook_RepeatRejectionLoggedOnce: a deferred pipeline retried on
-// every stage registration warns about a held path once.
+// TestClaimWebhook_RepeatRejectionLoggedOnce: a task re-registered while
+// another task holds its path warns once, then logs the repeats at DEBUG.
 func TestClaimWebhook_RepeatRejectionLoggedOnce(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
@@ -293,20 +293,13 @@ func TestClaimWebhook_RepeatRejectionLoggedOnce(t *testing.T) {
 	reg := registry.New(d)
 	eng := New(reg, nil, zap.New(core))
 	registerWebhookTask(t, eng, reg, "holder", "/hooks/shared")
-	pipe := &task.PipelineTask{APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
-		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
-		Trigger: task.PipelineTrigger{Webhook: "/hooks/shared"}, Stages: []task.Stage{{Task: "missing"}}}
-	_ = reg.Register(pipe)
-	if err := eng.Register(pipe); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"x1", "x2", "x3"} {
-		registerWebhookTask(t, eng, reg, id, "/hooks/"+id)
+	for i := 0; i < 3; i++ {
+		registerWebhookTask(t, eng, reg, "intruder", "/hooks/shared")
 	}
 	warns := logs.FilterMessage("rejecting webhook path").FilterLevelExact(zap.WarnLevel).Len()
 	debugs := logs.FilterMessage("rejecting webhook path").FilterLevelExact(zap.DebugLevel).Len()
-	if warns != 1 || debugs < 3 {
-		t.Fatalf("rejecting webhook path: %d WARN, %d DEBUG; want 1 WARN then DEBUG", warns, debugs)
+	if warns != 1 || debugs != 2 {
+		t.Fatalf("rejecting webhook path: %d WARN, %d DEBUG; want 1 WARN then 2 DEBUG", warns, debugs)
 	}
 }
 
@@ -420,5 +413,71 @@ func TestClaimWebhook_RejectionWarnsAgainAfterUnregister(t *testing.T) {
 	registerWebhookTask(t, eng, reg, "intruder", "/hooks/shared")
 	if n := logs.FilterMessage("rejecting webhook path").FilterLevelExact(zap.WarnLevel).Len(); n != 2 {
 		t.Fatalf("got %d WARN; want one per registration lifetime (2)", n)
+	}
+}
+
+// TestDeferredPipeline_DoesNotPreemptHTTPRegister: a pipeline still waiting for
+// its stages does not take a path a daemon serves; it takes it over once it
+// can dispatch.
+func TestDeferredPipeline_DoesNotPreemptHTTPRegister(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	if _, err := eng.routes.Claim("daemon", "/hooks/pipe", ipc.RouteHTTPRegister, http.NotFoundHandler()); err != nil {
+		t.Fatal(err)
+	}
+	pipe := &task.PipelineTask{APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "wp", Name: "WP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/pipe"}, Stages: []task.Stage{{Task: "s"}}}
+	_ = reg.Register(pipe)
+	if err := eng.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := eng.routes.Resolve("/hooks/pipe"); m.TaskID != "daemon" {
+		t.Fatalf("deferred pipeline took the daemon's route (owner %q)", m.TaskID)
+	}
+	registerWebhookTask(t, eng, reg, "s", "/hooks/s")
+	if got := eng.routeOwner("/hooks/pipe"); got != "wp" {
+		t.Fatalf("dispatchable pipeline owner = %q; want wp", got)
+	}
+}
+
+// TestResolveWebhookAuth_HeldOwnerDenied: a route whose owner is held for
+// approval is denied.
+func TestResolveWebhookAuth_HeldOwnerDenied(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	_ = reg.Register(&task.Spec{ID: "d", Name: "d", Enabled: true, Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Daemon: true}})
+	if _, err := eng.routes.Claim("d", "/hooks/d", ipc.RouteHTTPRegister, http.NotFoundHandler()); err != nil {
+		t.Fatal(err)
+	}
+	if eng.ResolveWebhookAuth("/hooks/d").Deny {
+		t.Fatal("an unheld owner's route was denied")
+	}
+	eng.SetHoldCheck(func(id string) bool { return id == "d" })
+	if !eng.ResolveWebhookAuth("/hooks/d/x").Deny {
+		t.Fatal("a held owner's route was not denied")
+	}
+}
+
+// TestRegister_CycleRejectionDisarmsCron: a re-registration rejected for a
+// success-chain cycle leaves no cron entry for the rejected spec.
+func TestRegister_CycleRejectionDisarmsCron(t *testing.T) {
+	eng, reg := newRouteEngine(t)
+	s := &task.Spec{ID: "c", Name: "c", Enabled: true, Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Cron: "0 0 * * *"}}
+	_ = reg.Register(s)
+	if err := eng.Register(s); err != nil {
+		t.Fatal(err)
+	}
+	cyclic := &task.Spec{ID: "c", Name: "c", Enabled: true, Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Cron: "0 0 * * *", Chain: &task.ChainTrigger{From: "c"}}}
+	_ = reg.Register(cyclic)
+	if err := eng.Register(cyclic); err == nil {
+		t.Fatal("expected a success-chain cycle error")
+	}
+	eng.mu.Lock()
+	_, armed := eng.cronArmed["c"]
+	eng.mu.Unlock()
+	if armed || len(eng.cron.Entries()) != 0 {
+		t.Fatalf("rejected spec still scheduled: armed=%v entries=%d", armed, len(eng.cron.Entries()))
 	}
 }

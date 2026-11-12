@@ -103,6 +103,17 @@ func (k RouteKind) declared() bool { return k == RouteTaskWebhook || k == RouteP
 // http.register claim also fails when its pattern is above or below another
 // owner's route; declared webhooks may nest.
 func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (displaced string, err error) {
+	return g.claim(owner, pattern, kind, h, true)
+}
+
+// ClaimNoPreempt is Claim without the declared-webhook takeover: a pattern
+// held by any other owner is refused.
+func (g *Gateway) ClaimNoPreempt(owner, pattern string, kind RouteKind, h http.Handler) error {
+	_, err := g.claim(owner, pattern, kind, h, false)
+	return err
+}
+
+func (g *Gateway) claim(owner, pattern string, kind RouteKind, h http.Handler, preempt bool) (displaced string, err error) {
 	p := NormalizePattern(pattern)
 	if p == "" || p[0] != '/' {
 		return "", fmt.Errorf("%w: %q must be an absolute path below /", ErrRouteInvalid, pattern)
@@ -130,7 +141,7 @@ func (g *Gateway) Claim(owner, pattern string, kind RouteKind, h http.Handler) (
 			continue
 		}
 		if r.owner != owner {
-			if !kind.declared() || r.kind != RouteHTTPRegister || strings.HasPrefix(r.owner, buildinSourcePrefix) {
+			if !preempt || !kind.declared() || r.kind != RouteHTTPRegister || strings.HasPrefix(r.owner, buildinSourcePrefix) {
 				return "", fmt.Errorf("%w: %s is held by %s", ErrRouteClaimed, p, r.owner)
 			}
 			displaced = r.owner
