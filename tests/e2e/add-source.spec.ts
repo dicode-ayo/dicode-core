@@ -104,22 +104,27 @@ test.describe('Config UI — Add source', () => {
       return sources.some((s) => (s.name ?? s.Name) === name);
     };
 
-    const add = await request.post('/api/settings/sources', { headers: json, data: { name, path: tasksetPath } });
-    expect(add.status(), await add.text()).toBe(200);
-    expect(await listed()).toBe(true);
-    expect((await devMode()).status()).toBe(200);
+    try {
+      const add = await request.post('/api/settings/sources', { headers: json, data: { name, path: tasksetPath } });
+      expect(add.status(), await add.text()).toBe(200);
+      expect(await listed()).toBe(true);
+      expect((await devMode()).status()).toBe(200);
 
-    const del = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
-    expect(del.status(), await del.text()).toBe(200);
-    expect(await listed()).toBe(false);
+      const del = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
+      expect(del.status(), await del.text()).toBe(200);
+      expect(await listed()).toBe(false);
 
-    // The stopped source must not stay reachable by name.
-    const after = await devMode();
-    expect(after.status()).toBe(400);
-    expect(await after.text()).toContain('not found');
+      // The stopped source must not stay reachable by name.
+      const after = await devMode();
+      expect(after.status()).toBe(400);
+      expect(await after.text()).toContain('not found');
 
-    const again = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
-    expect(again.status()).toBe(404);
+      const again = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
+      expect(again.status()).toBe(404);
+    } finally {
+      // Best-effort cleanup; a 404 means the test already removed it.
+      await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`).catch(() => {});
+    }
   });
 
   test('sends the name field for a git source too', async ({ page }) => {

@@ -144,11 +144,13 @@ func (m *SourceManager) Register(name string, src *taskset.Source) {
 	m.tasksets[name] = src
 }
 
-// Unregister removes name's live source, if any.
-func (m *SourceManager) Unregister(name string) {
+// Unregister removes name's live source and returns it, or nil if none.
+func (m *SourceManager) Unregister(name string) *taskset.Source {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	src := m.tasksets[name]
 	delete(m.tasksets, name)
+	return src
 }
 
 // Get returns the live taskset.Source for a source name, or (nil, false) if

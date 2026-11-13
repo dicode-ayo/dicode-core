@@ -3141,14 +3141,11 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "source name is required", http.StatusBadRequest)
 		return
 	}
-	switch err := s.sourceLifecycle().Remove(name); {
-	case errors.Is(err, ErrSourceNotFound):
+	if err := s.sourceLifecycle().Remove(name); errors.Is(err, ErrSourceNotFound) {
 		jsonErr(w, "source not found", http.StatusNotFound)
-	case err != nil:
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
-	default:
-		jsonOK(w, map[string]string{"status": "ok"})
+		return
 	}
+	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 // --- Managed runtime handlers ---

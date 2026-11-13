@@ -42,9 +42,10 @@ type sourceReconciler interface {
 }
 
 // sourceRegistry is the name → live source map the REST API reads.
+// Unregister returns the removed source, or nil if name was not registered.
 type sourceRegistry interface {
 	Register(name string, src *taskset.Source)
-	Unregister(name string)
+	Unregister(name string) *taskset.Source
 }
 
 // SourceLifecycle adds and removes named sources across the config entry,
@@ -81,8 +82,9 @@ func newSourceLifecycle(cfg sourceConfigStore, rec sourceReconciler, reg sourceR
 }
 
 // Add claims name for ref, starts the source, and registers it. ref must
-// already be validated. It fails with ErrSourceBusy while another Add for
-// name is in flight, and with ErrSourceRemovedConcurrently when a Remove took
+// already be validated. It fails with ErrSourceExists while name has a config
+// entry, with ErrSourceBusy while an Add for a since-removed name is still in
+// flight, and with ErrSourceRemovedConcurrently when a Remove took
 // the name before the source finished starting. A config persist failure is
 // logged, not returned.
 func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
@@ -90,10 +92,6 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 	id := taskset.SourceID(name, &ref)
 
 	l.mu.Lock()
-	if l.adding[name] {
-		l.mu.Unlock()
-		return ErrSourceBusy
-	}
 	err := l.cfg.update(func(cfg *config.Config) error {
 		if cfg.Spec.Entries == nil {
 			cfg.Spec.Entries = make(map[string]*taskset.Entry)
@@ -101,10 +99,13 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 		if _, exists := cfg.Spec.Entries[name]; exists {
 			return ErrSourceExists
 		}
+		if l.adding[name] {
+			return ErrSourceBusy
+		}
 		cfg.Spec.Entries[name] = entry
 		return nil
 	})
-	if errors.Is(err, ErrSourceExists) {
+	if errors.Is(err, ErrSourceExists) || errors.Is(err, ErrSourceBusy) {
 		l.mu.Unlock()
 		return err
 	}
@@ -143,7 +144,9 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 }
 
 // Remove deletes name's config entry, stops its source, and unregisters it.
-// A config persist failure is logged, not returned.
+// The registered source is stopped too, since a raw config save may have
+// changed the entry's ref without restarting it. A config persist failure is
+// logged, not returned.
 func (l *SourceLifecycle) Remove(name string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -163,10 +166,14 @@ func (l *SourceLifecycle) Remove(name string) error {
 	if err != nil {
 		l.log.Warn("source persist failed", zap.Error(err))
 	}
+	var entryID string
 	if entry.Ref != nil {
-		l.rec.RemoveSource(taskset.SourceID(name, entry.Ref))
+		entryID = taskset.SourceID(name, entry.Ref)
+		l.rec.RemoveSource(entryID)
 	}
-	l.reg.Unregister(name)
+	if src := l.reg.Unregister(name); src != nil && src.ID() != entryID {
+		l.rec.RemoveSource(src.ID())
+	}
 	l.log.Info("source removed", zap.String("name", name))
 	return nil
 }
@@ -231,10 +238,11 @@ func (r serverSourceRegistry) Register(name string, src *taskset.Source) {
 	}
 }
 
-func (r serverSourceRegistry) Unregister(name string) {
-	if r.s.sourceMgr != nil {
-		r.s.sourceMgr.Unregister(name)
+func (r serverSourceRegistry) Unregister(name string) *taskset.Source {
+	if r.s.sourceMgr == nil {
+		return nil
 	}
+	return r.s.sourceMgr.Unregister(name)
 }
 
 // sourceLifecycle returns the Server's SourceLifecycle, built on first use.

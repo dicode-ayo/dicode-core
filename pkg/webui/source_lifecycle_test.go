@@ -342,8 +342,8 @@ func TestSourceLifecycle_AddFailure_ClearsInFlight(t *testing.T) {
 	go func() { addA <- h.l.Add(name, refA) }()
 	waitEntered(t, h.rec, idA)
 
-	if err := h.l.Add(name, localRef("/tmp/fails-late-b")); !errors.Is(err, ErrSourceBusy) {
-		t.Fatalf("Add B while A is in flight: error = %v, want ErrSourceBusy", err)
+	if err := h.l.Add(name, localRef("/tmp/fails-late-b")); !errors.Is(err, ErrSourceExists) {
+		t.Fatalf("Add B while A is in flight: error = %v, want ErrSourceExists", err)
 	}
 	releaseA()
 	if err := waitErr(t, addA); !errors.Is(err, ErrSourceStart) {
@@ -375,6 +375,65 @@ func TestSourceLifecycle_DuplicateName_ErrSourceExists(t *testing.T) {
 	}
 	if h.rec.adds != 1 {
 		t.Fatalf("reconciler AddSource called %d times, want 1", h.rec.adds)
+	}
+	h.assertConsistent(t)
+}
+
+// A duplicate Add while the first is still starting reports the name as
+// taken, not busy: the first Add's claim is already in config.
+func TestSourceLifecycle_DuplicateDuringSlowAdd_ErrSourceExists(t *testing.T) {
+	h := newLifecycleHarness(t)
+	const name = "dup-slow"
+	ref := localRef("/tmp/dup-slow")
+	id := taskset.SourceID(name, &ref)
+
+	release := h.rec.block(id)
+	addA := make(chan error, 1)
+	go func() { addA <- h.l.Add(name, ref) }()
+	waitEntered(t, h.rec, id)
+	first := h.cfg.entry(name)
+
+	if err := h.l.Add(name, ref); !errors.Is(err, ErrSourceExists) {
+		t.Fatalf("duplicate Add during in-flight Add: error = %v, want ErrSourceExists", err)
+	}
+	if h.cfg.entry(name) != first {
+		t.Fatal("duplicate Add replaced the in-flight claim")
+	}
+
+	release()
+	if err := waitErr(t, addA); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	h.assertConsistent(t)
+}
+
+// A raw config save can swap an entry's ref without restarting its source;
+// Remove must still stop the source that is actually registered.
+func TestSourceLifecycle_Remove_StopsRegisteredSourceAfterRefSwap(t *testing.T) {
+	h := newLifecycleHarness(t)
+	const name = "swapped"
+	refA := localRef("/tmp/swapped-a")
+	refB := localRef("/tmp/swapped-b")
+	idA := taskset.SourceID(name, &refA)
+	if idA == taskset.SourceID(name, &refB) {
+		t.Fatal("test refs must derive different source ids")
+	}
+
+	if err := h.l.Add(name, refA); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.cfg.mu.Lock()
+	h.cfg.cfg.Spec.Entries[name] = &taskset.Entry{Ref: &refB}
+	h.cfg.mu.Unlock()
+
+	if err := h.l.Remove(name); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if h.rec.runningIDs()[idA] {
+		t.Fatalf("source %q still running after Remove", idA)
+	}
+	if _, ok := h.mgr.Get(name); ok {
+		t.Fatal("Remove left the source registered")
 	}
 	h.assertConsistent(t)
 }
