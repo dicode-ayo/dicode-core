@@ -69,6 +69,8 @@ Freezing a source against a re-cut tag by not re-reading the ref would have been
 
 `POST /api/settings/sources` takes `tag` in place of `branch`, so a source can be added pinned without hand-editing the file. It applies the same rules as config-load, so the API cannot write an entry the next boot would reject.
 
+`DELETE /api/settings/sources/{name}` stops the source and forgets the name: afterwards `PATCH /api/sources/{name}/dev` and task-override refreshes treat it as an unknown source rather than acting on the stopped one.
+
 Setting both `branch` and `tag` on one ref is a config-load error, and so is a tag that is not a legal git ref name. A tag the remote does not publish fails the resolve with a message naming it, and leaves the existing clone alone rather than wiping and re-cloning against the remote on every poll.
 
 `auth.token_env` is only honoured on a ref declared directly in `dicode.yaml` or in a source's root `taskset.yaml` — never on a `ref` discovered while resolving an already-resolved `TaskSet` entry further down the tree. A dropped `token_env` on a nested ref is logged as a warning rather than failing the resolve. This keeps a source that only grants write access to its own task tree (e.g. an AI authoring session) from being able to name an arbitrary daemon env var as a git credential and hand it to a host of its choosing on the next reconcile — see [#740](https://github.com/dicode-ayo/dicode-core/issues/740).

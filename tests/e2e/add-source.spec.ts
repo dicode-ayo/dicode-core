@@ -89,6 +89,39 @@ test.describe('Config UI — Add source', () => {
     await expect(page.locator('dc-config')).toContainText(/already exists/i, { timeout: 10_000 });
   });
 
+  test('removing a source drops it from the API and from dev-mode control', async ({ request }) => {
+    const tasksetPath = process.env.DICODE_E2E_ADD_SOURCE_TASKSET_PATH;
+    test.skip(!tasksetPath, 'DICODE_E2E_ADD_SOURCE_TASKSET_PATH not set — cannot exercise a local source add');
+
+    const name = `e2e-remove-${Date.now()}`;
+    const json = { 'Content-Type': 'application/json' };
+    const devMode = () => request.patch(`/api/sources/${encodeURIComponent(name)}/dev`, {
+      headers: json,
+      data: { enabled: false },
+    });
+    const listed = async () => {
+      const sources = await (await request.get('/api/sources')).json() as Array<Record<string, unknown>>;
+      return sources.some((s) => (s.name ?? s.Name) === name);
+    };
+
+    const add = await request.post('/api/settings/sources', { headers: json, data: { name, path: tasksetPath } });
+    expect(add.status(), await add.text()).toBe(200);
+    expect(await listed()).toBe(true);
+    expect((await devMode()).status()).toBe(200);
+
+    const del = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
+    expect(del.status(), await del.text()).toBe(200);
+    expect(await listed()).toBe(false);
+
+    // The stopped source must not stay reachable by name.
+    const after = await devMode();
+    expect(after.status()).toBe(400);
+    expect(await after.text()).toContain('not found');
+
+    const again = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
+    expect(again.status()).toBe(404);
+  });
+
   test('sends the name field for a git source too', async ({ page }) => {
     // Drives the git branch of the form (type toggle, url/branch/token
     // inputs) to prove `name` is sent regardless of source type. Uses the
