@@ -165,6 +165,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
 - **New auth endpoints**: `POST /api/secrets/unlock` (with trust), `POST /api/auth/refresh`, `GET/DELETE /api/auth/devices/{id}`, `POST /api/auth/logout`, `POST /api/auth/logout-all`, `GET/POST/DELETE /api/auth/keys/{id}`
 - **Source management** (`sources.go`): `SourceManager` (maps source name → `*taskset.Source`), `GET /api/sources`, `PATCH /api/sources/:name/dev`, `GET /api/sources/:name/branches`
+- **Source add/remove** (`source_lifecycle.go`): `SourceLifecycle` backs `POST /api/settings/sources` and `DELETE /api/settings/sources/{name}`. It claims the `spec.entries` name, starts the source in the reconciler, and registers it with `SourceManager`. If the start fails, it releases the claim. If the claim was removed or replaced while the source was starting, it stops the source. Remove deletes the entry, stops the source, and unregisters it from `SourceManager`, so later dev-mode and override calls for that name see it as unknown.
 - **MCP server** at `/mcp`: protected by `requireAPIKey` when auth enabled
 - WebSocket hub (`/ws`) — real-time fan-out for log lines, run status, task events (`tasks:changed`); ring buffer (recent logs replayed on connect)
 - `GET /dicode.js` — standalone webhook task UI SDK (public, no auth)
