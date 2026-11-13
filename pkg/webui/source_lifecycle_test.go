@@ -227,8 +227,8 @@ func TestSourceLifecycle_ConcurrentRemove_NoOrphan(t *testing.T) {
 		t.Fatalf("Remove during in-flight Add: %v", err)
 	}
 	release()
-	if err := waitErr(t, addDone); err != nil {
-		t.Fatalf("Add: %v", err)
+	if err := waitErr(t, addDone); !errors.Is(err, ErrSourceRemovedConcurrently) {
+		t.Fatalf("Add error = %v, want ErrSourceRemovedConcurrently", err)
 	}
 
 	if e := h.cfg.entry(name); e != nil {
@@ -240,16 +240,52 @@ func TestSourceLifecycle_ConcurrentRemove_NoOrphan(t *testing.T) {
 	h.assertConsistent(t)
 }
 
-// Remove then re-Add of the same name while the first Add is still in
-// AddSource: the first Add's late re-check must see the newer claim as not
-// its own and leave it alone.
-func TestSourceLifecycle_ABA_ReAddDuringSlowAdd_NoStaleClobber(t *testing.T) {
+// Remove then re-Add of the same name and ref while the first Add is still
+// in AddSource: both derive the same Source.ID, so the re-Add must be refused
+// rather than let the first Add's teardown stop the newer source.
+func TestSourceLifecycle_ReAddSameRefDuringSlowAdd_Busy(t *testing.T) {
+	h := newLifecycleHarness(t)
+	const name = "race-readd"
+	ref := localRef("/tmp/race-readd")
+	id := taskset.SourceID(name, &ref)
+
+	release := h.rec.block(id)
+	addA := make(chan error, 1)
+	go func() { addA <- h.l.Add(name, ref) }()
+	waitEntered(t, h.rec, id)
+
+	if err := h.l.Remove(name); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	addB := make(chan error, 1)
+	go func() { addB <- h.l.Add(name, ref) }()
+	if err := waitErr(t, addB); !errors.Is(err, ErrSourceBusy) {
+		t.Fatalf("re-Add during in-flight Add: error = %v, want ErrSourceBusy", err)
+	}
+	if e := h.cfg.entry(name); e != nil {
+		t.Fatalf("refused re-Add left a config entry: %+v", e)
+	}
+
+	release()
+	if err := waitErr(t, addA); !errors.Is(err, ErrSourceRemovedConcurrently) {
+		t.Fatalf("Add A error = %v, want ErrSourceRemovedConcurrently", err)
+	}
+	h.assertConsistent(t)
+
+	if err := h.l.Add(name, ref); err != nil {
+		t.Fatalf("re-Add after the first Add finished: %v", err)
+	}
+	h.assertConsistent(t)
+}
+
+// A different ref derives a different Source.ID, but the name is still
+// refused while its first Add is in flight.
+func TestSourceLifecycle_ReAddOtherRefDuringSlowAdd_Busy(t *testing.T) {
 	h := newLifecycleHarness(t)
 	const name = "race-aba"
 	refA := localRef("/tmp/race-aba-a")
 	refC := localRef("/tmp/race-aba-c")
 	idA := taskset.SourceID(name, &refA)
-	idC := taskset.SourceID(name, &refC)
 
 	releaseA := h.rec.block(idA)
 	addA := make(chan error, 1)
@@ -259,28 +295,13 @@ func TestSourceLifecycle_ABA_ReAddDuringSlowAdd_NoStaleClobber(t *testing.T) {
 	if err := h.l.Remove(name); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	addC := make(chan error, 1)
-	go func() { addC <- h.l.Add(name, refC) }()
-	waitEntered(t, h.rec, idC)
-	if err := waitErr(t, addC); err != nil {
-		t.Fatalf("Add C: %v", err)
-	}
-	entryC := h.cfg.entry(name)
-	if entryC == nil || entryC.Ref.Path != refC.Path {
-		t.Fatalf("config entry after C's Add = %+v, want C's", entryC)
+	if err := h.l.Add(name, refC); !errors.Is(err, ErrSourceBusy) {
+		t.Fatalf("Add C error = %v, want ErrSourceBusy", err)
 	}
 
 	releaseA()
-	if err := waitErr(t, addA); err != nil {
-		t.Fatalf("Add A: %v", err)
-	}
-
-	if got := h.cfg.entry(name); got != entryC {
-		t.Fatalf("A's late Add touched the config entry: got %+v, want C's", got)
-	}
-	got, ok := h.mgr.Get(name)
-	if !ok || got.ID() != idC {
-		t.Fatalf("registry[%q] = %v (ok=%v), want C's source %q", name, got, ok, idC)
+	if err := waitErr(t, addA); !errors.Is(err, ErrSourceRemovedConcurrently) {
+		t.Fatalf("Add A error = %v, want ErrSourceRemovedConcurrently", err)
 	}
 	if running := h.rec.runningIDs(); running[idA] {
 		t.Fatalf("A's source %q left running after losing its claim", idA)
@@ -308,15 +329,12 @@ func TestSourceLifecycle_AddFailure_RollsBackClaim(t *testing.T) {
 	h.assertConsistent(t)
 }
 
-// The rollback of a failed Add must not release a newer claim that took the
-// name while the failing AddSource was in flight.
-func TestSourceLifecycle_AddFailure_RollbackSparesNewerClaim(t *testing.T) {
+// A failed Add clears its in-flight mark, so the name can be added again.
+func TestSourceLifecycle_AddFailure_ClearsInFlight(t *testing.T) {
 	h := newLifecycleHarness(t)
 	const name = "fails-late"
 	refA := localRef("/tmp/fails-late-a")
-	refC := localRef("/tmp/fails-late-c")
 	idA := taskset.SourceID(name, &refA)
-	idC := taskset.SourceID(name, &refC)
 	h.rec.failAdd[idA] = errors.New("boom")
 
 	releaseA := h.rec.block(idA)
@@ -324,24 +342,15 @@ func TestSourceLifecycle_AddFailure_RollbackSparesNewerClaim(t *testing.T) {
 	go func() { addA <- h.l.Add(name, refA) }()
 	waitEntered(t, h.rec, idA)
 
-	if err := h.l.Remove(name); err != nil {
-		t.Fatalf("Remove: %v", err)
+	if err := h.l.Add(name, localRef("/tmp/fails-late-b")); !errors.Is(err, ErrSourceBusy) {
+		t.Fatalf("Add B while A is in flight: error = %v, want ErrSourceBusy", err)
 	}
-	if err := h.l.Add(name, refC); err != nil {
-		t.Fatalf("Add C: %v", err)
-	}
-	<-h.rec.entered
-	entryC := h.cfg.entry(name)
-
 	releaseA()
 	if err := waitErr(t, addA); !errors.Is(err, ErrSourceStart) {
 		t.Fatalf("Add A error = %v, want ErrSourceStart", err)
 	}
-	if got := h.cfg.entry(name); got != entryC {
-		t.Fatalf("A's rollback released C's claim: entry = %+v", got)
-	}
-	if got, ok := h.mgr.Get(name); !ok || got.ID() != idC {
-		t.Fatalf("registry[%q] = %v (ok=%v), want C's %q", name, got, ok, idC)
+	if err := h.l.Add(name, localRef("/tmp/fails-late-c")); err != nil {
+		t.Fatalf("Add C after A failed: %v", err)
 	}
 	h.assertConsistent(t)
 }
@@ -409,27 +418,6 @@ func TestSourceLifecycle_PersistFailure_IsNotFatal(t *testing.T) {
 		t.Fatalf("Remove with persist failure: %v", err)
 	}
 	h.assertConsistent(t)
-}
-
-func TestSourceManager_Unregister_IdentityGuarded(t *testing.T) {
-	mgr := NewSourceManager(&config.Config{}, nil, nil, t.TempDir(), zap.NewNop())
-	ref := localRef("/tmp/u")
-	a := taskset.NewSource("a", "u", &ref, "", t.TempDir(), false, 0, zap.NewNop())
-	b := taskset.NewSource("b", "u", &ref, "", t.TempDir(), false, 0, zap.NewNop())
-	mgr.Register("u", b)
-
-	if mgr.Unregister("u", a) {
-		t.Fatal("Unregister removed a registration it did not own")
-	}
-	if got, _ := mgr.Get("u"); got != b {
-		t.Fatal("stale Unregister clobbered the current registration")
-	}
-	if !mgr.Unregister("u", b) {
-		t.Fatal("Unregister of the current registration reported false")
-	}
-	if _, ok := mgr.Get("u"); ok {
-		t.Fatal("Unregister left the source registered")
-	}
 }
 
 // After DELETE, the dev-mode endpoint must treat the name as unknown rather

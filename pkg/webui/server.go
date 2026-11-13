@@ -3046,6 +3046,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	switch err := s.sourceLifecycle().Add(name, ref); {
 	case errors.Is(err, ErrSourceExists):
 		jsonErr(w, "source \""+name+"\" already exists", http.StatusConflict)
+	case errors.Is(err, ErrSourceBusy), errors.Is(err, ErrSourceRemovedConcurrently):
+		jsonErr(w, "source \""+name+"\": "+err.Error(), http.StatusConflict)
 	case err != nil:
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 	default:

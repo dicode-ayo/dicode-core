@@ -19,6 +19,11 @@ var (
 	// ErrSourceStart wraps the reconciler's error when a claimed source
 	// fails to start; the claim has been released by then.
 	ErrSourceStart = errors.New("start source")
+	// ErrSourceBusy reports that an Add for the name is still in flight.
+	ErrSourceBusy = errors.New("source is being added")
+	// ErrSourceRemovedConcurrently reports that a Remove took the name while
+	// Add was starting it; the started source has been stopped again.
+	ErrSourceRemovedConcurrently = errors.New("source removed while being added")
 )
 
 // sourceConfigStore owns cfg.Spec.Entries. update runs mutate under the
@@ -39,8 +44,7 @@ type sourceReconciler interface {
 // sourceRegistry is the name → live source map the REST API reads.
 type sourceRegistry interface {
 	Register(name string, src *taskset.Source)
-	Get(name string) (*taskset.Source, bool)
-	Unregister(name string, src *taskset.Source) bool
+	Unregister(name string)
 }
 
 // SourceLifecycle adds and removes named sources across the config entry,
@@ -58,8 +62,13 @@ type sourceRegistry interface {
 // its own source down if the claim is gone. mu makes that re-check plus
 // Register atomic with Remove's delete → RemoveSource → Unregister, and keeps
 // a new claim from slipping between Remove's delete and its RemoveSource.
+//
+// Only one Add per name runs at a time: a re-add after Remove derives the
+// same Source.ID, so a stale Add's teardown would otherwise stop the newer
+// source. adding marks names with an Add in flight, guarded by mu.
 type SourceLifecycle struct {
 	mu      sync.Mutex
+	adding  map[string]bool
 	cfg     sourceConfigStore
 	rec     sourceReconciler
 	reg     sourceRegistry
@@ -68,16 +77,23 @@ type SourceLifecycle struct {
 }
 
 func newSourceLifecycle(cfg sourceConfigStore, rec sourceReconciler, reg sourceRegistry, dataDir string, log *zap.Logger) *SourceLifecycle {
-	return &SourceLifecycle{cfg: cfg, rec: rec, reg: reg, dataDir: dataDir, log: log}
+	return &SourceLifecycle{adding: map[string]bool{}, cfg: cfg, rec: rec, reg: reg, dataDir: dataDir, log: log}
 }
 
 // Add claims name for ref, starts the source, and registers it. ref must
-// already be validated. A config persist failure is logged, not returned.
+// already be validated. It fails with ErrSourceBusy while another Add for
+// name is in flight, and with ErrSourceRemovedConcurrently when a Remove took
+// the name before the source finished starting. A config persist failure is
+// logged, not returned.
 func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 	entry := &taskset.Entry{Ref: &ref}
 	id := taskset.SourceID(name, &ref)
 
 	l.mu.Lock()
+	if l.adding[name] {
+		l.mu.Unlock()
+		return ErrSourceBusy
+	}
 	err := l.cfg.update(func(cfg *config.Config) error {
 		if cfg.Spec.Entries == nil {
 			cfg.Spec.Entries = make(map[string]*taskset.Entry)
@@ -88,16 +104,23 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 		cfg.Spec.Entries[name] = entry
 		return nil
 	})
-	l.mu.Unlock()
 	if errors.Is(err, ErrSourceExists) {
+		l.mu.Unlock()
 		return err
 	}
+	l.adding[name] = true
+	l.mu.Unlock()
 	if err != nil {
 		l.log.Warn("source persist failed", zap.Error(err))
 	}
 
 	ts := l.newSource(id, name, entry)
-	if err := l.rec.AddSource(ts); err != nil {
+	startErr := l.rec.AddSource(ts)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.adding, name)
+	if startErr != nil {
 		if rbErr := l.cfg.update(func(cfg *config.Config) error {
 			if cfg.Spec.Entries[name] == entry {
 				delete(cfg.Spec.Entries, name)
@@ -106,16 +129,13 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 		}); rbErr != nil {
 			l.log.Warn("source claim rollback failed", zap.String("name", name), zap.Error(rbErr))
 		}
-		return fmt.Errorf("%w: %w", ErrSourceStart, err)
+		return fmt.Errorf("%w: %w", ErrSourceStart, startErr)
 	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	if !l.holdsClaim(name, entry) {
 		l.rec.RemoveSource(id)
-		l.log.Info("source removed or replaced while being added; stopped it",
+		l.log.Info("source removed while being added; stopped it",
 			zap.String("name", name), zap.String("id", id))
-		return nil
+		return ErrSourceRemovedConcurrently
 	}
 	l.reg.Register(name, ts)
 	l.log.Info("source added", zap.String("name", name))
@@ -146,9 +166,7 @@ func (l *SourceLifecycle) Remove(name string) error {
 	if entry.Ref != nil {
 		l.rec.RemoveSource(taskset.SourceID(name, entry.Ref))
 	}
-	if src, ok := l.reg.Get(name); ok {
-		l.reg.Unregister(name, src)
-	}
+	l.reg.Unregister(name)
 	l.log.Info("source removed", zap.String("name", name))
 	return nil
 }
@@ -213,18 +231,10 @@ func (r serverSourceRegistry) Register(name string, src *taskset.Source) {
 	}
 }
 
-func (r serverSourceRegistry) Get(name string) (*taskset.Source, bool) {
-	if r.s.sourceMgr == nil {
-		return nil, false
+func (r serverSourceRegistry) Unregister(name string) {
+	if r.s.sourceMgr != nil {
+		r.s.sourceMgr.Unregister(name)
 	}
-	return r.s.sourceMgr.Get(name)
-}
-
-func (r serverSourceRegistry) Unregister(name string, src *taskset.Source) bool {
-	if r.s.sourceMgr == nil {
-		return false
-	}
-	return r.s.sourceMgr.Unregister(name, src)
 }
 
 // sourceLifecycle returns the Server's SourceLifecycle, built on first use.
