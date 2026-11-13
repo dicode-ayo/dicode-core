@@ -377,75 +377,7 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 	}
 
 	if !enabled {
-		// sessionToRemove pairs a runID with the pre-validated clone directory
-		// path stored in cloneState. Using the stored path (a map value set
-		// during enableClone after ValidateRunID) rather than reconstructing from
-		// opts.RunID at disable time breaks the user-controlled-data taint flow
-		// into os.RemoveAll.
-		type sessionToRemove struct {
-			runID    string
-			cloneDir string
-		}
-
-		s.mu.Lock()
-		// Collect sessions to remove. Empty RunID means "disable all".
-		var toRemove []sessionToRemove
-		if opts.RunID != "" {
-			if cs, ok := s.clones[opts.RunID]; ok {
-				toRemove = []sessionToRemove{{runID: opts.RunID, cloneDir: cs.cloneDir}}
-			}
-		} else {
-			for runID, cs := range s.clones {
-				toRemove = append(toRemove, sessionToRemove{runID: runID, cloneDir: cs.cloneDir})
-			}
-		}
-		for _, item := range toRemove {
-			delete(s.clones, item.runID)
-		}
-		// Recompute primary and devRootPath.
-		wasPrimary := opts.RunID == "" || opts.RunID == s.primaryRunID
-		if wasPrimary {
-			if len(s.clones) > 0 {
-				s.primaryRunID = s.latestCloneRunIDLocked()
-				s.devRootPath = s.clones[s.primaryRunID].devRootPath
-			} else {
-				s.primaryRunID = ""
-				s.devRootPath = ""
-			}
-		}
-		hasClonesLeft := len(s.clones) > 0
-		s.mu.Unlock()
-
-		// Remove clone directories outside the lock using the stored, pre-validated
-		// paths from cloneState (set by enableClone). Defence-in-depth: verify each
-		// stored path is still rooted within the expected parent directory.
-		cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
-		for _, item := range toRemove {
-			if item.cloneDir == "" {
-				continue
-			}
-			if within, err := pathguard.Within(cloneRoot, item.cloneDir); err != nil || !within {
-				s.log.Warn("dev-clones disable: stored clone path escapes data dir; refusing to remove",
-					zap.String("source", s.namespace),
-					zap.String("path", item.cloneDir),
-				)
-				continue
-			}
-			if err := os.RemoveAll(item.cloneDir); err != nil {
-				s.log.Warn("dev-clones disable: removeall failed",
-					zap.String("source", s.namespace),
-					zap.String("path", item.cloneDir),
-					zap.Error(err),
-				)
-			}
-		}
-
-		if !hasClonesLeft {
-			s.resolver.SetDevMode(false)
-			s.mu.Lock()
-			s.devRootPath = opts.LocalPath // "" for plain disables
-			s.mu.Unlock()
-		}
+		s.disableDevSessions(opts)
 
 		s.mu.Lock()
 		ch := s.ch
@@ -469,6 +401,85 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		return nil
 	}
 	return s.syncAndEmit(ctx, ch)
+}
+
+// DisableDevMode ends every dev-mode session and removes its clone
+// directories without resyncing, so it is safe on a stopped source whose
+// event channel is already closed.
+func (s *Source) DisableDevMode() { s.disableDevSessions(DevModeOpts{}) }
+
+// disableDevSessions ends the session opts.RunID names, or every session when
+// it is empty, and leaves dev mode once none remain.
+func (s *Source) disableDevSessions(opts DevModeOpts) {
+	// sessionToRemove pairs a runID with the pre-validated clone directory
+	// path stored in cloneState. Using the stored path (a map value set
+	// during enableClone after ValidateRunID) rather than reconstructing from
+	// opts.RunID at disable time breaks the user-controlled-data taint flow
+	// into os.RemoveAll.
+	type sessionToRemove struct {
+		runID    string
+		cloneDir string
+	}
+
+	s.mu.Lock()
+	// Collect sessions to remove. Empty RunID means "disable all".
+	var toRemove []sessionToRemove
+	if opts.RunID != "" {
+		if cs, ok := s.clones[opts.RunID]; ok {
+			toRemove = []sessionToRemove{{runID: opts.RunID, cloneDir: cs.cloneDir}}
+		}
+	} else {
+		for runID, cs := range s.clones {
+			toRemove = append(toRemove, sessionToRemove{runID: runID, cloneDir: cs.cloneDir})
+		}
+	}
+	for _, item := range toRemove {
+		delete(s.clones, item.runID)
+	}
+	// Recompute primary and devRootPath.
+	wasPrimary := opts.RunID == "" || opts.RunID == s.primaryRunID
+	if wasPrimary {
+		if len(s.clones) > 0 {
+			s.primaryRunID = s.latestCloneRunIDLocked()
+			s.devRootPath = s.clones[s.primaryRunID].devRootPath
+		} else {
+			s.primaryRunID = ""
+			s.devRootPath = ""
+		}
+	}
+	hasClonesLeft := len(s.clones) > 0
+	s.mu.Unlock()
+
+	// Remove clone directories outside the lock using the stored, pre-validated
+	// paths from cloneState (set by enableClone). Defence-in-depth: verify each
+	// stored path is still rooted within the expected parent directory.
+	cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+	for _, item := range toRemove {
+		if item.cloneDir == "" {
+			continue
+		}
+		if within, err := pathguard.Within(cloneRoot, item.cloneDir); err != nil || !within {
+			s.log.Warn("dev-clones disable: stored clone path escapes data dir; refusing to remove",
+				zap.String("source", s.namespace),
+				zap.String("path", item.cloneDir),
+			)
+			continue
+		}
+		if err := os.RemoveAll(item.cloneDir); err != nil {
+			s.log.Warn("dev-clones disable: removeall failed",
+				zap.String("source", s.namespace),
+				zap.String("path", item.cloneDir),
+				zap.Error(err),
+			)
+		}
+	}
+
+	if !hasClonesLeft {
+		s.resolver.SetDevMode(false)
+		s.mu.Lock()
+		s.devRootPath = opts.LocalPath // "" for plain disables
+		s.mu.Unlock()
+	}
 }
 
 // latestCloneRunIDLocked returns the runID with the most recent createdAt.

@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -999,3 +1000,121 @@ func TestApiAddSource_RejectsBadTarget(t *testing.T) {
 		})
 	}
 }
+
+// gatedReconciler hands the real reconciler a source whose Start waits on
+// unblock, so a request can be held mid-start through the HTTP path.
+type gatedReconciler struct {
+	sourceReconciler
+	entered chan string
+	unblock chan struct{}
+	started chan context.Context
+}
+
+func (g *gatedReconciler) AddSource(src source.Source) error {
+	return g.sourceReconciler.AddSource(&gatedSource{Source: src, g: g})
+}
+
+type gatedSource struct {
+	source.Source
+	g *gatedReconciler
+}
+
+func (s *gatedSource) Start(ctx context.Context) (<-chan source.Event, error) {
+	s.g.entered <- s.ID()
+	<-s.g.unblock
+	s.g.started <- ctx
+	return s.Source.Start(ctx)
+}
+
+// A DELETE landing while the POST's source is still starting must leave the
+// POST with 409 and the real reconciler with nothing running for the name.
+func TestApiAddSource_ConcurrentRemove_ConflictAndNothingLeft(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{}
+	srv, _, sourceMgr := newTestServerWithReconciler(t, cfg)
+	gate := &gatedReconciler{
+		sourceReconciler: serverSourceReconciler{srv},
+		entered:          make(chan string, 1),
+		unblock:          make(chan struct{}),
+		started:          make(chan context.Context, 1),
+	}
+	srv.sourcesOnce.Do(func() {
+		srv.sources = newSourceLifecycle(serverSourceConfig{srv}, gate, serverSourceRegistry{srv}, srv.dataDir, srv.log)
+	})
+	h := srv.Handler()
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	path := filepath.Join(t.TempDir(), "taskset.yaml")
+	if err := os.WriteFile(path, []byte("apiVersion: dicode/v1\nkind: TaskSet\nspec:\n  entries: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	post := make(chan *httptest.ResponseRecorder, 1)
+	go func() { post <- do(http.MethodPost, "/api/settings/sources", `{"name":"raced","path":"`+path+`"}`) }()
+
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("POST never reached source start")
+	}
+	if w := do(http.MethodDelete, "/api/settings/sources/raced", ""); w.Code != http.StatusOK {
+		t.Fatalf("DELETE during start: %d %s", w.Code, w.Body.String())
+	}
+	close(gate.unblock)
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-post:
+	case <-time.After(5 * time.Second):
+		t.Fatal("POST never returned")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("POST = %d %s, want 409", w.Code, w.Body.String())
+	}
+
+	srcCtx := <-gate.started
+	select {
+	case <-srcCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconciler is still running the removed source")
+	}
+	if _, ok := sourceMgr.Get("raced"); ok {
+		t.Fatal("removed source is still registered")
+	}
+	list := do(http.MethodGet, "/api/sources", "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /api/sources: %d %s", list.Code, list.Body.String())
+	}
+	if strings.Contains(list.Body.String(), `"raced"`) {
+		t.Fatalf("GET /api/sources still lists the removed source: %s", list.Body.String())
+	}
+}
+
+// A source that fails to start is a server error, not a conflict.
+func TestApiAddSource_StartFailure_500(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{}
+	srv, _, _ := newTestServerWithReconciler(t, cfg)
+	srv.sourcesOnce.Do(func() {
+		srv.sources = newSourceLifecycle(serverSourceConfig{srv}, failingReconciler{}, serverSourceRegistry{srv}, srv.dataDir, srv.log)
+	})
+
+	body := `{"name":"broken","path":"` + filepath.Join(t.TempDir(), "taskset.yaml") + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("POST = %d %s, want 500", w.Code, w.Body.String())
+	}
+}
+
+type failingReconciler struct{}
+
+func (failingReconciler) AddSource(source.Source) error { return errors.New("boom") }
+func (failingReconciler) RemoveSource(string)           {}

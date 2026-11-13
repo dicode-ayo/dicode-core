@@ -145,9 +145,22 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 
 // Remove deletes name's config entry, stops its source, and unregisters it.
 // The registered source is stopped too, since a raw config save may have
-// changed the entry's ref without restarting it. A config persist failure is
+// changed the entry's ref without restarting it, and its dev-mode sessions
+// are ended so their clones do not outlive it. A config persist failure is
 // logged, not returned.
 func (l *SourceLifecycle) Remove(name string) error {
+	src, err := l.remove(name)
+	if err != nil {
+		return err
+	}
+	if src != nil && src.DevMode() {
+		src.DisableDevMode()
+	}
+	l.log.Info("source removed", zap.String("name", name))
+	return nil
+}
+
+func (l *SourceLifecycle) remove(name string) (*taskset.Source, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -161,7 +174,7 @@ func (l *SourceLifecycle) Remove(name string) error {
 		return nil
 	})
 	if entry == nil {
-		return ErrSourceNotFound
+		return nil, ErrSourceNotFound
 	}
 	if err != nil {
 		l.log.Warn("source persist failed", zap.Error(err))
@@ -171,11 +184,11 @@ func (l *SourceLifecycle) Remove(name string) error {
 		entryID = taskset.SourceID(name, entry.Ref)
 		l.rec.RemoveSource(entryID)
 	}
-	if src := l.reg.Unregister(name); src != nil && src.ID() != entryID {
+	src := l.reg.Unregister(name)
+	if src != nil && src.ID() != entryID {
 		l.rec.RemoveSource(src.ID())
 	}
-	l.log.Info("source removed", zap.String("name", name))
-	return nil
+	return src, nil
 }
 
 func (l *SourceLifecycle) holdsClaim(name string, entry *taskset.Entry) bool {

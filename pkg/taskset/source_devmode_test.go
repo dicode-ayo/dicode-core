@@ -467,3 +467,43 @@ func TestSetDevMode_PinnedSourceForksFromTheTag(t *testing.T) {
 		t.Errorf("fix branch forked from %q, want the pinned commit's %q", string(body), "pinned")
 	}
 }
+
+// A stopped source's event channel is closed, so ending dev mode on it must
+// not resync.
+func TestDisableDevMode_StoppedSource_RemovesClone(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	const runID = "run-stopped-1"
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/stopped", Base: "main", RunID: runID}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	clonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+	if _, err := os.Stat(clonePath); err != nil {
+		t.Fatalf("clone dir missing after enable: %v", err)
+	}
+
+	cancel()
+	for range ch {
+	}
+
+	src.DisableDevMode()
+	if src.DevMode() {
+		t.Error("DevMode() = true after DisableDevMode")
+	}
+	if _, err := os.Stat(clonePath); !os.IsNotExist(err) {
+		t.Errorf("clone dir still exists after DisableDevMode; err = %v", err)
+	}
+}
