@@ -1,7 +1,6 @@
 package webui
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -464,35 +463,6 @@ func TestSourceLifecycle_Remove_UnregistersSource(t *testing.T) {
 		t.Fatal("Remove left the stopped source registered")
 	}
 	h.assertConsistent(t)
-}
-
-// Remove drops the last handle to the source, so it must end dev mode itself.
-func TestSourceLifecycle_Remove_EndsDevMode(t *testing.T) {
-	h := newLifecycleHarness(t)
-	if err := h.l.Add("dev", localRef("/tmp/dev")); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	src, ok := h.mgr.Get("dev")
-	if !ok {
-		t.Fatal("Add did not register the source")
-	}
-	devPath := filepath.Join(t.TempDir(), "taskset.yaml")
-	if err := src.SetDevMode(context.Background(), true, taskset.DevModeOpts{LocalPath: devPath}); err != nil {
-		t.Fatalf("SetDevMode: %v", err)
-	}
-	if !src.DevMode() {
-		t.Fatal("source not in dev mode")
-	}
-
-	if err := h.l.Remove("dev"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if src.DevMode() {
-		t.Fatal("removed source is still in dev mode")
-	}
-	if got := src.DevRootPath(); got != "" {
-		t.Fatalf("removed source still points at dev root %q", got)
-	}
 }
 
 func TestSourceLifecycle_PersistFailure_IsNotFatal(t *testing.T) {

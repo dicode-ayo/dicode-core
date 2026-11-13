@@ -145,16 +145,12 @@ func (l *SourceLifecycle) Add(name string, ref taskset.Ref) error {
 
 // Remove deletes name's config entry, stops its source, and unregisters it.
 // The registered source is stopped too, since a raw config save may have
-// changed the entry's ref without restarting it, and its dev-mode sessions
-// are ended so their clones do not outlive it. A config persist failure is
-// logged, not returned.
+// changed the entry's ref without restarting it. Dev-mode clones are left on
+// disk: tasks the source already loaded stay registered and may still run
+// from them. A config persist failure is logged, not returned.
 func (l *SourceLifecycle) Remove(name string) error {
-	src, err := l.remove(name)
-	if err != nil {
+	if _, err := l.remove(name); err != nil {
 		return err
-	}
-	if src != nil && src.DevMode() {
-		src.DisableDevMode()
 	}
 	l.log.Info("source removed", zap.String("name", name))
 	return nil

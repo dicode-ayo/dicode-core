@@ -69,7 +69,7 @@ Freezing a source against a re-cut tag by not re-reading the ref would have been
 
 `POST /api/settings/sources` takes `tag` in place of `branch`, so a source can be added pinned without hand-editing the file. It applies the same rules as config-load, so the API cannot write an entry the next boot would reject.
 
-`DELETE /api/settings/sources/{name}` removes the source's config entry, stops its watch, and drops the name from dev-mode and override control: afterwards `PATCH /api/sources/{name}/dev` and task-override refreshes treat it as an unknown source rather than acting on the stopped one. Tasks the source already loaded are not unregistered: they stay in the registry, and keep firing on their triggers, until the daemon restarts ([#921](https://github.com/dicode-ayo/dicode-core/issues/921)).
+`DELETE /api/settings/sources/{name}` removes the source's config entry, stops its watch, and drops the name from dev-mode and override control: afterwards `PATCH /api/sources/{name}/dev` and task-override refreshes treat it as an unknown source rather than acting on the stopped one. Tasks the source already loaded are not unregistered: they stay in the registry, and keep firing on their triggers, until the daemon restarts, and a dev-mode clone they were loaded from stays on disk so they can still run ([#921](https://github.com/dicode-ayo/dicode-core/issues/921)).
 
 A `POST` for a name whose earlier add is still starting is refused with `409`, even if that name was deleted in the meantime; retry once the first request returns. An add whose source is deleted before it finished starting also answers `409`, and leaves nothing running.
 
