@@ -41,9 +41,7 @@ func TestSource_Remove_DeletesClonesAndEndsDevMode(t *testing.T) {
 	if src.DevRootPath() != "" {
 		t.Errorf("DevRootPath = %q after Remove, want empty", src.DevRootPath())
 	}
-	if _, err := os.Stat(nsDir); !os.IsNotExist(err) {
-		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
-	}
+	assertNoClones(t, nsDir)
 	err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/late", Base: "main", RunID: "run-late"})
 	if !errors.Is(err, ErrSourceRemoved) {
 		t.Fatalf("SetDevMode after Remove = %v, want ErrSourceRemoved", err)
@@ -154,9 +152,7 @@ func TestSource_Remove_NestedRootDeletesWholeClone(t *testing.T) {
 
 	src.Remove()
 
-	if _, err := os.Stat(nsDir); !os.IsNotExist(err) {
-		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
-	}
+	assertNoClones(t, nsDir)
 }
 
 // Disabling a nested-root clone deletes the clone root, not the subdirectory
@@ -288,9 +284,7 @@ func TestSource_Remove_CancelsAndWaitsForInFlightClone(t *testing.T) {
 	default:
 		t.Fatal("Remove returned before the in-progress clone settled")
 	}
-	if _, err := os.Stat(filepath.Join(src.DataDir(), "dev-clones", src.Namespace())); !os.IsNotExist(err) {
-		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
-	}
+	assertNoClones(t, filepath.Join(src.DataDir(), "dev-clones", src.Namespace()))
 }
 
 // Concurrent syncs must emit their diffs in the order they advance the
@@ -406,9 +400,7 @@ func TestSource_Remove_WaitsForCloneAbandonedByDisableAll(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Remove never returned")
 	}
-	if _, err := os.Stat(filepath.Join(src.DataDir(), "dev-clones", src.Namespace())); !os.IsNotExist(err) {
-		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
-	}
+	assertNoClones(t, filepath.Join(src.DataDir(), "dev-clones", src.Namespace()))
 }
 
 // A sync that started before the one that last swapped the snapshot must
@@ -443,5 +435,69 @@ func TestSource_StaleSync_Dropped(t *testing.T) {
 	}
 	if len(ch) != 1 {
 		t.Errorf("fresh sync emitted %d events, want 1", len(ch))
+	}
+}
+
+// assertNoClones fails if any clone is left under the namespace directory.
+func assertNoClones(t *testing.T, nsDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(nsDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read %s: %v", nsDir, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("clones left under %s: %d entries", nsDir, len(entries))
+	}
+}
+
+// Remove clears the source's load failures, so a removed source stops
+// reporting failing entries.
+func TestSource_Remove_ClearsLoadFailures(t *testing.T) {
+	dir := t.TempDir()
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n    broken:\n      ref:\n        path: "+filepath.Join(dir, "missing", "task.yaml")+"\n")
+	src := newTestSource(t, "infra", tsPath)
+	ch := make(chan source.Event, 8)
+	if err := src.sync(context.Background(), ch); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(src.LoadFailures()) == 0 {
+		t.Fatal("test setup: expected a load failure for the missing entry")
+	}
+
+	src.Remove()
+	if n := len(src.LoadFailures()); n != 0 {
+		t.Fatalf("LoadFailures after Remove = %d entries, want 0", n)
+	}
+	if err := src.sync(context.Background(), ch); err != nil {
+		t.Fatalf("sync after Remove: %v", err)
+	}
+	if n := len(src.LoadFailures()); n != 0 {
+		t.Fatalf("sync after Remove republished %d load failures", n)
+	}
+}
+
+// Disabling a clone still in progress leaves its directory to finishClone,
+// which deletes it once the cancelled clone has stopped writing.
+func TestSource_DisableInFlightClone_LeavesDirToFinishClone(t *testing.T) {
+	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
+	const runID = "run-inflight"
+	opts := DevModeOpts{Branch: "fix/inflight", RunID: runID}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+	if err := os.MkdirAll(cloneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir}}
+	src.mu.Unlock()
+
+	if err := src.SetDevMode(context.Background(), false, DevModeOpts{RunID: runID}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := os.Stat(cloneDir); err != nil {
+		t.Fatalf("disable deleted an in-progress clone's dir: %v", err)
+	}
+	_ = src.finishClone(context.Background(), opts, "", context.Canceled, func() {})
+	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
+		t.Errorf("finishClone left the abandoned clone dir: err = %v", err)
 	}
 }

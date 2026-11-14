@@ -367,12 +367,15 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 			s.mu.Unlock()
 			return nil
 		}
-		// Collect clone directories to remove from the stored cloneState
-		// values. Empty RunID means "disable all".
+		// Collect completed clone directories to remove from the stored
+		// cloneState values; finishClone deletes an in-progress one. Empty
+		// RunID means "disable all".
 		var dirs []string
 		drop := func(runID string, cs cloneState) {
 			delete(s.clones, runID)
-			s.abandonIfInProgressLocked(runID, cs)
+			if s.abandonIfInProgressLocked(runID, cs) {
+				return
+			}
 			dirs = append(dirs, cs.cloneDir)
 		}
 		if opts.RunID != "" {
@@ -423,12 +426,12 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 }
 
 // abandonIfInProgressLocked cancels a dropped clone session whose enableClone
-// has not returned yet and records it, so finishClone can still find its
-// directory. It returns the session's done channel, or nil when the session
-// was not in progress. Caller must hold s.mu.
-func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) chan struct{} {
+// has not returned yet and records it, so finishClone can still find and
+// delete its directory. It reports whether the session was in progress.
+// Caller must hold s.mu.
+func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) bool {
 	if cs.devRootPath != "" {
-		return nil
+		return false
 	}
 	if s.abandoned == nil {
 		s.abandoned = make(map[string]cloneState)
@@ -437,7 +440,7 @@ func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) chan str
 	if cs.cancel != nil {
 		cs.cancel()
 	}
-	return cs.done
+	return true
 }
 
 // finishClone records a clone session once enableClone returns. A session
@@ -522,12 +525,13 @@ func (s *Source) Remove() {
 		return
 	}
 	s.removed = true
-	waits := []chan struct{}{s.watchDone}
 	dirs := make([]string, 0, len(s.clones))
 	for runID, cs := range s.clones {
-		waits = append(waits, s.abandonIfInProgressLocked(runID, cs))
-		dirs = append(dirs, cs.cloneDir)
+		if !s.abandonIfInProgressLocked(runID, cs) {
+			dirs = append(dirs, cs.cloneDir)
+		}
 	}
+	waits := []chan struct{}{s.watchDone}
 	for _, cs := range s.abandoned {
 		waits = append(waits, cs.done)
 	}
@@ -535,6 +539,9 @@ func (s *Source) Remove() {
 	s.primaryRunID = ""
 	s.devRootPath = ""
 	s.resolver.SetDevMode(false)
+	s.failuresMu.Lock()
+	s.failures = map[string]task.LoadFailure{}
+	s.failuresMu.Unlock()
 	s.mu.Unlock()
 
 	for _, done := range waits {
@@ -545,8 +552,6 @@ func (s *Source) Remove() {
 	for _, dir := range dirs {
 		s.removeCloneDir(dir)
 	}
-	// Drops the namespace directory only when no clone is left in it.
-	_ = os.Remove(filepath.Join(s.dataDir, "dev-clones", s.namespace))
 }
 
 // latestCloneRunIDLocked returns the runID with the most recent createdAt.
@@ -692,6 +697,7 @@ func (s *Source) LoadFailures() map[string]task.LoadFailure {
 // outcome of the sync that just ran. Replacing rather than merging means an
 // entry that now resolves cleanly, or was removed from the taskset spec
 // entirely, drops out on its own — no separate "clear" call needed.
+// Caller must hold s.mu, so failures publish in the same order as snapshots.
 func (s *Source) setLoadFailures(fails []ResolveFailure) {
 	m := make(map[string]task.LoadFailure, len(fails))
 	now := time.Now()
@@ -980,9 +986,10 @@ func (s *Source) sync(ctx context.Context, ch chan<- source.Event) error {
 			})
 		}
 	}
+	if !s.removed {
+		s.setLoadFailures(failures)
+	}
 	s.mu.Unlock()
-
-	s.setLoadFailures(failures)
 	return nil
 }
 
