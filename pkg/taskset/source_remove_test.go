@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const emptyFixtureTaskSet = `apiVersion: dicode/v1
@@ -60,9 +62,8 @@ func TestSource_Remove_DuringInFlightClone(t *testing.T) {
 	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
 
 	// Reproduce SetDevMode's state while enableClone runs outside the lock.
-	placeholder := cloneState{cloneDir: cloneDir}
 	src.mu.Lock()
-	src.clones = map[string]cloneState{runID: placeholder}
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir}}
 	src.mu.Unlock()
 
 	src.Remove()
@@ -74,7 +75,7 @@ func TestSource_Remove_DuringInFlightClone(t *testing.T) {
 	if _, err := os.Stat(cloneDir); err != nil {
 		t.Fatalf("test setup: clone dir missing after enableClone: %v", err)
 	}
-	if err := src.finishClone(ctx, opts, placeholder, devPath, nil); err == nil {
+	if err := src.finishClone(ctx, opts, devPath, nil); err == nil {
 		t.Fatal("finishClone after Remove = nil, want an error")
 	}
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
@@ -135,5 +136,102 @@ spec:
 
 	if err := src.SetDevMode(context.Background(), true, DevModeOpts{LocalPath: devPath}); err != nil {
 		t.Fatalf("SetDevMode: %v", err)
+	}
+}
+
+// A root taskset nested below the repo root must not leave the rest of the
+// clone behind.
+func TestSource_Remove_NestedRootDeletesWholeClone(t *testing.T) {
+	remote := newFixtureRemote(t, "main", map[string]string{"tasks/taskset.yaml": emptyFixtureTaskSet})
+	src := NewSource(remote, "ns", &Ref{URL: remote, Branch: "main", Path: "tasks/taskset.yaml"}, "", t.TempDir(), false, 30*time.Second, zap.NewNop())
+	ctx := context.Background()
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/nested", Base: "main", RunID: "run-nested"}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	nsDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace())
+
+	src.Remove()
+
+	if _, err := os.Stat(nsDir); !os.IsNotExist(err) {
+		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
+	}
+}
+
+// Disabling a nested-root clone deletes the clone root, not the subdirectory
+// holding the taskset.
+func TestSource_DisableClone_NestedRootDeletesWholeClone(t *testing.T) {
+	remote := newFixtureRemote(t, "main", map[string]string{"tasks/taskset.yaml": emptyFixtureTaskSet})
+	src := NewSource(remote, "ns", &Ref{URL: remote, Branch: "main", Path: "tasks/taskset.yaml"}, "", t.TempDir(), false, 30*time.Second, zap.NewNop())
+	ctx := context.Background()
+	const runID = "run-nested"
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/nested", Base: "main", RunID: runID}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+
+	if err := src.SetDevMode(ctx, false, DevModeOpts{RunID: runID}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
+		t.Errorf("clone root still exists after disable: err = %v", err)
+	}
+}
+
+// A clone dropped by disable-all while in progress is deleted when it finishes,
+// and its run ID stays busy until then.
+func TestSource_DisableAllDuringInFlightClone(t *testing.T) {
+	remote := newFixtureRemote(t, "main", map[string]string{"taskset.yaml": emptyFixtureTaskSet})
+	src := newTestSourceWithRemote(t, "ns", remote, "main")
+	ctx := context.Background()
+	const runID = "run-inflight"
+	opts := DevModeOpts{Branch: "fix/inflight", Base: "main", RunID: runID}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+
+	src.mu.Lock()
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir}}
+	src.mu.Unlock()
+
+	if err := src.SetDevMode(ctx, false, DevModeOpts{}); err != nil {
+		t.Fatalf("disable all: %v", err)
+	}
+	if err := src.SetDevMode(ctx, true, opts); !errors.Is(err, ErrDevModeBusy) {
+		t.Fatalf("re-enable while abandoned clone in flight = %v, want ErrDevModeBusy", err)
+	}
+	devPath, cloneErr := src.enableClone(ctx, opts)
+	if cloneErr != nil {
+		t.Fatalf("enableClone: %v", cloneErr)
+	}
+	if err := src.finishClone(ctx, opts, devPath, nil); err == nil {
+		t.Fatal("finishClone after disable-all = nil, want an error")
+	}
+	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
+		t.Errorf("abandoned clone left on disk: err = %v", err)
+	}
+	if src.DevMode() {
+		t.Error("abandoned clone enabled dev mode")
+	}
+}
+
+// Remove waits for the watch loop of a stopped source before tearing down.
+func TestSource_Remove_WaitsForWatchLoop(t *testing.T) {
+	dir := t.TempDir()
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", emptyFixtureTaskSet)
+	src := newTestSource(t, "ns", tsPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cancel()
+	src.Remove()
+	for {
+		select {
+		case _, open := <-ch:
+			if !open {
+				return
+			}
+		default:
+			t.Fatal("Remove returned before the watch loop closed its channel")
+		}
 	}
 }
