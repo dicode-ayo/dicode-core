@@ -33,6 +33,7 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
+	"github.com/dicode/dicode/pkg/source"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -3122,7 +3123,11 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			}); rollbackErr != nil {
 				s.log.Warn("source claim rollback failed", zap.String("name", name), zap.Error(rollbackErr))
 			}
-			jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrDuplicateSource) {
+				status = http.StatusConflict
+			}
+			jsonErr(w, "start source: "+err.Error(), status)
 			return
 		}
 	}
@@ -3131,7 +3136,7 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	// via the entry pointer, a subsequent concurrent re-add): see its doc
 	// comment for the full mechanics. Only register ts with sourceMgr if our
 	// cfg.Spec.Entries[name] claim — this exact *entry — is still standing.
-	if s.reconcileClaimAfterAdd(name, id, entry) && s.sourceMgr != nil {
+	if s.reconcileClaimAfterAdd(name, ts, entry) && s.sourceMgr != nil {
 		s.sourceMgr.Register(name, ts)
 	}
 
@@ -3139,51 +3144,29 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// reconcileClaimAfterAdd re-validates, immediately after s.reconciler.AddSource
-// for (name, id) has returned successfully, that the cfg.Spec.Entries[name]
-// claim made earlier by apiAddSource's updateConfig callback — specifically,
-// THIS request's entry pointer — is still the one occupying that slot. Call
-// it right before registering the newly started source with sourceMgr.
+// reconcileClaimAfterAdd re-validates, immediately after
+// s.reconciler.AddSource(src) has returned successfully, that THIS request's
+// entry pointer still occupies cfg.Spec.Entries[name]. Call it right before
+// registering src with sourceMgr.
 //
-// Why the re-check is needed: reconciler.AddSource's underlying startSource
-// calls src.Start synchronously *before* it populates rc.cancels[id] (see
-// pkg/registry/reconciler.go's startSource). If a concurrent apiRemoveSource
-// ran while that Start was in flight, it would have seen our claimed
-// cfg.Spec.Entries[name], deleted it, and called reconciler.RemoveSource(id)
-// — but that call would have missed (rc.cancels[id] not populated yet) and
-// been a silent no-op, leaving AddSource free to finish "successfully" a
-// moment later. Without this re-check apiAddSource would unconditionally
-// register a live source in sourceMgr with no corresponding config entry:
-// the orphan the 3fafc3f rollback was built to prevent, from the other
-// direction.
+// A concurrent apiRemoveSource can delete the entry and call
+// reconciler.RemoveSource while AddSource is in flight, or after it returned
+// but before this check. Registering src then would leave a source in
+// sourceMgr with no config entry.
 //
-// Why identity, not just name presence: name presence alone is an ABA
-// hazard. If, after the concurrent delete above, a THIRD request re-adds the
-// same name before this call runs, cfg.Spec.Entries[name] is present again
-// but holds a different, newer *taskset.Entry. Treating "present" as "still
-// ours" would register this request's now-stale ts into sourceMgr on top of
-// (or racing with) the newer request's own registration, and would leak this
-// source's reconciler-side registration forever (nothing else will ever call
-// RemoveSource(id) for it). Comparing against the specific entry pointer this
-// request claimed distinguishes "our claim still stands" from "the slot is
-// now occupied by someone else's newer claim" — both cases must self-clean
-// via reconciler.RemoveSource(id) and must NOT touch the entry actually
-// occupying the slot (whether that's nothing, or a newer valid claim).
+// Identity, not name presence: a third request may have re-added the same
+// name since, so the slot can hold a newer *taskset.Entry. Neither case may
+// touch whatever entry occupies the slot now.
 //
-// Re-checking here — now that AddSource has returned and rc.cancels[id] is
-// guaranteed populated — lets us detect a lost race and self-clean via the
-// same teardown apiRemoveSource itself uses (reconciler.RemoveSource),
-// instead of registering an orphan. We must NOT resurrect or otherwise
-// mutate cfg.Spec.Entries[name]: whatever is (or isn't) there already
-// reflects the outcome of whichever concurrent request won.
+// On a lost race src is torn down with RemoveSourceIfCurrent, never by bare
+// ID: the newer request may run a source under the same ID, and that one must
+// survive. A src already removed mid-start is a no-op.
 //
-// Returns true if entry is still the one occupying cfg.Spec.Entries[name]
-// and the caller should proceed to register the source with sourceMgr; false
-// if a concurrent removal — or removal-then-re-add — won the race, in which
-// case this function has already torn the source back down via
-// reconciler.RemoveSource(id) and the caller must not register it.
+// Returns true if entry still occupies cfg.Spec.Entries[name] and the caller
+// should register src with sourceMgr; false if a concurrent removal won, in
+// which case the caller must not register it.
 // A nil s.reconciler always returns true (nothing to race against).
-func (s *Server) reconcileClaimAfterAdd(name, id string, entry *taskset.Entry) bool {
+func (s *Server) reconcileClaimAfterAdd(name string, src source.Source, entry *taskset.Entry) bool {
 	if s.reconciler == nil {
 		return true
 	}
@@ -3193,9 +3176,9 @@ func (s *Server) reconcileClaimAfterAdd(name, id string, entry *taskset.Entry) b
 	if current == entry {
 		return true
 	}
-	s.reconciler.RemoveSource(id)
+	s.reconciler.RemoveSourceIfCurrent(src)
 	s.log.Info("source removed (or replaced by a newer claim) concurrently while being added; cleaned up orphaned source",
-		zap.String("name", name), zap.String("id", id))
+		zap.String("name", name), zap.String("id", src.ID()))
 	return false
 }
 

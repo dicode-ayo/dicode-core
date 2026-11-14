@@ -29,10 +29,10 @@ var ErrDuplicateSource = errors.New("source with this id is already running")
 
 // sourceEvent is a source event tagged with the generation of the source
 // run that produced it. gen 0 marks an event with no owning source run.
+// Event.Source is always the producing source's ID.
 type sourceEvent struct {
 	source.Event
-	srcID string
-	gen   uint64
+	gen uint64
 	// done is closed by the Run loop after it handles a sourceRemoved marker.
 	done chan struct{}
 }
@@ -43,6 +43,8 @@ type runningSource struct {
 	src    source.Source
 	cancel context.CancelFunc
 	gen    uint64
+	// done closes once Start has returned and the forwarder has exited.
+	done chan struct{}
 }
 
 // Reconciler fans-in events from multiple sources and applies them to the registry.
@@ -171,16 +173,28 @@ func (rc *Reconciler) AddSource(src source.Source) error {
 }
 
 // RemoveSource stops a source by its ID, deregisters every task it
-// registered (calling OnUnregister for each), then calls Remove on sources
-// implementing source.Remover. It returns once the tasks are deregistered.
+// registered (calling OnUnregister for each), waits for its Start call and
+// event forwarding to finish, then calls Remove on sources implementing
+// source.Remover. It returns once the tasks are deregistered.
 // A source still inside Start is cancelled and never forwards events.
 //
 // Safe to call from any goroutine after Run has been called, except from
 // OnRegister/OnUnregister, which run on the Run loop it waits for.
 func (rc *Reconciler) RemoveSource(id string) {
+	rc.removeSource(id, nil)
+}
+
+// RemoveSourceIfCurrent is RemoveSource for src.ID(), but only while src is
+// the instance running under that ID: a caller holding a source that was
+// already removed cannot tear down a newer source that reused the ID.
+func (rc *Reconciler) RemoveSourceIfCurrent(src source.Source) {
+	rc.removeSource(src.ID(), src)
+}
+
+func (rc *Reconciler) removeSource(id string, want source.Source) {
 	rc.mu.Lock()
 	rs, ok := rc.cancels[id]
-	if !ok {
+	if !ok || (want != nil && rs.src != want) {
 		rc.mu.Unlock()
 		return
 	}
@@ -194,16 +208,18 @@ func (rc *Reconciler) RemoveSource(id string) {
 	rc.mu.Unlock()
 	rs.cancel()
 
-	marker := sourceEvent{Event: source.Event{Kind: sourceRemoved, Source: id}, srcID: id, gen: rs.gen, done: make(chan struct{})}
+	marker := sourceEvent{Event: source.Event{Kind: sourceRemoved, Source: id}, gen: rs.gen, done: make(chan struct{})}
 	select {
 	case rc.merged <- marker:
 	case <-ctx.Done():
 		return
 	}
-	select {
-	case <-marker.done:
-	case <-ctx.Done():
-		return
+	for _, done := range []chan struct{}{marker.done, rs.done} {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		}
 	}
 	if r, ok := rs.src.(source.Remover); ok {
 		r.Remove()
@@ -243,7 +259,7 @@ func (rc *Reconciler) live(ev sourceEvent) bool {
 	}
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	rs, ok := rc.cancels[ev.srcID]
+	rs, ok := rc.cancels[ev.Source]
 	return ok && rs.gen == ev.gen
 }
 
@@ -272,7 +288,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	}
 	srcCtx, cancel := context.WithCancel(ctx)
 	rc.lastGen++
-	rs := &runningSource{src: src, cancel: cancel, gen: rc.lastGen}
+	rs := &runningSource{src: src, cancel: cancel, gen: rc.lastGen, done: make(chan struct{})}
 	rc.cancels[id] = rs
 	rc.mu.Unlock()
 
@@ -286,6 +302,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	rc.mu.Unlock()
 	if removed {
 		// RemoveSource cancelled this start; its events must never register.
+		close(rs.done)
 		if trackInitial {
 			rc.markInitialSourceSynced()
 		}
@@ -293,6 +310,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	}
 	if err != nil {
 		cancel()
+		close(rs.done)
 		return err
 	}
 	initialBatch := 0
@@ -301,6 +319,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	}
 
 	go func() {
+		defer close(rs.done)
 		// sendBarrier signals this source's initial batch has been forwarded.
 		// It reports false when ctx is done, so the forwarder can bail out.
 		// On shutdown before the barrier lands, Ready simply never closes —
@@ -337,11 +356,12 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 			case <-srcCtx.Done():
 				return
 			}
-			// ctx is the parent context: without it, a stopped Run loop
-			// would block this goroutine forever holding source events.
+			// Without srcCtx, a stopped Run loop or a removal would block
+			// this goroutine forever holding source events.
+			ev.Source = id
 			select {
-			case rc.merged <- sourceEvent{Event: ev, srcID: id, gen: rs.gen}:
-			case <-ctx.Done():
+			case rc.merged <- sourceEvent{Event: ev, gen: rs.gen}:
+			case <-srcCtx.Done():
 				return
 			}
 			if trackInitial {
@@ -360,7 +380,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 func (rc *Reconciler) handle(ev sourceEvent) {
 	if !rc.live(ev) {
 		rc.log.Debug("dropping event from removed source",
-			zap.String("task", ev.TaskID), zap.String("source", ev.srcID))
+			zap.String("task", ev.TaskID), zap.String("source", ev.Source))
 		return
 	}
 	switch ev.Kind {

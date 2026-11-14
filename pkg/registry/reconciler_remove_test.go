@@ -345,7 +345,6 @@ func TestReconciler_RemoveSource_DropsLateEvents(t *testing.T) {
 	}
 	rec.merged <- sourceEvent{
 		Event: source.Event{Kind: source.EventAdded, TaskID: "x/stale", Kinded: manualSpec("x/stale"), Source: "src-x"},
-		srcID: "src-x",
 		gen:   oldGen,
 	}
 	fresh.ch <- source.Event{Kind: source.EventAdded, TaskID: "x/fresh", Kinded: manualSpec("x/fresh"), Source: "src-x"}
@@ -353,5 +352,103 @@ func TestReconciler_RemoveSource_DropsLateEvents(t *testing.T) {
 
 	if _, ok := reg.Get("x/stale"); ok {
 		t.Fatal("late event from a removed source run re-registered a task")
+	}
+}
+
+// A caller holding a removed source must not tear down a newer source that
+// reuses its ID.
+func TestReconciler_RemoveSourceIfCurrent_SparesNewerSameID(t *testing.T) {
+	reg, rec := newTestReconciler(t)
+	startReconciler(t, rec)
+
+	old := newCtxFakeSource("src-x")
+	if err := rec.AddSource(old); err != nil {
+		t.Fatal(err)
+	}
+	rec.RemoveSource("src-x")
+
+	fresh := newCtxFakeSource("src-x")
+	if err := rec.AddSource(fresh); err != nil {
+		t.Fatal(err)
+	}
+	fresh.ch <- source.Event{Kind: source.EventAdded, TaskID: "x/fresh", Kinded: manualSpec("x/fresh")}
+	waitRegistered(t, reg, "x/fresh")
+
+	rec.RemoveSourceIfCurrent(old)
+
+	if fresh.ctx().Err() != nil {
+		t.Fatal("stale removal cancelled the newer source")
+	}
+	if _, ok := reg.Get("x/fresh"); !ok {
+		t.Fatal("stale removal deregistered the newer source's task")
+	}
+
+	rec.RemoveSourceIfCurrent(fresh)
+	if _, ok := reg.Get("x/fresh"); ok {
+		t.Fatal("RemoveSourceIfCurrent did not remove the current source")
+	}
+}
+
+// stubbornStartSource blocks in Start until unblock closes, ignoring ctx.
+type stubbornStartSource struct {
+	*blockingStartSource
+	removed chan struct{}
+}
+
+func (b *stubbornStartSource) Start(ctx context.Context) (<-chan source.Event, error) {
+	b.entered <- ctx
+	<-b.unblock
+	return b.ch, nil
+}
+func (b *stubbornStartSource) Remove() { close(b.removed) }
+
+// Remove must not run while the source's Start is still in progress.
+func TestReconciler_RemoveSource_WaitsForStartBeforeRemove(t *testing.T) {
+	_, rec := newTestReconciler(t)
+	startReconciler(t, rec)
+
+	src := &stubbornStartSource{blockingStartSource: newBlockingStartSource("src-stubborn"), removed: make(chan struct{})}
+	addDone := make(chan error, 1)
+	go func() { addDone <- rec.AddSource(src) }()
+	<-src.entered
+
+	removeDone := make(chan struct{})
+	go func() { rec.RemoveSource("src-stubborn"); close(removeDone) }()
+	select {
+	case <-src.removed:
+		close(src.unblock)
+		t.Fatal("Remove ran while Start was still in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(src.unblock)
+	select {
+	case <-removeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RemoveSource never returned after Start finished")
+	}
+	select {
+	case <-src.removed:
+	default:
+		t.Fatal("Remove not called")
+	}
+	if err := <-addDone; err != nil {
+		t.Fatalf("AddSource = %v", err)
+	}
+}
+
+// The forwarder stamps every event with the producing source's ID.
+func TestReconciler_ForwarderStampsSourceID(t *testing.T) {
+	reg, rec := newTestReconciler(t)
+	startReconciler(t, rec)
+
+	src := newCtxFakeSource("src-stamp")
+	if err := rec.AddSource(src); err != nil {
+		t.Fatal(err)
+	}
+	src.ch <- source.Event{Kind: source.EventAdded, TaskID: "s/task", Kinded: manualSpec("s/task"), Source: "something-else"}
+	waitRegistered(t, reg, "s/task")
+	rec.RemoveSource("src-stamp")
+	if _, ok := reg.Get("s/task"); ok {
+		t.Fatal("task not deregistered with its source")
 	}
 }
