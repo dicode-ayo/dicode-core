@@ -355,9 +355,20 @@ func TestSource_ConcurrentSyncs_EventsMatchSnapshot(t *testing.T) {
 		want[id] = true
 	}
 	src.mu.Unlock()
+	got := map[string]bool{}
 	for id, present := range seen {
-		if present != want[id] {
-			t.Errorf("task %q: event stream says present=%v, snapshot says %v", id, present, want[id])
+		if present {
+			got[id] = true
+		}
+	}
+	for id := range got {
+		if !want[id] {
+			t.Errorf("task %q: present in the event stream, missing from the snapshot", id)
+		}
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("task %q: present in the snapshot, missing from the event stream", id)
 		}
 	}
 }
