@@ -27,7 +27,7 @@ import (
 // multiple concurrent sessions.
 var ErrDevModeBusy = errors.New("dev-mode: a clone session with this run ID is already active")
 
-// ErrSourceRemoved is returned by SetDevMode once Remove has run.
+// ErrSourceRemoved is returned by a dev-mode enable once Remove has run.
 var ErrSourceRemoved = errors.New("dev-mode: source has been removed")
 
 // Source implements source.Source using a TaskSet yaml file as its entry point.
@@ -69,10 +69,6 @@ type Source struct {
 	// Remove; finishClone deletes their directory once the clone returns.
 	abandoned map[string]cloneState
 
-	// emitMu orders out-of-band sends (RLock) against the watch loop closing
-	// ch (Lock), so a sync never sends on a closed channel.
-	emitMu sync.RWMutex
-
 	// pullStatus tracks the outcome of the most recent git pull; exposed
 	// via PullStatus() for the webui source-health dot. Zero-value means
 	// "never attempted" (local sources, or before Start).
@@ -105,6 +101,10 @@ type cloneState struct {
 	branch      string
 	base        string
 	createdAt   time.Time
+	// cancel and done are set while the clone is in progress: cancel aborts
+	// it, and done closes once finishClone has settled the session.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // SourceOption configures a Source at construction time.
@@ -347,18 +347,23 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 			s.mu.Unlock()
 			return ErrDevModeBusy
 		}
-		s.clones[opts.RunID] = cloneState{cloneDir: cleanExpected}
+		cloneCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		s.clones[opts.RunID] = cloneState{cloneDir: cleanExpected, cancel: cancel, done: done}
 		s.mu.Unlock()
 
-		devPath, err := s.enableClone(ctx, opts)
-		return s.finishClone(ctx, opts, devPath, err)
+		devPath, err := s.enableClone(cloneCtx, opts)
+		return s.finishClone(ctx, opts, devPath, err, func() {
+			cancel()
+			close(done)
+		})
 	}
 
 	if !enabled {
 		s.mu.Lock()
 		if s.removed {
 			s.mu.Unlock()
-			return ErrSourceRemoved
+			return nil
 		}
 		// Collect clone directories to remove from the stored cloneState
 		// values. Empty RunID means "disable all".
@@ -415,23 +420,28 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 	return s.syncLive(ctx)
 }
 
-// abandonIfInProgressLocked records a dropped clone session whose enableClone
-// has not returned yet, so finishClone can still find its directory.
-// Caller must hold s.mu.
-func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) {
+// abandonIfInProgressLocked cancels a dropped clone session whose enableClone
+// has not returned yet and records it, so finishClone can still find its
+// directory. It returns the session's done channel, or nil when the session
+// was not in progress. Caller must hold s.mu.
+func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) chan struct{} {
 	if cs.devRootPath != "" {
-		return
+		return nil
 	}
 	if s.abandoned == nil {
 		s.abandoned = make(map[string]cloneState)
 	}
 	s.abandoned[runID] = cs
+	if cs.cancel != nil {
+		cs.cancel()
+	}
+	return cs.done
 }
 
 // finishClone records a clone session once enableClone returns. A session
 // dropped meanwhile (disable-all or Remove) has its clone directory deleted
-// instead.
-func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath string, cloneErr error) error {
+// instead. settled runs once the session's directory is recorded or deleted.
+func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath string, cloneErr error, settled func()) error {
 	s.mu.Lock()
 	cs, stillReserved := s.clones[opts.RunID]
 	if !stillReserved {
@@ -442,6 +452,7 @@ func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath stri
 		delete(s.clones, opts.RunID)
 		s.mu.Unlock()
 		s.removeCloneDir(cs.cloneDir)
+		settled()
 		if cloneErr != nil {
 			return cloneErr
 		}
@@ -451,11 +462,14 @@ func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath stri
 	cs.branch = opts.Branch
 	cs.base = opts.Base
 	cs.createdAt = time.Now()
+	cs.cancel = nil
+	cs.done = nil
 	s.clones[opts.RunID] = cs
 	s.primaryRunID = opts.RunID
 	s.devRootPath = devPath
 	s.resolver.SetDevMode(true)
 	s.mu.Unlock()
+	settled()
 	return s.syncLive(ctx)
 }
 
@@ -483,9 +497,7 @@ func (s *Source) removeCloneDir(dir string) {
 }
 
 // syncLive re-resolves and emits on the live event channel; a no-op once
-// the watch loop has closed it or the source has been removed. emitMu is held
-// only around the non-blocking sends, so a slow resolve never holds up the
-// watch loop's exit.
+// the watch loop has closed it or the source has been removed.
 func (s *Source) syncLive(ctx context.Context) error {
 	s.mu.Lock()
 	live := s.ch != nil && !s.removed
@@ -493,30 +505,14 @@ func (s *Source) syncLive(ctx context.Context) error {
 	if !live {
 		return nil
 	}
-	events, err := s.sync(ctx)
-	if err != nil {
-		return err
-	}
-	s.emitMu.RLock()
-	defer s.emitMu.RUnlock()
-	s.mu.Lock()
-	ch := s.ch
-	removed := s.removed
-	s.mu.Unlock()
-	if ch == nil || removed {
-		return nil
-	}
-	for _, ev := range events {
-		s.send(ch, ev)
-	}
-	return nil
+	return s.sync(ctx, nil)
 }
 
-// Remove implements source.Remover: it ends dev mode and deletes every
-// dev-clone directory, including the target of a clone still in progress,
-// without re-resolving. Later SetDevMode calls return ErrSourceRemoved.
-// It first waits for the watch loop to exit, so a started source's context
-// must already be cancelled.
+// Remove implements source.Remover: it ends dev mode, cancels clones still
+// in progress, and deletes every dev-clone directory without re-resolving.
+// Later dev-mode enables return ErrSourceRemoved and disables do nothing.
+// It waits for the watch loop and for in-progress clones to finish, so a
+// started source's context must already be cancelled.
 func (s *Source) Remove() {
 	s.mu.Lock()
 	if s.removed {
@@ -524,10 +520,10 @@ func (s *Source) Remove() {
 		return
 	}
 	s.removed = true
-	watchDone := s.watchDone
+	waits := []chan struct{}{s.watchDone}
 	dirs := make([]string, 0, len(s.clones))
 	for runID, cs := range s.clones {
-		s.abandonIfInProgressLocked(runID, cs)
+		waits = append(waits, s.abandonIfInProgressLocked(runID, cs))
 		dirs = append(dirs, cs.cloneDir)
 	}
 	s.clones = nil
@@ -536,8 +532,10 @@ func (s *Source) Remove() {
 	s.resolver.SetDevMode(false)
 	s.mu.Unlock()
 
-	if watchDone != nil {
-		<-watchDone
+	for _, done := range waits {
+		if done != nil {
+			<-done
+		}
 	}
 	for _, dir := range dirs {
 		s.removeCloneDir(dir)
@@ -738,14 +736,12 @@ func (s *Source) SetParentOverrides(ov *Overrides) {
 // Falls back to a plain polling loop if fsnotify is unavailable.
 func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 	defer func() {
-		s.emitMu.Lock()
 		s.mu.Lock()
 		if s.ch == ch {
 			s.ch = nil
 		}
-		s.mu.Unlock()
 		close(ch)
-		s.emitMu.Unlock()
+		s.mu.Unlock()
 	}()
 
 	watcher, err := fsnotify.NewWatcher()
@@ -880,21 +876,18 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 }
 
 func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
-	events, err := s.sync(ctx)
-	if err != nil {
-		return err
-	}
-	for _, ev := range events {
-		s.send(ch, ev)
-	}
-	return nil
+	return s.sync(ctx, ch)
 }
 
-// sync re-resolves, updates the snapshot, and returns the resulting events.
-func (s *Source) sync(ctx context.Context) ([]source.Event, error) {
+// sync re-resolves and emits the diff against the snapshot on ch, or on the
+// live channel when ch is nil (dropping the events once it has closed or the
+// source is removed). The snapshot swap and the non-blocking sends share one
+// s.mu hold, so concurrent syncs emit their diffs in snapshot order; the
+// resolve runs unlocked.
+func (s *Source) sync(ctx context.Context, ch chan<- source.Event) error {
 	tasks, failures, err := s.resolve(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	current := make(map[string]taskSnap, len(tasks))
@@ -950,31 +943,35 @@ func (s *Source) sync(ctx context.Context) ([]source.Event, error) {
 		}
 	}
 	s.snapshot = current
+
+	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
+	out := ch
+	if out == nil && !s.removed {
+		out = s.ch
+	}
+	if out != nil {
+		for _, id := range added {
+			cur := current[id]
+			s.send(out, source.Event{
+				Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
+			})
+		}
+		for _, id := range updated {
+			cur := current[id]
+			s.send(out, source.Event{
+				Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
+			})
+		}
+		for _, id := range removed {
+			s.send(out, source.Event{
+				Kind: source.EventRemoved, TaskID: id, Source: s.id,
+			})
+		}
+	}
 	s.mu.Unlock()
 
 	s.setLoadFailures(failures)
-
-	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
-
-	events := make([]source.Event, 0, len(added)+len(updated)+len(removed))
-	for _, id := range added {
-		cur := current[id]
-		events = append(events, source.Event{
-			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
-		})
-	}
-	for _, id := range updated {
-		cur := current[id]
-		events = append(events, source.Event{
-			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
-		})
-	}
-	for _, id := range removed {
-		events = append(events, source.Event{
-			Kind: source.EventRemoved, TaskID: id, Source: s.id,
-		})
-	}
-	return events, nil
+	return nil
 }
 
 func (s *Source) send(ch chan<- source.Event, ev source.Event) {

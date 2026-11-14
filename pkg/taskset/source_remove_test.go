@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func TestSource_Remove_DuringInFlightClone(t *testing.T) {
 	if _, err := os.Stat(cloneDir); err != nil {
 		t.Fatalf("test setup: clone dir missing after enableClone: %v", err)
 	}
-	if err := src.finishClone(ctx, opts, devPath, nil); err == nil {
+	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); err == nil {
 		t.Fatal("finishClone after Remove = nil, want an error")
 	}
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
@@ -201,7 +202,7 @@ func TestSource_DisableAllDuringInFlightClone(t *testing.T) {
 	if cloneErr != nil {
 		t.Fatalf("enableClone: %v", cloneErr)
 	}
-	if err := src.finishClone(ctx, opts, devPath, nil); err == nil {
+	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); err == nil {
 		t.Fatal("finishClone after disable-all = nil, want an error")
 	}
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
@@ -232,6 +233,135 @@ func TestSource_Remove_WaitsForWatchLoop(t *testing.T) {
 			}
 		default:
 			t.Fatal("Remove returned before the watch loop closed its channel")
+		}
+	}
+}
+
+// Disabling dev mode on a removed source is a no-op, not an error.
+func TestSource_DisableAfterRemove_NoError(t *testing.T) {
+	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
+	src.Remove()
+	if err := src.SetDevMode(context.Background(), false, DevModeOpts{}); err != nil {
+		t.Fatalf("disable after Remove = %v, want nil", err)
+	}
+	if err := src.SetDevMode(context.Background(), true, DevModeOpts{LocalPath: "/tmp/x.yaml"}); !errors.Is(err, ErrSourceRemoved) {
+		t.Fatalf("enable after Remove = %v, want ErrSourceRemoved", err)
+	}
+}
+
+// Remove cancels a clone still in progress and waits for it to settle, so
+// nothing is left under dev-clones afterwards.
+func TestSource_Remove_CancelsAndWaitsForInFlightClone(t *testing.T) {
+	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
+	const runID = "run-inflight"
+	opts := DevModeOpts{Branch: "fix/inflight", RunID: runID}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+
+	// Reproduce SetDevMode's state while enableClone runs outside the lock.
+	cloneCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	src.mu.Lock()
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir, cancel: cancel, done: done}}
+	src.mu.Unlock()
+
+	go func() {
+		<-cloneCtx.Done()
+		// A clone writes its directory right up to the point it sees the cancel.
+		_ = os.MkdirAll(filepath.Join(cloneDir, ".git"), 0o755)
+		_ = src.finishClone(context.Background(), opts, "", cloneCtx.Err(), func() {
+			cancel()
+			close(done)
+		})
+	}()
+
+	removed := make(chan struct{})
+	go func() { src.Remove(); close(removed) }()
+	select {
+	case <-removed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("Remove did not cancel the in-progress clone")
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("Remove returned before the in-progress clone settled")
+	}
+	if _, err := os.Stat(filepath.Join(src.DataDir(), "dev-clones", src.Namespace())); !os.IsNotExist(err) {
+		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
+	}
+}
+
+// Concurrent syncs must emit their diffs in the order they advance the
+// snapshot, so replaying the event stream yields the final snapshot.
+func TestSource_ConcurrentSyncs_EventsMatchSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	deployDir := writeTaskDir(t, dir, "deploy")
+	buildDir := writeTaskDir(t, dir, "build")
+	entry := func(name, d string) string {
+		return "    " + name + ":\n      ref:\n        path: " + filepath.Join(d, "task.yaml") + "\n"
+	}
+	head := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n"
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", head+entry("deploy", deployDir))
+	devPath := writeTaskSetFile(t, dir, "dev-taskset.yaml", head+entry("deploy", deployDir)+entry("build", buildDir))
+
+	src := newTestSource(t, "infra", tsPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	seen := map[string]bool{}
+	consumed := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		defer close(consumed)
+		for {
+			select {
+			case ev := <-ch:
+				seen[ev.TaskID] = ev.Kind != "removed"
+			case <-stop:
+				for {
+					select {
+					case ev := <-ch:
+						seen[ev.TaskID] = ev.Kind != "removed"
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if (g+i)%2 == 0 {
+					_ = src.SetDevMode(context.Background(), true, DevModeOpts{LocalPath: devPath})
+				} else {
+					_ = src.SetDevMode(context.Background(), false, DevModeOpts{})
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(stop)
+	<-consumed
+
+	src.mu.Lock()
+	want := map[string]bool{}
+	for id := range src.snapshot {
+		want[id] = true
+	}
+	src.mu.Unlock()
+	for id, present := range seen {
+		if present != want[id] {
+			t.Errorf("task %q: event stream says present=%v, snapshot says %v", id, present, want[id])
 		}
 	}
 }
