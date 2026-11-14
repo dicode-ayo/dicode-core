@@ -67,11 +67,19 @@ test.describe('Remove source', () => {
       const add = await request.post('/api/settings/sources', { data: { name, path: tasksetPath } });
       expect(add.ok(), await add.text()).toBe(true);
 
+      // Past the daemon's startup grace window a new task is held pending
+      // approval with its triggers unarmed, so approve it first.
+      const encodedId = encodeURIComponent(taskId);
       await expect(async () => {
-        expect(await taskIds(request)).toContain(taskId);
-      }).toPass({ timeout: 15_000 });
-      const live = await request.get(hookPath);
-      expect(live.status(), 'webhook must resolve while the source exists').not.toBe(404);
+        const res = await request.get(`/api/tasks/${encodedId}`);
+        expect(res.ok()).toBe(true);
+        const t = await res.json() as { pending_approval?: boolean };
+        if (t.pending_approval) {
+          await request.post(`/api/tasks/${encodedId}/approve`);
+        }
+        const live = await request.get(hookPath);
+        expect(live.status(), 'webhook must resolve while the source exists').not.toBe(404);
+      }).toPass({ timeout: 20_000 });
 
       const del = await request.delete(`/api/settings/sources/${encodeURIComponent(name)}`);
       expect(del.ok(), await del.text()).toBe(true);
