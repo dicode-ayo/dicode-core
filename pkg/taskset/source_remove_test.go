@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -499,5 +500,92 @@ func TestSource_DisableInFlightClone_LeavesDirToFinishClone(t *testing.T) {
 	_ = src.finishClone(context.Background(), opts, "", context.Canceled, func() {})
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
 		t.Errorf("finishClone left the abandoned clone dir: err = %v", err)
+	}
+}
+
+// Disabling the only completed clone ends dev mode even while another clone
+// is still in progress.
+func TestSource_DisableLastCompletedClone_WithCloneInProgress_EndsDevMode(t *testing.T) {
+	remote := newFixtureRemote(t, "main", map[string]string{"taskset.yaml": emptyFixtureTaskSet})
+	src := newTestSourceWithRemote(t, "ns", remote, "main")
+	ctx := context.Background()
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "run-a"}); err != nil {
+		t.Fatalf("enable run-a: %v", err)
+	}
+	pendingDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), "run-b")
+	src.mu.Lock()
+	src.clones["run-b"] = cloneState{cloneDir: pendingDir}
+	src.mu.Unlock()
+
+	if err := src.SetDevMode(ctx, false, DevModeOpts{RunID: "run-a"}); err != nil {
+		t.Fatalf("disable run-a: %v", err)
+	}
+	if src.DevMode() {
+		t.Error("DevMode() = true with no completed clone left")
+	}
+	if p := src.DevRootPath(); p != "" {
+		t.Errorf("DevRootPath = %q, want empty", p)
+	}
+
+	_ = src.finishClone(ctx, DevModeOpts{Branch: "fix/b", RunID: "run-b"}, "", errors.New("clone failed"), func() {})
+	if src.DevMode() {
+		t.Error("DevMode() = true after the in-progress clone failed")
+	}
+}
+
+// A failed clone keeps its run ID busy, and Remove waits, until its directory
+// has been deleted.
+func TestSource_FailedClone_RunIDBusyUntilDirRemoved(t *testing.T) {
+	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
+	const runID = "run-failed"
+	opts := DevModeOpts{Branch: "fix/failed", RunID: runID}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+	if err := os.MkdirAll(cloneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	src.beforeRemoveCloneDir = func(string) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	done := make(chan struct{})
+	src.mu.Lock()
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir, done: done}}
+	src.mu.Unlock()
+
+	go func() {
+		_ = src.finishClone(context.Background(), opts, "", errors.New("clone failed"), func() { close(done) })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finishClone never reached the directory removal")
+	}
+
+	if err := src.SetDevMode(context.Background(), true, opts); !errors.Is(err, ErrDevModeBusy) {
+		close(release)
+		t.Fatalf("enable during failed-clone cleanup = %v, want ErrDevModeBusy", err)
+	}
+	removed := make(chan struct{})
+	go func() { src.Remove(); close(removed) }()
+	select {
+	case <-removed:
+		close(release)
+		t.Fatal("Remove returned before the failed clone's directory was deleted")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-removed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Remove never returned")
+	}
+	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
+		t.Errorf("failed clone left on disk: err = %v", err)
 	}
 }

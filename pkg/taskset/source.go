@@ -67,9 +67,14 @@ type Source struct {
 	removed      bool                  // set by Remove; refuses further dev-mode changes
 	watchDone    chan struct{}         // closed when the watch loop exits; set by Start
 
-	// abandoned holds in-progress clone sessions dropped by a disable or
-	// Remove; finishClone deletes their directory once the clone returns.
+	// abandoned holds clone sessions that were dropped by a disable or
+	// Remove while in progress, or that failed, until finishClone has
+	// deleted their directory.
 	abandoned map[string]cloneState
+
+	// beforeRemoveCloneDir, when set, runs just before a clone directory is
+	// deleted. Test seam.
+	beforeRemoveCloneDir func(dir string)
 
 	// pullStatus tracks the outcome of the most recent git pull; exposed
 	// via PullStatus() for the webui source-health dot. Zero-value means
@@ -387,18 +392,15 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 				drop(runID, cs)
 			}
 		}
-		// Recompute primary and devRootPath.
+		// Recompute primary and devRootPath from the completed sessions; an
+		// in-progress one only enables dev mode once finishClone records it.
+		latest := s.latestCloneRunIDLocked()
 		wasPrimary := opts.RunID == "" || opts.RunID == s.primaryRunID
 		if wasPrimary {
-			if len(s.clones) > 0 {
-				s.primaryRunID = s.latestCloneRunIDLocked()
-				s.devRootPath = s.clones[s.primaryRunID].devRootPath
-			} else {
-				s.primaryRunID = ""
-				s.devRootPath = ""
-			}
+			s.primaryRunID = latest
+			s.devRootPath = s.clones[latest].devRootPath
 		}
-		if len(s.clones) == 0 {
+		if latest == "" {
 			s.resolver.SetDevMode(false)
 			s.devRootPath = opts.LocalPath // "" for plain disables
 		}
@@ -452,12 +454,20 @@ func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath stri
 	if !stillReserved {
 		cs = s.abandoned[opts.RunID]
 	}
-	delete(s.abandoned, opts.RunID)
 	if cloneErr != nil || !stillReserved {
+		// The session stays in abandoned until its directory is gone, so the
+		// run ID stays busy and Remove waits for the deletion.
 		delete(s.clones, opts.RunID)
+		if s.abandoned == nil {
+			s.abandoned = make(map[string]cloneState)
+		}
+		s.abandoned[opts.RunID] = cs
 		removed := s.removed
 		s.mu.Unlock()
 		s.removeCloneDir(cs.cloneDir)
+		s.mu.Lock()
+		delete(s.abandoned, opts.RunID)
+		s.mu.Unlock()
 		settled()
 		if cloneErr != nil {
 			return cloneErr
@@ -495,6 +505,9 @@ func (s *Source) removeCloneDir(dir string) {
 			zap.String("path", dir),
 		)
 		return
+	}
+	if s.beforeRemoveCloneDir != nil {
+		s.beforeRemoveCloneDir(dir)
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		s.log.Warn("dev-clones: removeall failed",
