@@ -55,6 +55,16 @@ func loadKinded(t *testing.T, dir string) task.Kinded {
 	return k
 }
 
+// fakeRun registers a running source under id so events handled directly
+// with the returned generation pass the live check.
+func fakeRun(rc *Reconciler, id string) uint64 {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.lastGen++
+	rc.cancels[id] = &runningSource{src: newFakeSource(id), cancel: func() {}, gen: rc.lastGen, done: make(chan struct{}), tornDown: make(chan struct{})}
+	return rc.lastGen
+}
+
 func newTestReconciler(t *testing.T, sources ...source.Source) (*Registry, *Reconciler) {
 	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
@@ -201,7 +211,8 @@ stages:
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.handle(sourceEvent{Event: source.Event{Kind: source.EventAdded, TaskID: "demo/p", Kinded: p}})
+	gen := fakeRun(rec, "demo")
+	rec.handle(sourceEvent{Event: source.Event{Kind: source.EventAdded, TaskID: "demo/p", Kinded: p, Source: "demo"}, gen: gen})
 
 	if registered == nil || registered.KindOf() != task.KindPipelineTask {
 		t.Fatalf("expected pipeline registration via OnRegister, got %v", registered)
@@ -234,13 +245,14 @@ func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
 	rc := NewReconciler(reg, nil, zap.NewNop())
 	rc.runCtx = ctx
 	rc.merged = make(chan sourceEvent, 1)
+	gen := fakeRun(rc, "test")
 
 	rc.handle(sourceEvent{Event: source.Event{
 		Kind:   source.EventAdded,
 		TaskID: "consumer",
 		Kinded: consumer,
 		Source: "test",
-	}})
+	}, gen: gen})
 
 	if _, ok := reg.Get("consumer"); ok {
 		t.Fatalf("consumer with unknown task: provider should NOT have been registered")
@@ -530,5 +542,44 @@ func TestReconciler_CollidingSourceIDs_SecondAddRefused(t *testing.T) {
 	}
 	if err := rec.AddSource(fsB); err != nil {
 		t.Fatalf("re-add after remove: %v", err)
+	}
+}
+
+// An initial source whose ID collides with an earlier one is skipped with a
+// warning; Run keeps going and Ready still closes.
+func TestReconciler_Run_SkipsDuplicateInitialSource(t *testing.T) {
+	first := newFakeSource("dup")
+	second := newFakeSource("dup")
+	reg, rec := newTestReconciler(t, first, second)
+	core, logs := observer.New(zapcore.WarnLevel)
+	rec.log = zap.New(core)
+
+	first.ch <- source.Event{Kind: source.EventAdded, TaskID: "dup/a", Kinded: manualSpec("dup/a")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- rec.Run(ctx) }()
+
+	select {
+	case <-rec.Ready():
+	case err := <-done:
+		t.Fatalf("Run returned before Ready: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ready never closed")
+	}
+	if _, ok := reg.Get("dup/a"); !ok {
+		t.Error("task from the first source not registered")
+	}
+	if rec.Running("dup") != first {
+		t.Error("duplicate initial source replaced the first one")
+	}
+	if logs.FilterMessage("skipping initial source with duplicate id").Len() != 1 {
+		t.Errorf("want one duplicate-source warning, got %v", logs.All())
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned: %v", err)
+	default:
 	}
 }

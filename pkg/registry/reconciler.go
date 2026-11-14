@@ -28,7 +28,7 @@ const sourceRemoved source.EventKind = "dicode-internal/source-removed"
 var ErrDuplicateSource = errors.New("source with this id is already running")
 
 // sourceEvent is a source event tagged with the generation of the source
-// run that produced it. gen 0 marks an event with no owning source run.
+// run that produced it. Only internal barriers carry gen 0.
 // Event.Source is always the producing source's ID.
 type sourceEvent struct {
 	source.Event
@@ -141,7 +141,13 @@ func (rc *Reconciler) Run(ctx context.Context) error {
 	}
 
 	for _, src := range rc.sources {
-		if err := rc.startSource(src, true); err != nil {
+		err := rc.startSource(src, true)
+		if errors.Is(err, ErrDuplicateSource) {
+			rc.log.Warn("skipping initial source with duplicate id", zap.String("source", src.ID()))
+			rc.markInitialSourceSynced()
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("start source %s: %w", src.ID(), err)
 		}
 	}
@@ -296,9 +302,6 @@ func (rc *Reconciler) live(ev sourceEvent) bool {
 
 // liveLocked is live for a caller holding rc.mu.
 func (rc *Reconciler) liveLocked(ev sourceEvent) bool {
-	if ev.gen == 0 {
-		return true
-	}
 	rs, ok := rc.cancels[ev.Source]
 	return ok && rs.gen == ev.gen && !rs.removing
 }
@@ -476,11 +479,7 @@ func (rc *Reconciler) handle(ev sourceEvent) {
 		rc.mu.Lock()
 		delete(rc.pending, ev.TaskID)
 		rc.mu.Unlock()
-		if ev.gen != 0 {
-			rc.owners[ev.TaskID] = ev.gen
-		} else {
-			delete(rc.owners, ev.TaskID)
-		}
+		rc.owners[ev.TaskID] = ev.gen
 		rc.log.Info("task registered",
 			zap.String("task", ev.TaskID),
 			zap.String("kind", string(ev.Kind)),
