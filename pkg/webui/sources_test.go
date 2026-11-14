@@ -1326,3 +1326,33 @@ func TestApiAddSource_RejectsBadTarget(t *testing.T) {
 		})
 	}
 }
+
+// DELETE removes the source instance running for the entry it deletes.
+func TestApiRemoveSource_RemovesRunningInstance(t *testing.T) {
+	const name = "to-remove"
+	ref := &taskset.Ref{Path: t.TempDir()}
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{name: {Ref: ref}}
+	srv, rec, _ := newTestServerWithReconciler(t, cfg)
+
+	id := taskset.SourceID(name, ref)
+	bs := newBlockingSource(id)
+	close(bs.unblock)
+	if err := rec.AddSource(bs); err != nil {
+		t.Fatal(err)
+	}
+	srcCtx := waitStarted(t, bs)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/settings/sources/"+name, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d; body=%s", w.Code, w.Body.String())
+	}
+	if srcCtx.Err() == nil {
+		t.Fatal("running source was not cancelled")
+	}
+	if rec.Running(id) != nil {
+		t.Fatal("source still registered with the reconciler")
+	}
+}

@@ -3274,12 +3274,20 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var entry *taskset.Entry
+	// running is captured under cfgMu with the entry, so a source re-added
+	// under the same ID after the lock is released is never the one removed.
+	var running source.Source
 	persistErr := s.updateConfig(func(cfg *config.Config) error {
 		entry = cfg.Spec.Entries[name]
 		if entry == nil {
 			return errSourceNotFound // skip the persist; surfaced as a 404 below
 		}
 		delete(cfg.Spec.Entries, name)
+		if s.reconciler != nil && entry.Ref != nil {
+			// Must match the id apiAddSource claimed via taskset.SourceID — see
+			// its call site's comment for why the name component is required.
+			running = s.reconciler.Running(taskset.SourceID(name, entry.Ref))
+		}
 		return nil
 	})
 	if entry == nil {
@@ -3287,11 +3295,8 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.reconciler != nil && entry.Ref != nil {
-		// Must match the id apiAddSource claimed via taskset.SourceID — see
-		// its call site's comment for why the name component is required.
-		id := taskset.SourceID(name, entry.Ref)
-		s.reconciler.RemoveSource(id)
+	if running != nil {
+		s.reconciler.RemoveSourceIfCurrent(running)
 	}
 	if persistErr != nil {
 		s.log.Warn("source persist failed", zap.Error(persistErr))

@@ -480,3 +480,41 @@ func TestReconciler_RemoveSource_IDBusyUntilTeardownDone(t *testing.T) {
 		t.Fatalf("AddSource after teardown = %v", err)
 	}
 }
+
+// A second RemoveSource for a source already being removed returns only once
+// the first teardown has finished.
+func TestReconciler_ConcurrentRemoveSource_WaitsForTeardown(t *testing.T) {
+	reg, rec := newTestReconciler(t)
+	startReconciler(t, rec)
+
+	release := make(chan struct{})
+	inRemove := make(chan struct{})
+	src := &removerSource{ctxFakeSource: newCtxFakeSource("src-twice")}
+	src.onRemove = func() { close(inRemove); <-release }
+	if err := rec.AddSource(src); err != nil {
+		t.Fatal(err)
+	}
+	src.ch <- source.Event{Kind: source.EventAdded, TaskID: "t/task", Kinded: manualSpec("t/task")}
+	waitRegistered(t, reg, "t/task")
+
+	go rec.RemoveSource("src-twice")
+	<-inRemove
+
+	second := make(chan struct{})
+	go func() { rec.RemoveSource("src-twice"); close(second) }()
+	select {
+	case <-second:
+		close(release)
+		t.Fatal("second RemoveSource returned before the first teardown finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-second:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second RemoveSource never returned")
+	}
+	if rec.Running("src-twice") != nil {
+		t.Fatal("source still registered after teardown")
+	}
+}

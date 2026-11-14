@@ -48,6 +48,8 @@ type runningSource struct {
 	// removing is set by RemoveSource. The entry stays in cancels until
 	// teardown finishes, so the ID cannot be reused meanwhile. Guarded by mu.
 	removing bool
+	// tornDown closes once RemoveSource's teardown has finished.
+	tornDown chan struct{}
 }
 
 // Reconciler fans-in events from multiple sources and applies them to the registry.
@@ -178,13 +180,25 @@ func (rc *Reconciler) AddSource(src source.Source) error {
 // RemoveSource stops a source by its ID, deregisters every task it
 // registered (calling OnUnregister for each), waits for its Start call and
 // event forwarding to finish, then calls Remove on sources implementing
-// source.Remover. It returns once the tasks are deregistered.
+// source.Remover. It returns once that teardown has finished, also when a
+// concurrent call started it.
 // A source still inside Start is cancelled and never forwards events.
 //
 // Safe to call from any goroutine after Run has been called, except from
 // OnRegister/OnUnregister, which run on the Run loop it waits for.
 func (rc *Reconciler) RemoveSource(id string) {
 	rc.removeSource(id, nil)
+}
+
+// Running returns the source currently registered under id, including one
+// still starting or being removed, or nil.
+func (rc *Reconciler) Running(id string) source.Source {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if rs, ok := rc.cancels[id]; ok {
+		return rs.src
+	}
+	return nil
 }
 
 // RemoveSourceIfCurrent is RemoveSource for src.ID(), but only while src is
@@ -197,8 +211,17 @@ func (rc *Reconciler) RemoveSourceIfCurrent(src source.Source) {
 func (rc *Reconciler) removeSource(id string, want source.Source) {
 	rc.mu.Lock()
 	rs, ok := rc.cancels[id]
-	if !ok || rs.removing || (want != nil && rs.src != want) {
+	if !ok || (want != nil && rs.src != want) {
 		rc.mu.Unlock()
+		return
+	}
+	if rs.removing {
+		ctx := rc.runCtx
+		rc.mu.Unlock()
+		select {
+		case <-rs.tornDown:
+		case <-ctx.Done():
+		}
 		return
 	}
 	rs.removing = true
@@ -215,6 +238,7 @@ func (rc *Reconciler) removeSource(id string, want source.Source) {
 			delete(rc.cancels, id)
 		}
 		rc.mu.Unlock()
+		close(rs.tornDown)
 	}()
 	rs.cancel()
 
@@ -304,7 +328,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	}
 	srcCtx, cancel := context.WithCancel(ctx)
 	rc.lastGen++
-	rs := &runningSource{src: src, cancel: cancel, gen: rc.lastGen, done: make(chan struct{})}
+	rs := &runningSource{src: src, cancel: cancel, gen: rc.lastGen, done: make(chan struct{}), tornDown: make(chan struct{})}
 	rc.cancels[id] = rs
 	rc.mu.Unlock()
 
