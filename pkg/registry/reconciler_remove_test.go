@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -450,5 +451,32 @@ func TestReconciler_ForwarderStampsSourceID(t *testing.T) {
 	rec.RemoveSource("src-stamp")
 	if _, ok := reg.Get("s/task"); ok {
 		t.Fatal("task not deregistered with its source")
+	}
+}
+
+// A source ID stays claimed until its teardown, Remove included, finishes.
+func TestReconciler_RemoveSource_IDBusyUntilTeardownDone(t *testing.T) {
+	_, rec := newTestReconciler(t)
+	startReconciler(t, rec)
+
+	release := make(chan struct{})
+	inRemove := make(chan struct{})
+	old := &removerSource{ctxFakeSource: newCtxFakeSource("src-busy")}
+	old.onRemove = func() { close(inRemove); <-release }
+	if err := rec.AddSource(old); err != nil {
+		t.Fatal(err)
+	}
+	removeDone := make(chan struct{})
+	go func() { rec.RemoveSource("src-busy"); close(removeDone) }()
+	<-inRemove
+
+	if err := rec.AddSource(newCtxFakeSource("src-busy")); !errors.Is(err, ErrDuplicateSource) {
+		close(release)
+		t.Fatalf("AddSource during teardown = %v, want ErrDuplicateSource", err)
+	}
+	close(release)
+	<-removeDone
+	if err := rec.AddSource(newCtxFakeSource("src-busy")); err != nil {
+		t.Fatalf("AddSource after teardown = %v", err)
 	}
 }

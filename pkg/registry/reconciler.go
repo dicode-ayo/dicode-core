@@ -24,7 +24,7 @@ const initialSyncBarrier source.EventKind = "dicode-internal/initial-sync-barrie
 const sourceRemoved source.EventKind = "dicode-internal/source-removed"
 
 // ErrDuplicateSource is returned by AddSource when a source with the same ID
-// is already running or starting.
+// is already running, starting or being removed.
 var ErrDuplicateSource = errors.New("source with this id is already running")
 
 // sourceEvent is a source event tagged with the generation of the source
@@ -45,6 +45,9 @@ type runningSource struct {
 	gen    uint64
 	// done closes once Start has returned and the forwarder has exited.
 	done chan struct{}
+	// removing is set by RemoveSource. The entry stays in cancels until
+	// teardown finishes, so the ID cannot be reused meanwhile. Guarded by mu.
+	removing bool
 }
 
 // Reconciler fans-in events from multiple sources and applies them to the registry.
@@ -194,11 +197,11 @@ func (rc *Reconciler) RemoveSourceIfCurrent(src source.Source) {
 func (rc *Reconciler) removeSource(id string, want source.Source) {
 	rc.mu.Lock()
 	rs, ok := rc.cancels[id]
-	if !ok || (want != nil && rs.src != want) {
+	if !ok || rs.removing || (want != nil && rs.src != want) {
 		rc.mu.Unlock()
 		return
 	}
-	delete(rc.cancels, id)
+	rs.removing = true
 	for taskID, ev := range rc.pending {
 		if ev.gen == rs.gen {
 			delete(rc.pending, taskID)
@@ -206,6 +209,13 @@ func (rc *Reconciler) removeSource(id string, want source.Source) {
 	}
 	ctx := rc.runCtx
 	rc.mu.Unlock()
+	defer func() {
+		rc.mu.Lock()
+		if rc.cancels[id] == rs {
+			delete(rc.cancels, id)
+		}
+		rc.mu.Unlock()
+	}()
 	rs.cancel()
 
 	marker := sourceEvent{Event: source.Event{Kind: sourceRemoved, Source: id}, gen: rs.gen, done: make(chan struct{})}
@@ -252,15 +262,21 @@ func (rc *Reconciler) unregister(taskID string) {
 	}
 }
 
-// live reports whether ev comes from a source run that is still registered.
+// live reports whether ev comes from a source run that is still registered
+// and not being removed.
 func (rc *Reconciler) live(ev sourceEvent) bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.liveLocked(ev)
+}
+
+// liveLocked is live for a caller holding rc.mu.
+func (rc *Reconciler) liveLocked(ev sourceEvent) bool {
 	if ev.gen == 0 {
 		return true
 	}
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
 	rs, ok := rc.cancels[ev.Source]
-	return ok && rs.gen == ev.gen
+	return ok && rs.gen == ev.gen && !rs.removing
 }
 
 // startSource begins watching a source and forwarding its events to merged.
@@ -295,7 +311,7 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	ch, err := src.Start(srcCtx)
 
 	rc.mu.Lock()
-	removed := rc.cancels[id] != rs
+	removed := rc.cancels[id] != rs || rs.removing
 	if err != nil && !removed {
 		delete(rc.cancels, id)
 	}
@@ -405,7 +421,13 @@ func (rc *Reconciler) handle(ev sourceEvent) {
 				// already-queued task drop to debug — the signal is preserved
 				// (a task that resolves is deleted from pending, and a later
 				// re-failure warns again as a fresh transition).
+				// The live re-check shares the lock with the pending write, so a
+				// concurrent RemoveSource either sees this entry or drops it here.
 				rc.mu.Lock()
+				if !rc.liveLocked(ev) {
+					rc.mu.Unlock()
+					return
+				}
 				_, alreadyQueued := rc.pending[ev.TaskID]
 				rc.pending[ev.TaskID] = ev
 				rc.mu.Unlock()
