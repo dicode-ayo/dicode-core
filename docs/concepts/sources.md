@@ -221,7 +221,7 @@ Internally, each source's identity (used by the reconciler to track and tear dow
 
 `DELETE /api/settings/sources/{name}` stops the source and deregisters every task it registered before the request returns: they drop out of `GET /api/tasks`, their crons stop, and their webhooks answer 404. No restart is needed. A source removed while it is still starting is cancelled and registers nothing.
 
-Removal also ends the source's dev mode and deletes its `dev-clones/<namespace>/` directories, after its tasks are deregistered (tasks loaded from a clone run from inside it). A clone still in progress when the source is removed is cancelled, and removal waits for it before deleting the directories. Deregistering a task stops new runs but does not cancel runs already in progress, and a run executing from a dev clone loses its files when the clone is deleted, so let such runs finish (or kill them) before removing the source. Daemon shutdown is not a removal: it deregisters nothing and keeps dev clones on disk.
+Removal also ends the source's dev mode and deletes the `dev-clones/<namespace>/` clones it created during the current daemon run, after its tasks are deregistered (tasks loaded from a clone run from inside it). A clone still in progress when the source is removed is cancelled, and removal waits for it before deleting the directories. Deregistering a task stops new runs but does not cancel runs already in progress, and a run executing from a dev clone loses its files when the clone is deleted, so let such runs finish (or kill them) before removing the source. Daemon shutdown is not a removal: it deregisters nothing and keeps dev clones on disk. Clones left from before a restart are not tracked, so removal leaves them in place.
 
 ---
 
