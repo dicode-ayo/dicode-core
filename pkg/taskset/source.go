@@ -67,7 +67,7 @@ type Source struct {
 	removed      bool                  // set by Remove; refuses further dev-mode changes
 	watchDone    chan struct{}         // closed when the watch loop exits; set by Start
 
-	// abandoned holds in-progress clone sessions dropped by a disable-all or
+	// abandoned holds in-progress clone sessions dropped by a disable or
 	// Remove; finishClone deletes their directory once the clone returns.
 	abandoned map[string]cloneState
 
@@ -444,7 +444,7 @@ func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) bool {
 }
 
 // finishClone records a clone session once enableClone returns. A session
-// dropped meanwhile (disable-all or Remove) has its clone directory deleted
+// dropped meanwhile (a disable or Remove) has its clone directory deleted
 // instead. settled runs once the session's directory is recorded or deleted.
 func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath string, cloneErr error, settled func()) error {
 	s.mu.Lock()
@@ -455,13 +455,17 @@ func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath stri
 	delete(s.abandoned, opts.RunID)
 	if cloneErr != nil || !stillReserved {
 		delete(s.clones, opts.RunID)
+		removed := s.removed
 		s.mu.Unlock()
 		s.removeCloneDir(cs.cloneDir)
 		settled()
 		if cloneErr != nil {
 			return cloneErr
 		}
-		return fmt.Errorf("dev-mode: session %q cancelled by concurrent disable-all or source removal", opts.RunID)
+		if removed {
+			return fmt.Errorf("dev-mode: session %q cancelled: %w", opts.RunID, ErrSourceRemoved)
+		}
+		return fmt.Errorf("dev-mode: session %q cancelled by a concurrent dev-mode disable", opts.RunID)
 	}
 	cs.devRootPath = devPath
 	cs.branch = opts.Branch

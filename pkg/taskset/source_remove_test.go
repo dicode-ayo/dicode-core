@@ -75,8 +75,8 @@ func TestSource_Remove_DuringInFlightClone(t *testing.T) {
 	if _, err := os.Stat(cloneDir); err != nil {
 		t.Fatalf("test setup: clone dir missing after enableClone: %v", err)
 	}
-	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); err == nil {
-		t.Fatal("finishClone after Remove = nil, want an error")
+	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); !errors.Is(err, ErrSourceRemoved) {
+		t.Fatalf("finishClone after Remove = %v, want ErrSourceRemoved", err)
 	}
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
 		t.Errorf("late-finishing clone left on disk: err = %v", err)
@@ -199,8 +199,8 @@ func TestSource_DisableAllDuringInFlightClone(t *testing.T) {
 	if cloneErr != nil {
 		t.Fatalf("enableClone: %v", cloneErr)
 	}
-	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); err == nil {
-		t.Fatal("finishClone after disable-all = nil, want an error")
+	if err := src.finishClone(ctx, opts, devPath, nil, func() {}); err == nil || errors.Is(err, ErrSourceRemoved) {
+		t.Fatalf("finishClone after disable-all = %v, want a concurrent-disable error", err)
 	}
 	if _, err := os.Stat(cloneDir); !os.IsNotExist(err) {
 		t.Errorf("abandoned clone left on disk: err = %v", err)
