@@ -114,7 +114,7 @@ spec:
 	src := newTestSource(t, "infra", tsPath)
 	// Prime the snapshot by running a full sync.
 	ch0 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch0); err != nil {
+	if err := src.sync(context.Background(), ch0); err != nil {
 		t.Fatal(err)
 	}
 	close(ch0)
@@ -127,7 +127,7 @@ spec:
 	}
 
 	ch := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch); err != nil {
+	if err := src.sync(context.Background(), ch); err != nil {
 		t.Fatal(err)
 	}
 	close(ch)
@@ -166,7 +166,7 @@ spec:
 
 	src := newTestSource(t, "infra", tsPath)
 	ch0 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch0); err != nil {
+	if err := src.sync(context.Background(), ch0); err != nil {
 		t.Fatal(err)
 	}
 	close(ch0)
@@ -178,7 +178,7 @@ spec:
 	}
 
 	ch := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch); err != nil {
+	if err := src.sync(context.Background(), ch); err != nil {
 		t.Fatal(err)
 	}
 	close(ch)
@@ -201,7 +201,7 @@ spec:
 // pkg/task/hash_test.go). Before the fix, the taskset change-detection hash
 // silently fell back to a spec-only hash on that error, and a spec-only hash
 // never reflects a script-only edit, so the hash stayed stable forever,
-// syncAndEmit never saw a diff, and the approval gate was never re-armed for
+// sync never saw a diff, and the approval gate was never re-armed for
 // the edit — a silent
 // approval-gate bypass. The fix must still detect the edit even while the
 // hash_include failure persists unchanged from one sync to the next.
@@ -254,8 +254,8 @@ spec:
 	src := newTestSource(t, "infra", tsPath)
 
 	ch0 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch0); err != nil {
-		t.Fatalf("initial syncAndEmit: %v", err)
+	if err := src.sync(context.Background(), ch0); err != nil {
+		t.Fatalf("initial sync: %v", err)
 	}
 	close(ch0)
 	initial := collectEvents(t, ch0, time.Second)
@@ -270,8 +270,8 @@ spec:
 	}
 
 	ch := make(chan source.Event, 8)
-	if err := src.syncAndEmit(context.Background(), ch); err != nil {
-		t.Fatalf("second syncAndEmit: %v", err)
+	if err := src.sync(context.Background(), ch); err != nil {
+		t.Fatalf("second sync: %v", err)
 	}
 	close(ch)
 
@@ -306,7 +306,7 @@ spec:
 	// Prime snapshot with one task.
 	ctx := context.Background()
 	ch1 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch1); err != nil {
+	if err := src.sync(ctx, ch1); err != nil {
 		t.Fatal(err)
 	}
 	close(ch1)
@@ -318,7 +318,7 @@ spec:
 	}
 
 	ch2 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch2); err != nil {
+	if err := src.sync(ctx, ch2); err != nil {
 		t.Fatal(err)
 	}
 	close(ch2)
@@ -364,7 +364,7 @@ spec:
 
 	// Prime the snapshot with one good task.
 	ch1 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch1); err != nil {
+	if err := src.sync(ctx, ch1); err != nil {
 		t.Fatal(err)
 	}
 	close(ch1)
@@ -385,7 +385,7 @@ spec:
 	}
 
 	ch2 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch2); err != nil {
+	if err := src.sync(ctx, ch2); err != nil {
 		t.Fatal(err)
 	}
 	close(ch2)
@@ -411,7 +411,7 @@ spec:
 		t.Fatal(err)
 	}
 	ch3 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch3); err != nil {
+	if err := src.sync(ctx, ch3); err != nil {
 		t.Fatal(err)
 	}
 	close(ch3)
@@ -478,7 +478,7 @@ spec:
 
 	// Prime the snapshot: both nested leaf tasks resolve cleanly.
 	ch1 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch1); err != nil {
+	if err := src.sync(ctx, ch1); err != nil {
 		t.Fatal(err)
 	}
 	close(ch1)
@@ -497,7 +497,7 @@ spec:
 	}
 
 	ch2 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch2); err != nil {
+	if err := src.sync(ctx, ch2); err != nil {
 		t.Fatal(err)
 	}
 	close(ch2)
@@ -519,7 +519,7 @@ spec:
 		t.Fatal(err)
 	}
 	ch3 := make(chan source.Event, 8)
-	if err := src.syncAndEmit(ctx, ch3); err != nil {
+	if err := src.sync(ctx, ch3); err != nil {
 		t.Fatal(err)
 	}
 	close(ch3)
@@ -770,7 +770,7 @@ spec:
 
 // TestContentHashFor_ErrorFoldIsDeterministicAndDiffersFromGoodHash is a
 // focused unit test on contentHashFor's #682 error path, independent of
-// syncAndEmit: a hash_include entry that escapes through a symlink must
+// sync: a hash_include entry that escapes through a symlink must
 // fold into a hash that (a) differs from the hash computed before the
 // include started failing, and (b) is identical across repeated calls while
 // the same failure persists unchanged — the "one loud transition, not a

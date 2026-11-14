@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/source"
 	"go.uber.org/zap"
 )
 
@@ -363,5 +364,84 @@ func TestSource_ConcurrentSyncs_EventsMatchSnapshot(t *testing.T) {
 		if present != want[id] {
 			t.Errorf("task %q: event stream says present=%v, snapshot says %v", id, present, want[id])
 		}
+	}
+}
+
+// Remove also waits for a clone that an earlier disable-all abandoned.
+func TestSource_Remove_WaitsForCloneAbandonedByDisableAll(t *testing.T) {
+	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
+	const runID = "run-abandoned"
+	opts := DevModeOpts{Branch: "fix/abandoned", RunID: runID}
+	cloneDir := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+
+	cloneCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	src.mu.Lock()
+	src.clones = map[string]cloneState{runID: {cloneDir: cloneDir, cancel: cancel, done: done}}
+	src.mu.Unlock()
+
+	if err := src.SetDevMode(context.Background(), false, DevModeOpts{}); err != nil {
+		t.Fatalf("disable all: %v", err)
+	}
+	release := make(chan struct{})
+	go func() {
+		<-cloneCtx.Done()
+		<-release
+		_ = os.MkdirAll(filepath.Join(cloneDir, ".git"), 0o755)
+		_ = src.finishClone(context.Background(), opts, "", cloneCtx.Err(), func() { close(done) })
+	}()
+
+	removed := make(chan struct{})
+	go func() { src.Remove(); close(removed) }()
+	select {
+	case <-removed:
+		close(release)
+		t.Fatal("Remove returned before the abandoned clone settled")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-removed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Remove never returned")
+	}
+	if _, err := os.Stat(filepath.Join(src.DataDir(), "dev-clones", src.Namespace())); !os.IsNotExist(err) {
+		t.Errorf("dev-clones dir still exists after Remove: err = %v", err)
+	}
+}
+
+// A sync that started before the one that last swapped the snapshot must
+// neither swap it back nor emit.
+func TestSource_StaleSync_Dropped(t *testing.T) {
+	dir := t.TempDir()
+	deployDir := writeTaskDir(t, dir, "deploy")
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n    deploy:\n      ref:\n        path: "+filepath.Join(deployDir, "task.yaml")+"\n")
+	src := newTestSource(t, "infra", tsPath)
+
+	// Pretend a sync handed out after this one has already swapped.
+	src.mu.Lock()
+	src.appliedSeq = src.syncSeq + 2
+	src.mu.Unlock()
+
+	ch := make(chan source.Event, 8)
+	if err := src.sync(context.Background(), ch); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(ch) != 0 {
+		t.Errorf("stale sync emitted %d events", len(ch))
+	}
+	src.mu.Lock()
+	n := len(src.snapshot)
+	src.mu.Unlock()
+	if n != 0 {
+		t.Errorf("stale sync swapped the snapshot (%d tasks)", n)
+	}
+
+	if err := src.sync(context.Background(), ch); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(ch) != 1 {
+		t.Errorf("fresh sync emitted %d events, want 1", len(ch))
 	}
 }

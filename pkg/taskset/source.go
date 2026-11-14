@@ -37,7 +37,7 @@ var ErrSourceRemoved = errors.New("dev-mode: source has been removed")
 // For local sources fsnotify is used to react to file changes immediately
 // (debounced at 150 ms). For git sources a periodic ticker pulls from the
 // remote; fsnotify on the local clone directory then detects actual file
-// changes so syncAndEmit only runs when content has changed.
+// changes so sync only runs when content has changed.
 type Source struct {
 	id         string
 	namespace  string
@@ -56,6 +56,8 @@ type Source struct {
 
 	mu           sync.Mutex
 	snapshot     map[string]taskSnap   // namespaced taskID → snapshot
+	syncSeq      uint64                // last sequence number handed to a sync
+	appliedSeq   uint64                // sequence number of the sync that set snapshot
 	ch           chan source.Event     // live channel set by Start; nil before Start
 	refresh      chan struct{}         // signals an out-of-band re-resolve; set by Start
 	devRootPath  string                // non-empty overrides rootRef.Path in dev mode
@@ -77,7 +79,7 @@ type Source struct {
 	// loadFailures tracks entries that failed to resolve/load/validate on the
 	// most recent sync — exposed via LoadFailures() so the webui can keep
 	// them visible instead of vanishing (#649). Replaced wholesale on every
-	// syncAndEmit so an entry that starts resolving cleanly again (or is
+	// sync so an entry that starts resolving cleanly again (or is
 	// genuinely removed from the taskset spec) drops out automatically.
 	failuresMu sync.RWMutex
 	failures   map[string]task.LoadFailure
@@ -280,7 +282,7 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	s.watchRoot = watchRoot
 	s.mu.Unlock()
 
-	if err := s.syncAndEmit(ctx, ch); err != nil {
+	if err := s.sync(ctx, ch); err != nil {
 		s.log.Warn("taskset source: initial resolution failed",
 			zap.String("id", s.id), zap.Error(err))
 	}
@@ -526,6 +528,9 @@ func (s *Source) Remove() {
 		waits = append(waits, s.abandonIfInProgressLocked(runID, cs))
 		dirs = append(dirs, cs.cloneDir)
 	}
+	for _, cs := range s.abandoned {
+		waits = append(waits, cs.done)
+	}
 	s.clones = nil
 	s.primaryRunID = ""
 	s.devRootPath = ""
@@ -731,7 +736,7 @@ func (s *Source) SetParentOverrides(ov *Overrides) {
 //     ticker re-registers any new task directories added since last sync.
 //   - For git sources:    a pull ticker fetches from the remote on every
 //     pollInterval; fsnotify then fires only when the pull actually changed
-//     files on disk, so syncAndEmit is skipped on no-op pulls.
+//     files on disk, so sync is skipped on no-op pulls.
 //
 // Falls back to a plain polling loop if fsnotify is unavailable.
 func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
@@ -799,19 +804,19 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 			}
 			debounced(trigger)
 		case <-fireSig:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
+			if err := s.sync(ctx, ch); err != nil {
 				s.log.Warn("taskset source: sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 			s.addWatchDirs(watcher)
 		case <-s.refresh:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+			if err := s.sync(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
-			// fsnotify will fire and trigger syncAndEmit via the debounce path.
+			// fsnotify will fire and trigger sync via the debounce path.
 			_, err := s.resolver.Pull(ctx, s.rootRef)
 			s.recordPull(err)
 			if err != nil {
@@ -854,8 +859,8 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 		case <-ctx.Done():
 			return
 		case <-s.refresh:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+			if err := s.sync(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 		case <-ticker.C:
@@ -867,7 +872,7 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 						zap.String("id", s.id), zap.Error(err))
 				}
 			}
-			if err := s.syncAndEmit(ctx, ch); err != nil {
+			if err := s.sync(ctx, ch); err != nil {
 				s.log.Warn("taskset source: poll failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
@@ -875,16 +880,18 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 	}
 }
 
-func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
-	return s.sync(ctx, ch)
-}
-
 // sync re-resolves and emits the diff against the snapshot on ch, or on the
 // live channel when ch is nil (dropping the events once it has closed or the
-// source is removed). The snapshot swap and the non-blocking sends share one
-// s.mu hold, so concurrent syncs emit their diffs in snapshot order; the
-// resolve runs unlocked.
+// source is removed). The resolve runs unlocked; the snapshot swap and the
+// non-blocking sends share one s.mu hold, so concurrent syncs emit their
+// diffs in snapshot order. A sync that started before the one that last
+// swapped the snapshot is stale and is dropped without swapping or emitting.
 func (s *Source) sync(ctx context.Context, ch chan<- source.Event) error {
+	s.mu.Lock()
+	s.syncSeq++
+	seq := s.syncSeq
+	s.mu.Unlock()
+
 	tasks, failures, err := s.resolve(ctx)
 	if err != nil {
 		return err
@@ -905,6 +912,11 @@ func (s *Source) sync(ctx context.Context, ch chan<- source.Event) error {
 	}
 
 	s.mu.Lock()
+	if seq < s.appliedSeq {
+		s.mu.Unlock()
+		return nil
+	}
+	s.appliedSeq = seq
 	prev := s.snapshot
 	// An entry that failed to resolve this pass must not look "removed" to
 	// DiffSnapshots below (#649) — that's the exact mechanism that made a
@@ -1068,7 +1080,7 @@ func (s *Source) loadConfigDefaults() (*Defaults, error) {
 // through s.log — see the #682 comment on that path for why silence there
 // is unacceptable. The returned error is non-nil only when taskDir itself
 // turns out to be unreadable (the fallback below also fails) — the caller
-// (syncAndEmit) reports that as a ResolveFailure instead of registering the
+// (sync) reports that as a ResolveFailure instead of registering the
 // task with a degraded hash.
 func (s *Source) contentHashFor(k task.Kinded, taskDir, taskID string) (string, error) {
 	if taskDir == "" {
@@ -1094,7 +1106,7 @@ func (s *Source) contentHashFor(k task.Kinded, taskDir, taskID string) (string, 
 	// the cause, this used to fall back to a spec-only hash, silently
 	// dropping the ENTIRE directory — including the task's own script — from
 	// the change-detection identity: a script edit then changed no spec
-	// field, the hash stayed stable, syncAndEmit saw no diff, and the
+	// field, the hash stayed stable, sync saw no diff, and the
 	// approval gate was never re-armed for the edit. That's a silent
 	// approval-gate bypass, not merely a missed reload, so the error must be
 	// loud and must still perturb the identity — not just get folded away.
