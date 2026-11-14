@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -200,7 +201,7 @@ stages:
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.handle(source.Event{Kind: source.EventAdded, TaskID: "demo/p", Kinded: p})
+	rec.handle(sourceEvent{Event: source.Event{Kind: source.EventAdded, TaskID: "demo/p", Kinded: p}})
 
 	if registered == nil || registered.KindOf() != task.KindPipelineTask {
 		t.Fatalf("expected pipeline registration via OnRegister, got %v", registered)
@@ -232,14 +233,14 @@ func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
 
 	rc := NewReconciler(reg, nil, zap.NewNop())
 	rc.runCtx = ctx
-	rc.merged = make(chan source.Event, 1)
+	rc.merged = make(chan sourceEvent, 1)
 
-	rc.handle(source.Event{
+	rc.handle(sourceEvent{Event: source.Event{
 		Kind:   source.EventAdded,
 		TaskID: "consumer",
 		Kinded: consumer,
 		Source: "test",
-	})
+	}})
 
 	if _, ok := reg.Get("consumer"); ok {
 		t.Fatalf("consumer with unknown task: provider should NOT have been registered")
@@ -498,22 +499,14 @@ func TestReconciler_NameQualifiedSourceIDs_RemoveDoesNotClobberOther(t *testing.
 	}
 }
 
-// TestReconciler_CollidingSourceIDs_SecondAddClobbersFirstCancel documents the
-// hazard class itself: the reconciler has no duplicate-ID guard, so if two
-// sources are ever constructed with the SAME id (as every call site did
-// before taskset.SourceID was introduced, whenever two entries shared a path
-// or URL), the second AddSource silently overwrites the first's cancel func
-// in rc.cancels. This is not a call the reconciler can safely make on its own
-// (a legitimate re-add-after-remove also reuses the same id) — the fix is
-// upstream, at the call sites that mint ids (see the name-qualified test
-// above). This test exists so a future change to startSource that
-// reintroduces this exact silent-overwrite behavior is caught if the
-// call-site fix above is ever reverted or bypassed.
-func TestReconciler_CollidingSourceIDs_SecondAddClobbersFirstCancel(t *testing.T) {
-	const collidingID = "/tmp/shared/taskset.yaml" // pre-fix formula: id == ref.Path, no name
+// TestReconciler_CollidingSourceIDs_SecondAddRefused guards the duplicate-ID
+// check in startSource: a second source with a running source's ID must be
+// refused rather than overwrite (and orphan) the first one's cancel.
+func TestReconciler_CollidingSourceIDs_SecondAddRefused(t *testing.T) {
+	const collidingID = "/tmp/shared/taskset.yaml"
 
-	fsA := newFakeSource(collidingID)
-	fsB := newFakeSource(collidingID)
+	fsA := newCtxFakeSource(collidingID)
+	fsB := newCtxFakeSource(collidingID)
 	_, rec := newTestReconciler(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -524,14 +517,18 @@ func TestReconciler_CollidingSourceIDs_SecondAddClobbersFirstCancel(t *testing.T
 	if err := rec.AddSource(fsA); err != nil {
 		t.Fatalf("AddSource(fsA): %v", err)
 	}
-	if err := rec.AddSource(fsB); err != nil {
-		t.Fatalf("AddSource(fsB): %v", err)
+	if err := rec.AddSource(fsB); !errors.Is(err, ErrDuplicateSource) {
+		t.Fatalf("AddSource(fsB) = %v, want ErrDuplicateSource", err)
+	}
+	if fsB.started() {
+		t.Fatal("refused source must not be started")
 	}
 
-	rec.mu.Lock()
-	n := len(rec.cancels)
-	rec.mu.Unlock()
-	if n != 1 {
-		t.Fatalf("expected the colliding ids to overwrite one another in rc.cancels (len=1, documenting the hazard); got len=%d", n)
+	rec.RemoveSource(collidingID)
+	if fsA.ctx().Err() == nil {
+		t.Fatal("RemoveSource must cancel the first source, which the refused add must not have orphaned")
+	}
+	if err := rec.AddSource(fsB); err != nil {
+		t.Fatalf("re-add after remove: %v", err)
 	}
 }
