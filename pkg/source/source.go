@@ -43,3 +43,11 @@ type Source interface {
 	// Safe to call concurrently.
 	Sync(ctx context.Context) error
 }
+
+// Remover is implemented by sources that hold on-disk state beyond their
+// tasks, such as dev-mode clones. The reconciler calls Remove once, after a
+// source removed at runtime has been stopped and its tasks deregistered; it
+// is never called on daemon shutdown. Remove must not emit events.
+type Remover interface {
+	Remove()
+}

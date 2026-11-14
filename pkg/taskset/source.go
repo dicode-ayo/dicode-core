@@ -27,6 +27,9 @@ import (
 // multiple concurrent sessions.
 var ErrDevModeBusy = errors.New("dev-mode: a clone session with this run ID is already active")
 
+// ErrSourceRemoved is returned by a dev-mode enable once Remove has run.
+var ErrSourceRemoved = errors.New("dev-mode: source has been removed")
+
 // Source implements source.Source using a TaskSet yaml file as its entry point.
 // It resolves the full task tree on startup and on each change cycle, diffs the
 // result against the previous snapshot, and emits Added/Updated/Removed events.
@@ -34,7 +37,7 @@ var ErrDevModeBusy = errors.New("dev-mode: a clone session with this run ID is a
 // For local sources fsnotify is used to react to file changes immediately
 // (debounced at 150 ms). For git sources a periodic ticker pulls from the
 // remote; fsnotify on the local clone directory then detects actual file
-// changes so syncAndEmit only runs when content has changed.
+// changes so sync only runs when content has changed.
 type Source struct {
 	id         string
 	namespace  string
@@ -53,12 +56,25 @@ type Source struct {
 
 	mu           sync.Mutex
 	snapshot     map[string]taskSnap   // namespaced taskID → snapshot
+	syncSeq      uint64                // last sequence number handed to a sync
+	appliedSeq   uint64                // sequence number of the sync that set snapshot
 	ch           chan source.Event     // live channel set by Start; nil before Start
 	refresh      chan struct{}         // signals an out-of-band re-resolve; set by Start
 	devRootPath  string                // non-empty overrides rootRef.Path in dev mode
 	watchRoot    string                // directory watched by fsnotify; set in Start
 	clones       map[string]cloneState // active clone sessions keyed by runID
 	primaryRunID string                // runID whose clone the resolver surfaces
+	removed      bool                  // set by Remove; refuses further dev-mode changes
+	watchDone    chan struct{}         // closed when the watch loop exits; set by Start
+
+	// abandoned holds clone sessions that were dropped by a disable or
+	// Remove while in progress, or that failed, until finishClone has
+	// deleted their directory.
+	abandoned map[string]cloneState
+
+	// beforeRemoveCloneDir, when set, runs just before a clone directory is
+	// deleted. Test seam.
+	beforeRemoveCloneDir func(dir string)
 
 	// pullStatus tracks the outcome of the most recent git pull; exposed
 	// via PullStatus() for the webui source-health dot. Zero-value means
@@ -68,7 +84,7 @@ type Source struct {
 	// loadFailures tracks entries that failed to resolve/load/validate on the
 	// most recent sync — exposed via LoadFailures() so the webui can keep
 	// them visible instead of vanishing (#649). Replaced wholesale on every
-	// syncAndEmit so an entry that starts resolving cleanly again (or is
+	// sync so an entry that starts resolving cleanly again (or is
 	// genuinely removed from the taskset spec) drops out automatically.
 	failuresMu sync.RWMutex
 	failures   map[string]task.LoadFailure
@@ -92,6 +108,10 @@ type cloneState struct {
 	branch      string
 	base        string
 	createdAt   time.Time
+	// cancel and done are set while the clone is in progress: cancel aborts
+	// it, and done closes once finishClone has settled the session.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // SourceOption configures a Source at construction time.
@@ -248,9 +268,11 @@ func (s *Source) DurableRoot() bool {
 // cancelled.
 func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 64)
+	watchDone := make(chan struct{})
 	s.mu.Lock()
 	s.ch = ch
 	s.refresh = make(chan struct{}, 1)
+	s.watchDone = watchDone
 	s.mu.Unlock()
 
 	// Determine (and cache) the local directory to watch.
@@ -265,12 +287,15 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	s.watchRoot = watchRoot
 	s.mu.Unlock()
 
-	if err := s.syncAndEmit(ctx, ch); err != nil {
+	if err := s.sync(ctx, ch); err != nil {
 		s.log.Warn("taskset source: initial resolution failed",
 			zap.String("id", s.id), zap.Error(err))
 	}
 
-	go s.watch(ctx, ch)
+	go func() {
+		defer close(watchDone)
+		s.watch(ctx, ch)
+	}()
 	return ch, nil
 }
 
@@ -296,7 +321,6 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 	if opts.LocalPath != "" && opts.Branch != "" {
 		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
 	}
-
 	if enabled && opts.Branch != "" {
 		// Validate RunID early so callers receive ErrInvalidRunID for bad IDs,
 		// preserving the existing API contract (enableClone also validates, but
@@ -305,9 +329,8 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 			return fmt.Errorf("validate run id: %w", err)
 		}
 
-		// Pre-compute the expected clone directory and store it in the placeholder
-		// cloneState before calling enableClone. On failure the error-path reads
-		// the directory back from the map VALUE (not from opts.RunID directly),
+		// The clone directory is stored in the placeholder cloneState, and every
+		// cleanup path reads it back from a map VALUE (never from opts.RunID),
 		// which breaks CodeQL's taint flow from opts.RunID into os.RemoveAll.
 		cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
 		expectedCloneDir := filepath.Join(cloneRoot, opts.RunID)
@@ -318,157 +341,234 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		}
 
 		s.mu.Lock()
+		if s.removed {
+			s.mu.Unlock()
+			return ErrSourceRemoved
+		}
 		if s.clones == nil {
 			s.clones = make(map[string]cloneState)
 		}
-		if _, exists := s.clones[opts.RunID]; exists {
+		_, exists := s.clones[opts.RunID]
+		_, abandoned := s.abandoned[opts.RunID]
+		if exists || abandoned {
 			s.mu.Unlock()
 			return ErrDevModeBusy
 		}
-		// Pre-fill cloneDir so that the error-path cleanup below can reach it
-		// via a map-value read (which does not propagate CodeQL taint from the key).
-		s.clones[opts.RunID] = cloneState{cloneDir: cleanExpected}
+		cloneCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		s.clones[opts.RunID] = cloneState{cloneDir: cleanExpected, cancel: cancel, done: done}
 		s.mu.Unlock()
 
-		devPath, err := s.enableClone(ctx, opts)
-		if err != nil {
-			s.mu.Lock()
-			// Read the pre-filled cloneDir from the map VALUE before deleting the
-			// entry. This breaks the CodeQL taint path from opts.RunID into
-			// os.RemoveAll while still cleaning up any partial clone on disk.
-			var dirToClean string
-			if cs, ok := s.clones[opts.RunID]; ok {
-				dirToClean = cs.cloneDir
-			}
-			delete(s.clones, opts.RunID)
-			s.mu.Unlock()
-			if dirToClean != "" {
-				_ = os.RemoveAll(dirToClean)
-			}
-			return err
-		}
-
-		s.mu.Lock()
-		if _, stillReserved := s.clones[opts.RunID]; !stillReserved {
-			// A concurrent disable-all removed our placeholder while enableClone
-			// ran outside the lock. The clone directory was successfully created;
-			// the orphan will be cleaned on the next retry (enableClone will
-			// fail, and the error-path above will RemoveAll via the map value).
-			s.mu.Unlock()
-			return fmt.Errorf("dev-mode: session %q cancelled by concurrent disable-all", opts.RunID)
-		}
-		s.clones[opts.RunID] = cloneState{
-			cloneDir:    filepath.Dir(devPath),
-			devRootPath: devPath,
-			branch:      opts.Branch,
-			base:        opts.Base,
-			createdAt:   time.Now(),
-		}
-		s.primaryRunID = opts.RunID
-		s.devRootPath = devPath
-		ch := s.ch
-		s.mu.Unlock()
-
-		s.resolver.SetDevMode(true)
-		if ch != nil {
-			return s.syncAndEmit(ctx, ch)
-		}
-		return nil
+		devPath, err := s.enableClone(cloneCtx, opts)
+		return s.finishClone(ctx, opts, devPath, err, func() {
+			cancel()
+			close(done)
+		})
 	}
 
 	if !enabled {
-		// sessionToRemove pairs a runID with the pre-validated clone directory
-		// path stored in cloneState. Using the stored path (a map value set
-		// during enableClone after ValidateRunID) rather than reconstructing from
-		// opts.RunID at disable time breaks the user-controlled-data taint flow
-		// into os.RemoveAll.
-		type sessionToRemove struct {
-			runID    string
-			cloneDir string
-		}
-
 		s.mu.Lock()
-		// Collect sessions to remove. Empty RunID means "disable all".
-		var toRemove []sessionToRemove
+		if s.removed {
+			s.mu.Unlock()
+			return nil
+		}
+		// Collect completed clone directories to remove from the stored
+		// cloneState values; finishClone deletes an in-progress one. Empty
+		// RunID means "disable all".
+		var dirs []string
+		drop := func(runID string, cs cloneState) {
+			delete(s.clones, runID)
+			if s.abandonIfInProgressLocked(runID, cs) {
+				return
+			}
+			dirs = append(dirs, cs.cloneDir)
+		}
 		if opts.RunID != "" {
 			if cs, ok := s.clones[opts.RunID]; ok {
-				toRemove = []sessionToRemove{{runID: opts.RunID, cloneDir: cs.cloneDir}}
+				drop(opts.RunID, cs)
 			}
 		} else {
 			for runID, cs := range s.clones {
-				toRemove = append(toRemove, sessionToRemove{runID: runID, cloneDir: cs.cloneDir})
+				drop(runID, cs)
 			}
 		}
-		for _, item := range toRemove {
-			delete(s.clones, item.runID)
-		}
-		// Recompute primary and devRootPath.
+		// Recompute primary and devRootPath from the completed sessions; an
+		// in-progress one only enables dev mode once finishClone records it.
+		latest := s.latestCloneRunIDLocked()
 		wasPrimary := opts.RunID == "" || opts.RunID == s.primaryRunID
 		if wasPrimary {
-			if len(s.clones) > 0 {
-				s.primaryRunID = s.latestCloneRunIDLocked()
-				s.devRootPath = s.clones[s.primaryRunID].devRootPath
-			} else {
-				s.primaryRunID = ""
-				s.devRootPath = ""
-			}
+			s.primaryRunID = latest
+			s.devRootPath = s.clones[latest].devRootPath
 		}
-		hasClonesLeft := len(s.clones) > 0
-		s.mu.Unlock()
-
-		// Remove clone directories outside the lock using the stored, pre-validated
-		// paths from cloneState (set by enableClone). Defence-in-depth: verify each
-		// stored path is still rooted within the expected parent directory.
-		cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
-		for _, item := range toRemove {
-			if item.cloneDir == "" {
-				continue
-			}
-			if within, err := pathguard.Within(cloneRoot, item.cloneDir); err != nil || !within {
-				s.log.Warn("dev-clones disable: stored clone path escapes data dir; refusing to remove",
-					zap.String("source", s.namespace),
-					zap.String("path", item.cloneDir),
-				)
-				continue
-			}
-			if err := os.RemoveAll(item.cloneDir); err != nil {
-				s.log.Warn("dev-clones disable: removeall failed",
-					zap.String("source", s.namespace),
-					zap.String("path", item.cloneDir),
-					zap.Error(err),
-				)
-			}
-		}
-
-		if !hasClonesLeft {
+		if latest == "" {
 			s.resolver.SetDevMode(false)
-			s.mu.Lock()
 			s.devRootPath = opts.LocalPath // "" for plain disables
-			s.mu.Unlock()
 		}
-
-		s.mu.Lock()
-		ch := s.ch
 		s.mu.Unlock()
-		if ch == nil {
-			return nil
+
+		for _, dir := range dirs {
+			s.removeCloneDir(dir)
 		}
-		return s.syncAndEmit(ctx, ch)
+		return s.syncLive(ctx)
 	}
 
 	// LocalPath enable path (enabled=true, opts.LocalPath != "").
-	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
+	if s.removed {
+		s.mu.Unlock()
+		return ErrSourceRemoved
+	}
+	s.resolver.SetDevMode(true)
 	s.devRootPath = opts.LocalPath
-	if enabled && opts.LocalPath != "" {
+	if opts.LocalPath != "" {
 		s.watchRoot = filepath.Dir(opts.LocalPath)
 	}
-	ch := s.ch
 	s.mu.Unlock()
-	if ch == nil {
+	return s.syncLive(ctx)
+}
+
+// abandonIfInProgressLocked cancels a dropped clone session whose enableClone
+// has not returned yet and records it, so finishClone can still find and
+// delete its directory. It reports whether the session was in progress.
+// Caller must hold s.mu.
+func (s *Source) abandonIfInProgressLocked(runID string, cs cloneState) bool {
+	if cs.devRootPath != "" {
+		return false
+	}
+	if s.abandoned == nil {
+		s.abandoned = make(map[string]cloneState)
+	}
+	s.abandoned[runID] = cs
+	if cs.cancel != nil {
+		cs.cancel()
+	}
+	return true
+}
+
+// finishClone records a clone session once enableClone returns. A session
+// dropped meanwhile (a disable or Remove) has its clone directory deleted
+// instead. settled runs once the session's directory is recorded or deleted.
+func (s *Source) finishClone(ctx context.Context, opts DevModeOpts, devPath string, cloneErr error, settled func()) error {
+	s.mu.Lock()
+	cs, stillReserved := s.clones[opts.RunID]
+	if !stillReserved {
+		cs = s.abandoned[opts.RunID]
+	}
+	if cloneErr != nil || !stillReserved {
+		// The session stays in abandoned until its directory is gone, so the
+		// run ID stays busy and Remove waits for the deletion.
+		delete(s.clones, opts.RunID)
+		if s.abandoned == nil {
+			s.abandoned = make(map[string]cloneState)
+		}
+		s.abandoned[opts.RunID] = cs
+		removed := s.removed
+		s.mu.Unlock()
+		s.removeCloneDir(cs.cloneDir)
+		s.mu.Lock()
+		delete(s.abandoned, opts.RunID)
+		s.mu.Unlock()
+		settled()
+		if cloneErr != nil {
+			return cloneErr
+		}
+		if removed {
+			return fmt.Errorf("dev-mode: session %q cancelled: %w", opts.RunID, ErrSourceRemoved)
+		}
+		return fmt.Errorf("dev-mode: session %q cancelled by a concurrent dev-mode disable", opts.RunID)
+	}
+	cs.devRootPath = devPath
+	cs.branch = opts.Branch
+	cs.base = opts.Base
+	cs.createdAt = time.Now()
+	cs.cancel = nil
+	cs.done = nil
+	s.clones[opts.RunID] = cs
+	s.primaryRunID = opts.RunID
+	s.devRootPath = devPath
+	s.resolver.SetDevMode(true)
+	s.mu.Unlock()
+	settled()
+	return s.syncLive(ctx)
+}
+
+// removeCloneDir deletes one dev-clone directory. Defence-in-depth: the path
+// must still be rooted within this source's dev-clones directory.
+func (s *Source) removeCloneDir(dir string) {
+	if dir == "" {
+		return
+	}
+	cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+	if within, err := pathguard.Within(cloneRoot, dir); err != nil || !within {
+		s.log.Warn("dev-clones: stored clone path escapes data dir; refusing to remove",
+			zap.String("source", s.namespace),
+			zap.String("path", dir),
+		)
+		return
+	}
+	if s.beforeRemoveCloneDir != nil {
+		s.beforeRemoveCloneDir(dir)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		s.log.Warn("dev-clones: removeall failed",
+			zap.String("source", s.namespace),
+			zap.String("path", dir),
+			zap.Error(err),
+		)
+	}
+}
+
+// syncLive re-resolves and emits on the live event channel; a no-op once
+// the watch loop has closed it or the source has been removed.
+func (s *Source) syncLive(ctx context.Context) error {
+	s.mu.Lock()
+	live := s.ch != nil && !s.removed
+	s.mu.Unlock()
+	if !live {
 		return nil
 	}
-	return s.syncAndEmit(ctx, ch)
+	return s.sync(ctx, nil)
+}
+
+// Remove implements source.Remover: it ends dev mode, cancels clones still
+// in progress, and deletes every dev-clone directory without re-resolving.
+// Later dev-mode enables return ErrSourceRemoved and disables do nothing.
+// It waits for the watch loop and for in-progress clones to finish, so a
+// started source's context must already be cancelled.
+func (s *Source) Remove() {
+	s.mu.Lock()
+	if s.removed {
+		s.mu.Unlock()
+		return
+	}
+	s.removed = true
+	dirs := make([]string, 0, len(s.clones))
+	for runID, cs := range s.clones {
+		if !s.abandonIfInProgressLocked(runID, cs) {
+			dirs = append(dirs, cs.cloneDir)
+		}
+	}
+	waits := []chan struct{}{s.watchDone}
+	for _, cs := range s.abandoned {
+		waits = append(waits, cs.done)
+	}
+	s.clones = nil
+	s.primaryRunID = ""
+	s.devRootPath = ""
+	s.resolver.SetDevMode(false)
+	s.failuresMu.Lock()
+	s.failures = map[string]task.LoadFailure{}
+	s.failuresMu.Unlock()
+	s.mu.Unlock()
+
+	for _, done := range waits {
+		if done != nil {
+			<-done
+		}
+	}
+	for _, dir := range dirs {
+		s.removeCloneDir(dir)
+	}
 }
 
 // latestCloneRunIDLocked returns the runID with the most recent createdAt.
@@ -614,6 +714,7 @@ func (s *Source) LoadFailures() map[string]task.LoadFailure {
 // outcome of the sync that just ran. Replacing rather than merging means an
 // entry that now resolves cleanly, or was removed from the taskset spec
 // entirely, drops out on its own — no separate "clear" call needed.
+// Caller must hold s.mu, so failures publish in the same order as snapshots.
 func (s *Source) setLoadFailures(fails []ResolveFailure) {
 	m := make(map[string]task.LoadFailure, len(fails))
 	now := time.Now()
@@ -658,11 +759,18 @@ func (s *Source) SetParentOverrides(ov *Overrides) {
 //     ticker re-registers any new task directories added since last sync.
 //   - For git sources:    a pull ticker fetches from the remote on every
 //     pollInterval; fsnotify then fires only when the pull actually changed
-//     files on disk, so syncAndEmit is skipped on no-op pulls.
+//     files on disk, so sync is skipped on no-op pulls.
 //
 // Falls back to a plain polling loop if fsnotify is unavailable.
 func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
-	defer close(ch)
+	defer func() {
+		s.mu.Lock()
+		if s.ch == ch {
+			s.ch = nil
+		}
+		close(ch)
+		s.mu.Unlock()
+	}()
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -719,19 +827,19 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 			}
 			debounced(trigger)
 		case <-fireSig:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
+			if err := s.sync(ctx, ch); err != nil {
 				s.log.Warn("taskset source: sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 			s.addWatchDirs(watcher)
 		case <-s.refresh:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+			if err := s.sync(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
-			// fsnotify will fire and trigger syncAndEmit via the debounce path.
+			// fsnotify will fire and trigger sync via the debounce path.
 			_, err := s.resolver.Pull(ctx, s.rootRef)
 			s.recordPull(err)
 			if err != nil {
@@ -774,8 +882,8 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 		case <-ctx.Done():
 			return
 		case <-s.refresh:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+			if err := s.sync(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
 		case <-ticker.C:
@@ -787,7 +895,7 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 						zap.String("id", s.id), zap.Error(err))
 				}
 			}
-			if err := s.syncAndEmit(ctx, ch); err != nil {
+			if err := s.sync(ctx, ch); err != nil {
 				s.log.Warn("taskset source: poll failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
@@ -795,7 +903,18 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 	}
 }
 
-func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
+// sync re-resolves and emits the diff against the snapshot on ch, or on the
+// live channel when ch is nil (dropping the events once it has closed or the
+// source is removed). The resolve runs unlocked; the snapshot swap and the
+// non-blocking sends share one s.mu hold, so concurrent syncs emit their
+// diffs in snapshot order. A sync that started before the one that last
+// swapped the snapshot is stale and is dropped without swapping or emitting.
+func (s *Source) sync(ctx context.Context, ch chan<- source.Event) error {
+	s.mu.Lock()
+	s.syncSeq++
+	seq := s.syncSeq
+	s.mu.Unlock()
+
 	tasks, failures, err := s.resolve(ctx)
 	if err != nil {
 		return err
@@ -816,6 +935,11 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	}
 
 	s.mu.Lock()
+	if seq < s.appliedSeq {
+		s.mu.Unlock()
+		return nil
+	}
+	s.appliedSeq = seq
 	prev := s.snapshot
 	// An entry that failed to resolve this pass must not look "removed" to
 	// DiffSnapshots below (#649) — that's the exact mechanism that made a
@@ -854,29 +978,35 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 		}
 	}
 	s.snapshot = current
-	s.mu.Unlock()
-
-	s.setLoadFailures(failures)
 
 	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
-
-	for _, id := range added {
-		cur := current[id]
-		s.send(ch, source.Event{
-			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
-		})
+	out := ch
+	if out == nil && !s.removed {
+		out = s.ch
 	}
-	for _, id := range updated {
-		cur := current[id]
-		s.send(ch, source.Event{
-			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
-		})
+	if out != nil {
+		for _, id := range added {
+			cur := current[id]
+			s.send(out, source.Event{
+				Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
+			})
+		}
+		for _, id := range updated {
+			cur := current[id]
+			s.send(out, source.Event{
+				Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
+			})
+		}
+		for _, id := range removed {
+			s.send(out, source.Event{
+				Kind: source.EventRemoved, TaskID: id, Source: s.id,
+			})
+		}
 	}
-	for _, id := range removed {
-		s.send(ch, source.Event{
-			Kind: source.EventRemoved, TaskID: id, Source: s.id,
-		})
+	if !s.removed {
+		s.setLoadFailures(failures)
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -974,7 +1104,7 @@ func (s *Source) loadConfigDefaults() (*Defaults, error) {
 // through s.log — see the #682 comment on that path for why silence there
 // is unacceptable. The returned error is non-nil only when taskDir itself
 // turns out to be unreadable (the fallback below also fails) — the caller
-// (syncAndEmit) reports that as a ResolveFailure instead of registering the
+// (sync) reports that as a ResolveFailure instead of registering the
 // task with a degraded hash.
 func (s *Source) contentHashFor(k task.Kinded, taskDir, taskID string) (string, error) {
 	if taskDir == "" {
@@ -1000,7 +1130,7 @@ func (s *Source) contentHashFor(k task.Kinded, taskDir, taskID string) (string, 
 	// the cause, this used to fall back to a spec-only hash, silently
 	// dropping the ENTIRE directory — including the task's own script — from
 	// the change-detection identity: a script edit then changed no spec
-	// field, the hash stayed stable, syncAndEmit saw no diff, and the
+	// field, the hash stayed stable, sync saw no diff, and the
 	// approval gate was never re-armed for the edit. That's a silent
 	// approval-gate bypass, not merely a missed reload, so the error must be
 	// loud and must still perturb the identity — not just get folded away.
