@@ -146,7 +146,6 @@ async def main():
     unpinned = await dicode.runs.unpin_input_async(other)
     cleared = dicode.runs.delete_inputs([target])
 
-    old = params.get("old")
     expired_after = dicode.runs.list_expired(before_ts=1500.7)
     expired_before = await dicode.runs.list_expired_async(before_ts=999.9)
 
@@ -333,8 +332,8 @@ async def main():
 }
 
 // TestExecute_SDKArgTypeErrors checks that the Python SDK rejects wrongly
-// typed secrets and crypto arguments with a TypeError before anything reaches
-// the wire, leaving the IPC connection usable.
+// typed secrets, crypto and runs.* arguments with a TypeError before anything
+// reaches the wire, leaving the IPC connection usable.
 func TestExecute_SDKArgTypeErrors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -376,17 +375,35 @@ async def main():
     record("decrypt_int", lambda: dicode.crypto.decrypt("verbs", 5))
     await record_async("encrypt_async_int", dicode.crypto.encrypt_async("verbs", 5))
     await record_async("decrypt_async_str", dicode.crypto.decrypt_async("verbs", "x"))
+    record("context_int", lambda: dicode.crypto.encrypt(5, b"x"))
+    await record_async("context_async_int", dicode.crypto.decrypt_async(5, b"x"))
+    record("secret_delete_key", lambda: dicode.secrets_delete(9))
+    record("run_id_int", lambda: dicode.runs.pin_input(42))
+    await record_async("run_id_async_int", dicode.runs.get_input_async(42))
+    record("run_ids_str", lambda: dicode.runs.delete_inputs("abc"))
+    record("run_ids_item_int", lambda: dicode.runs.delete_inputs(["a", 3]))
+    record("before_ts_bool", lambda: dicode.runs.list_expired(before_ts=True))
+    await record_async("before_ts_str", dicode.runs.list_expired_resume_state_async(before_ts="1"))
 
     ct = dicode.crypto.encrypt("verbs", bytearray(b"still-ok"))
     after = dicode.crypto.decrypt("verbs", memoryview(ct))
     dicode.secrets_set("AFTER", "ok")
-    return {"errs": errs, "after": after == b"still-ok"}
+    expired_none = dicode.runs.list_expired(before_ts=None)
+    return {"errs": errs, "after": after == b"still-ok", "expired_none": expired_none}
 `)
 	spec.Permissions = task.Permissions{Dicode: &task.DicodePermissions{
-		Crypto:       []string{"verbs"},
-		SecretsWrite: true,
+		Crypto:          []string{"verbs"},
+		SecretsWrite:    true,
+		RunsListExpired: true,
 	}}
 	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	old, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SetRunInput(ctx, old, "run-inputs/"+old, 10, 1000, nil); err != nil {
 		t.Fatal(err)
 	}
 	runID, err := reg.StartRun(ctx, spec.ID, "")
@@ -416,6 +433,15 @@ async def main():
 		"decrypt_int":        "ciphertext must be bytes, bytearray or memoryview, not int",
 		"encrypt_async_int":  "plaintext must be bytes",
 		"decrypt_async_str":  ".encode()",
+		"context_int":        "context must be a str, not int",
+		"context_async_int":  "context must be a str, not int",
+		"secret_delete_key":  "secret key must be a str, not int",
+		"run_id_int":         "run_id must be a str, not int",
+		"run_id_async_int":   "run_id must be a str, not int",
+		"run_ids_str":        "run_ids must be an iterable of str, not str",
+		"run_ids_item_int":   "run_ids item must be a str, not int",
+		"before_ts_bool":     "before_ts must be a number, not bool",
+		"before_ts_str":      "before_ts must be a number, not str",
 	} {
 		if got, _ := errs[name].(string); !strings.Contains(got, want) {
 			t.Errorf("%s TypeError = %q, want it to contain %q", name, got, want)
@@ -423,6 +449,9 @@ async def main():
 	}
 	if m["after"] != true {
 		t.Errorf("crypto after the TypeErrors failed: %+v", m)
+	}
+	if got := runIDs(m["expired_none"]); !slices.Contains(got, old) {
+		t.Errorf("list_expired(before_ts=None) = %v, want %s (stored_at 1000)", got, old)
 	}
 	sec.mu.Lock()
 	defer sec.mu.Unlock()
