@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -18,6 +19,39 @@ import (
 // or rejected). Once all barriers have been seen the Ready channel closes.
 const initialSyncBarrier source.EventKind = "dicode-internal/initial-sync-barrier"
 
+// sourceRemoved is an internal marker the Run loop handles by deregistering
+// every task owned by the marker's source generation.
+const sourceRemoved source.EventKind = "dicode-internal/source-removed"
+
+// ErrDuplicateSource is returned by AddSource when a source with the same ID
+// is already running, starting or being removed.
+var ErrDuplicateSource = errors.New("source with this id is already running")
+
+// sourceEvent is a source event tagged with the generation of the source
+// run that produced it. Only internal barriers carry gen 0.
+// Event.Source is always the producing source's ID.
+type sourceEvent struct {
+	source.Event
+	gen uint64
+	// done is closed by the Run loop after it handles a sourceRemoved marker.
+	done chan struct{}
+}
+
+// runningSource is one started (or starting) source. gen distinguishes it
+// from an earlier or later source with the same ID.
+type runningSource struct {
+	src    source.Source
+	cancel context.CancelFunc
+	gen    uint64
+	// done closes once Start has returned and the forwarder has exited.
+	done chan struct{}
+	// removing is set by RemoveSource. The entry stays in cancels until
+	// teardown finishes, so the ID cannot be reused meanwhile. Guarded by mu.
+	removing bool
+	// tornDown closes once RemoveSource's teardown has finished.
+	tornDown chan struct{}
+}
+
 // Reconciler fans-in events from multiple sources and applies them to the registry.
 type Reconciler struct {
 	registry *Registry
@@ -33,16 +67,21 @@ type Reconciler struct {
 
 	// runtime state — set when Run is called
 	mu      sync.Mutex
-	merged  chan source.Event
-	cancels map[string]context.CancelFunc // sourceID → cancel fn
+	merged  chan sourceEvent
+	cancels map[string]*runningSource // sourceID → running source, set before Start
+	lastGen uint64
 	runCtx  context.Context
+
+	// owners maps a registered task ID to the generation of the source run
+	// that registered it. Only the Run loop writes it.
+	owners map[string]uint64
 
 	// pending holds events that failed validateTaskProviders because a
 	// provider task was not yet registered. After any successful registration
 	// these are re-emitted to merged for a retry. Keyed by task ID so a
 	// repeated failure for the same task replaces the previous attempt
 	// (always retrying the most recent event).
-	pending map[string]source.Event
+	pending map[string]sourceEvent
 
 	// ready closes once the first sync completes: every initially-configured
 	// source has started AND its initial scan batch has been handled (#464).
@@ -60,8 +99,9 @@ func NewReconciler(r *Registry, sources []source.Source, log *zap.Logger) *Recon
 		registry: r,
 		sources:  sources,
 		log:      log,
-		cancels:  make(map[string]context.CancelFunc),
-		pending:  make(map[string]source.Event),
+		cancels:  make(map[string]*runningSource),
+		owners:   make(map[string]uint64),
+		pending:  make(map[string]sourceEvent),
 		ready:    make(chan struct{}),
 	}
 }
@@ -89,7 +129,7 @@ func (rc *Reconciler) markInitialSourceSynced() {
 func (rc *Reconciler) Run(ctx context.Context) error {
 	rc.mu.Lock()
 	rc.runCtx = ctx
-	rc.merged = make(chan source.Event, 64)
+	rc.merged = make(chan sourceEvent, 64)
 	rc.initPending = len(rc.sources)
 	rc.mu.Unlock()
 
@@ -101,7 +141,13 @@ func (rc *Reconciler) Run(ctx context.Context) error {
 	}
 
 	for _, src := range rc.sources {
-		if err := rc.startSource(src, true); err != nil {
+		err := rc.startSource(src, true)
+		if errors.Is(err, ErrDuplicateSource) {
+			rc.log.Warn("skipping initial source with duplicate id", zap.String("source", src.ID()))
+			rc.markInitialSourceSynced()
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("start source %s: %w", src.ID(), err)
 		}
 	}
@@ -112,11 +158,15 @@ loop:
 		case <-ctx.Done():
 			return nil
 		case ev := <-rc.merged:
-			if ev.Kind == initialSyncBarrier {
+			switch ev.Kind {
+			case initialSyncBarrier:
 				rc.markInitialSourceSynced()
-				continue
+			case sourceRemoved:
+				rc.unregisterOwned(ev.gen)
+				close(ev.done)
+			default:
+				rc.handle(ev)
 			}
-			rc.handle(ev)
 		}
 	}
 }
@@ -125,20 +175,135 @@ loop:
 // Safe to call from any goroutine after Run has been called.
 // Runtime-added sources never participate in the first-sync readiness
 // barrier — Ready tracks only the initially-configured set.
+//
+// It returns ErrDuplicateSource while a source with the same ID is running or
+// starting, and nil when RemoveSource cancelled the source mid-start (the
+// source is already gone).
 func (rc *Reconciler) AddSource(src source.Source) error {
 	return rc.startSource(src, false)
 }
 
-// RemoveSource stops and removes a source by its ID.
-// Safe to call from any goroutine after Run has been called.
+// RemoveSource stops a source by its ID, deregisters every task it
+// registered (calling OnUnregister for each), waits for its Start call and
+// event forwarding to finish, then calls Remove on sources implementing
+// source.Remover. It returns once that teardown has finished, also when a
+// concurrent call started it.
+// A source still inside Start is cancelled and never forwards events.
+//
+// Safe to call from any goroutine after Run has been called, except from
+// OnRegister/OnUnregister, which run on the Run loop it waits for.
 func (rc *Reconciler) RemoveSource(id string) {
+	rc.removeSource(id, nil)
+}
+
+// Running returns the source currently registered under id, including one
+// still starting or being removed, or nil.
+func (rc *Reconciler) Running(id string) source.Source {
 	rc.mu.Lock()
-	cancel, ok := rc.cancels[id]
-	delete(rc.cancels, id)
-	rc.mu.Unlock()
-	if ok {
-		cancel()
+	defer rc.mu.Unlock()
+	if rs, ok := rc.cancels[id]; ok {
+		return rs.src
 	}
+	return nil
+}
+
+// RemoveSourceIfCurrent is RemoveSource for src.ID(), but only while src is
+// the instance running under that ID: a caller holding a source that was
+// already removed cannot tear down a newer source that reused the ID.
+func (rc *Reconciler) RemoveSourceIfCurrent(src source.Source) {
+	rc.removeSource(src.ID(), src)
+}
+
+func (rc *Reconciler) removeSource(id string, want source.Source) {
+	rc.mu.Lock()
+	rs, ok := rc.cancels[id]
+	if !ok || (want != nil && rs.src != want) {
+		rc.mu.Unlock()
+		return
+	}
+	if rs.removing {
+		ctx := rc.runCtx
+		rc.mu.Unlock()
+		select {
+		case <-rs.tornDown:
+		case <-ctx.Done():
+		}
+		return
+	}
+	rs.removing = true
+	for taskID, ev := range rc.pending {
+		if ev.gen == rs.gen {
+			delete(rc.pending, taskID)
+		}
+	}
+	ctx := rc.runCtx
+	rc.mu.Unlock()
+	defer func() {
+		rc.mu.Lock()
+		if rc.cancels[id] == rs {
+			delete(rc.cancels, id)
+		}
+		rc.mu.Unlock()
+		close(rs.tornDown)
+	}()
+	rs.cancel()
+
+	marker := sourceEvent{Event: source.Event{Kind: sourceRemoved, Source: id}, gen: rs.gen, done: make(chan struct{})}
+	select {
+	case rc.merged <- marker:
+	case <-ctx.Done():
+		return
+	}
+	for _, done := range []chan struct{}{marker.done, rs.done} {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		}
+	}
+	if r, ok := rs.src.(source.Remover); ok {
+		r.Remove()
+	}
+}
+
+// unregisterOwned deregisters every task registered by source run gen.
+// Runs on the Run loop.
+func (rc *Reconciler) unregisterOwned(gen uint64) {
+	var ids []string
+	for taskID, owner := range rc.owners {
+		if owner == gen {
+			ids = append(ids, taskID)
+		}
+	}
+	for _, taskID := range ids {
+		rc.unregister(taskID)
+	}
+}
+
+func (rc *Reconciler) unregister(taskID string) {
+	rc.mu.Lock()
+	delete(rc.pending, taskID)
+	rc.mu.Unlock()
+	delete(rc.owners, taskID)
+	rc.registry.Unregister(taskID)
+	rc.log.Info("task unregistered", zap.String("task", taskID))
+	if rc.OnUnregister != nil {
+		rc.OnUnregister(taskID)
+	}
+}
+
+// live reports whether ev comes from a source run that is still registered
+// and not being removed.
+func (rc *Reconciler) live(ev sourceEvent) bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.liveLocked(ev)
+}
+
+// liveLocked is live for a caller holding rc.mu.
+func (rc *Reconciler) liveLocked(ev sourceEvent) bool {
+	rs, ok := rc.cancels[ev.Source]
+	return ok && rs.gen == ev.gen && !rs.removing
 }
 
 // startSource begins watching a source and forwarding its events to merged.
@@ -153,17 +318,42 @@ func (rc *Reconciler) RemoveSource(id string) {
 // already buffered, so the barrier still lands without waiting on future
 // activity.
 func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
+	id := src.ID()
 	rc.mu.Lock()
 	ctx := rc.runCtx
-	rc.mu.Unlock()
 	if ctx == nil {
+		rc.mu.Unlock()
 		return fmt.Errorf("reconciler not yet running")
 	}
-
+	if _, dup := rc.cancels[id]; dup {
+		rc.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrDuplicateSource, id)
+	}
 	srcCtx, cancel := context.WithCancel(ctx)
+	rc.lastGen++
+	rs := &runningSource{src: src, cancel: cancel, gen: rc.lastGen, done: make(chan struct{}), tornDown: make(chan struct{})}
+	rc.cancels[id] = rs
+	rc.mu.Unlock()
+
 	ch, err := src.Start(srcCtx)
+
+	rc.mu.Lock()
+	removed := rc.cancels[id] != rs || rs.removing
+	if err != nil && !removed {
+		delete(rc.cancels, id)
+	}
+	rc.mu.Unlock()
+	if removed {
+		// RemoveSource cancelled this start; its events must never register.
+		close(rs.done)
+		if trackInitial {
+			rc.markInitialSourceSynced()
+		}
+		return nil
+	}
 	if err != nil {
 		cancel()
+		close(rs.done)
 		return err
 	}
 	initialBatch := 0
@@ -171,38 +361,50 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 		initialBatch = len(ch)
 	}
 
-	rc.mu.Lock()
-	rc.cancels[src.ID()] = cancel
-	rc.mu.Unlock()
-
 	go func() {
+		defer close(rs.done)
 		// sendBarrier signals this source's initial batch has been forwarded.
 		// It reports false when ctx is done, so the forwarder can bail out.
 		// On shutdown before the barrier lands, Ready simply never closes —
 		// readiness consumers select on their own timeout/context.
 		sendBarrier := func() bool {
 			select {
-			case rc.merged <- source.Event{Kind: initialSyncBarrier}:
+			case rc.merged <- sourceEvent{Event: source.Event{Kind: initialSyncBarrier}}:
 				return true
 			case <-ctx.Done():
 				return false
 			}
 		}
+		// A source removed or closed before its initial batch drained still
+		// counts as synced.
+		defer func() {
+			if trackInitial {
+				sendBarrier()
+			}
+		}()
 		if trackInitial && initialBatch == 0 {
 			if !sendBarrier() {
 				return
 			}
 			trackInitial = false
 		}
-		for ev := range ch {
-			// Without the ctx select, a slow main loop plus a closed merged
-			// reader during shutdown would block this goroutine forever
-			// holding source events. ctx is the parent context, not the
-			// per-source srcCtx, so this drains naturally on full reconciler
-			// shutdown rather than per-source cancellation.
+		for {
+			var ev source.Event
+			var ok bool
 			select {
-			case rc.merged <- ev:
-			case <-ctx.Done():
+			case ev, ok = <-ch:
+				if !ok {
+					return
+				}
+			case <-srcCtx.Done():
+				return
+			}
+			// Without srcCtx, a stopped Run loop or a removal would block
+			// this goroutine forever holding source events.
+			ev.Source = id
+			select {
+			case rc.merged <- sourceEvent{Event: ev, gen: rs.gen}:
+			case <-srcCtx.Done():
 				return
 			}
 			if trackInitial {
@@ -218,7 +420,12 @@ func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	return nil
 }
 
-func (rc *Reconciler) handle(ev source.Event) {
+func (rc *Reconciler) handle(ev sourceEvent) {
+	if !rc.live(ev) {
+		rc.log.Debug("dropping event from removed source",
+			zap.String("task", ev.TaskID), zap.String("source", ev.Source))
+		return
+	}
 	switch ev.Kind {
 	case source.EventAdded, source.EventUpdated:
 		k := ev.Kinded
@@ -241,7 +448,13 @@ func (rc *Reconciler) handle(ev source.Event) {
 				// already-queued task drop to debug — the signal is preserved
 				// (a task that resolves is deleted from pending, and a later
 				// re-failure warns again as a fresh transition).
+				// The live re-check shares the lock with the pending write, so a
+				// concurrent RemoveSource either sees this entry or drops it here.
 				rc.mu.Lock()
+				if !rc.liveLocked(ev) {
+					rc.mu.Unlock()
+					return
+				}
 				_, alreadyQueued := rc.pending[ev.TaskID]
 				rc.pending[ev.TaskID] = ev
 				rc.mu.Unlock()
@@ -266,6 +479,7 @@ func (rc *Reconciler) handle(ev source.Event) {
 		rc.mu.Lock()
 		delete(rc.pending, ev.TaskID)
 		rc.mu.Unlock()
+		rc.owners[ev.TaskID] = ev.gen
 		rc.log.Info("task registered",
 			zap.String("task", ev.TaskID),
 			zap.String("kind", string(ev.Kind)),
@@ -279,14 +493,7 @@ func (rc *Reconciler) handle(ev source.Event) {
 	case source.EventRemoved:
 		// Cancel any pending retry so a removed-then-retried task is not
 		// re-registered after its provider eventually shows up.
-		rc.mu.Lock()
-		delete(rc.pending, ev.TaskID)
-		rc.mu.Unlock()
-		rc.registry.Unregister(ev.TaskID)
-		rc.log.Info("task unregistered", zap.String("task", ev.TaskID))
-		if rc.OnUnregister != nil {
-			rc.OnUnregister(ev.TaskID)
-		}
+		rc.unregister(ev.TaskID)
 	}
 }
 
@@ -300,7 +507,7 @@ func (rc *Reconciler) retryPending() {
 		rc.mu.Unlock()
 		return
 	}
-	events := make([]source.Event, 0, len(rc.pending))
+	events := make([]sourceEvent, 0, len(rc.pending))
 	for _, ev := range rc.pending {
 		events = append(events, ev)
 	}

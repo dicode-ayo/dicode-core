@@ -103,7 +103,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 - `registry.go` — Register/Unregister/Get/All (sorted by ID), StartRun/StartRunWithID/FinishRun/AppendLog/GetRun/ListRuns/GetRunLogs
 - `CleanupStaleRuns(ctx)` — marks orphaned `running` rows as `cancelled` on startup, returns affected task IDs
-- `reconciler.go` — fan-in multi-source, OnRegister/OnUnregister callbacks, AddSource/RemoveSource for live hot-add. 13 tests passing.
+- `reconciler.go` — fan-in multi-source, OnRegister/OnUnregister callbacks, AddSource/RemoveSource for live hot-add; RemoveSource deregisters the removed source's tasks and deletes its dev clones.
 
 ### `pkg/runtime/deno/` ✅
 

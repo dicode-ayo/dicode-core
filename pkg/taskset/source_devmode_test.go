@@ -52,6 +52,9 @@ func newFixtureRemote(t *testing.T, branch string, files map[string]string) stri
 		t.Fatalf("newFixtureRemote: worktree: %v", err)
 	}
 	for name, content := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(wtPath, name)), 0o755); err != nil {
+			t.Fatalf("newFixtureRemote: mkdir for %s: %v", name, err)
+		}
 		if err := os.WriteFile(filepath.Join(wtPath, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("newFixtureRemote: write %s: %v", name, err)
 		}

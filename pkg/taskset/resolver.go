@@ -303,7 +303,7 @@ func (r *Resolver) resolveBody(
 
 		// Ref-based entry.
 		ref := entry.Ref
-		if r.devMode && ref.DevRef != nil {
+		if r.DevMode() && ref.DevRef != nil {
 			ref = ref.DevRef
 		}
 
