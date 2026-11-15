@@ -223,6 +223,7 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 - `_call_async(req)` — bridges `_async_call` into the caller's event loop via `asyncio.wrap_future`; no thread pool
 - Full `_async` variants on all globals: `log.*_async`, `params.get_async/all_async`, `kv.*_async`, `dicode.*_async`, `mcp.*_async`
 - Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
+- `pkg/ipc/sdk_parity_test.go` keeps the SDKs in step with `handleConn`: every dispatched verb must be sent by both `shim.ts` and `dicode_sdk.py` (bar a short reasoned exemption list), every verb either SDK sends must be dispatched, and `sdk.d.ts` must declare every member of the shim's `Dicode*` interfaces
 
 ### `pkg/daemon/` ✅
 

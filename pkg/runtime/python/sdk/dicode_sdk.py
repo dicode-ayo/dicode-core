@@ -12,11 +12,10 @@
 #
 # After handshake, same request/response pattern as before:
 #   Fire-and-forget (no id):    log, kv.set, kv.delete, output
-#   Request/response (id req):  params, input, kv.get, kv.list, return,
-#                               dicode.run_task, dicode.list_tasks,
-#                               dicode.get_runs,
-#                               mcp.list_tools, mcp.call
+#   Request/response (id req):  params, input, resume, kv.get, kv.list,
+#                               return, dicode.*, mcp.list_tools, mcp.call
 import asyncio
+import base64
 import inspect
 import json
 import os
@@ -476,6 +475,66 @@ output = _Output()
 # ── dicode — task orchestration helpers ───────────────────────────────────────
 
 class _Runs:
+    def list_expired(self, before_ts=0):
+        return _call({"method": "dicode.runs.list_expired",
+                      "before_ts": before_ts})
+
+    async def list_expired_async(self, before_ts=0):
+        return await _call_async({"method": "dicode.runs.list_expired",
+                                  "before_ts": before_ts})
+
+    def delete_input(self, run_id):
+        return _call({"method": "dicode.runs.delete_input", "runID": run_id})
+
+    async def delete_input_async(self, run_id):
+        return await _call_async({"method": "dicode.runs.delete_input",
+                                  "runID": run_id})
+
+    def delete_inputs(self, run_ids):
+        return _call({"method": "dicode.runs.delete_inputs",
+                      "runIDs": list(run_ids)})
+
+    async def delete_inputs_async(self, run_ids):
+        return await _call_async({"method": "dicode.runs.delete_inputs",
+                                  "runIDs": list(run_ids)})
+
+    def pin_input(self, run_id):
+        return _call({"method": "dicode.runs.pin_input", "runID": run_id})
+
+    async def pin_input_async(self, run_id):
+        return await _call_async({"method": "dicode.runs.pin_input",
+                                  "runID": run_id})
+
+    def unpin_input(self, run_id):
+        return _call({"method": "dicode.runs.unpin_input", "runID": run_id})
+
+    async def unpin_input_async(self, run_id):
+        return await _call_async({"method": "dicode.runs.unpin_input",
+                                  "runID": run_id})
+
+    def get_input(self, run_id):
+        return _call({"method": "dicode.runs.get_input", "runID": run_id})
+
+    async def get_input_async(self, run_id):
+        return await _call_async({"method": "dicode.runs.get_input",
+                                  "runID": run_id})
+
+    def list_expired_resume_state(self, before_ts=0):
+        return _call({"method": "dicode.runs.list_expired_resume_state",
+                      "before_ts": before_ts})
+
+    async def list_expired_resume_state_async(self, before_ts=0):
+        return await _call_async({"method": "dicode.runs.list_expired_resume_state",
+                                  "before_ts": before_ts})
+
+    def delete_resume_state(self, run_id):
+        return _call({"method": "dicode.runs.delete_resume_state",
+                      "runID": run_id})
+
+    async def delete_resume_state_async(self, run_id):
+        return await _call_async({"method": "dicode.runs.delete_resume_state",
+                                  "runID": run_id})
+
     def replay(self, run_id, task_name=None):
         return _call({"method": "dicode.runs.replay",
                       "runID": run_id, "taskID": task_name or ""})
@@ -529,6 +588,33 @@ class _Secrets:
         if not isinstance(key, str) or not key:
             raise TypeError("secrets.has: key must be a non-empty string")
         return bool(await _call_async({"method": "dicode.secrets.has", "key": key}))
+
+
+class _Crypto:
+    """AEAD encryption bound to a context string (requires the context in
+    permissions.dicode.crypto). Takes and returns bytes."""
+
+    def encrypt(self, context, plaintext):
+        res = _call({"method": "dicode.crypto.encrypt", "context": context,
+                     "plaintext_b64": base64.b64encode(bytes(plaintext)).decode()})
+        return base64.b64decode(res["ciphertext_b64"])
+
+    async def encrypt_async(self, context, plaintext):
+        res = await _call_async({"method": "dicode.crypto.encrypt",
+                                 "context": context,
+                                 "plaintext_b64": base64.b64encode(bytes(plaintext)).decode()})
+        return base64.b64decode(res["ciphertext_b64"])
+
+    def decrypt(self, context, ciphertext):
+        res = _call({"method": "dicode.crypto.decrypt", "context": context,
+                     "ciphertext_b64": base64.b64encode(bytes(ciphertext)).decode()})
+        return base64.b64decode(res["plaintext_b64"])
+
+    async def decrypt_async(self, context, ciphertext):
+        res = await _call_async({"method": "dicode.crypto.decrypt",
+                                 "context": context,
+                                 "ciphertext_b64": base64.b64encode(bytes(ciphertext)).decode()})
+        return base64.b64decode(res["plaintext_b64"])
 
 
 class _Audit:
@@ -594,6 +680,7 @@ class _Dicode:
         self.git = _Git()
         self.secrets = _Secrets()
         self.audit = _Audit()
+        self.crypto = _Crypto()
 
     def run_task(self, task_id, params=None, mcp_context=False):
         return _call({"method": "dicode.run_task", "taskID": task_id,
@@ -612,6 +699,20 @@ class _Dicode:
         # Label the current run with a free-text group string (#116). Used
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
+
+    def secrets_set(self, key, value):
+        _call({"method": "dicode.secrets_set", "key": key,
+               "stringValue": value})
+
+    async def secrets_set_async(self, key, value):
+        await _call_async({"method": "dicode.secrets_set", "key": key,
+                           "stringValue": value})
+
+    def secrets_delete(self, key):
+        _call({"method": "dicode.secrets_delete", "key": key})
+
+    async def secrets_delete_async(self, key):
+        await _call_async({"method": "dicode.secrets_delete", "key": key})
 
     def suspend(self, state=None, schema=None, to=None, deadline=None):
         """Pause the run and wait for user input (#512). Records the state blob +

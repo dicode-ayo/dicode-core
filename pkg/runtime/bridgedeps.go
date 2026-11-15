@@ -75,6 +75,10 @@ type BridgeDeps struct {
 	// MCPTokenEnvName then gets whatever the secrets chain resolves for that
 	// name, same as before this feature existed.
 	MCPTokenMinter MCPTokenMinter
+	// CryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
+	// declare permissions.dicode.crypto. Nil disables crypto IPC. The Deno
+	// runtime wires its own deriver instead.
+	CryptoDeriver ipc.SubKeyDeriver
 	// ProtectedPaths are files (dicode.lock, dicode.yaml) that hold approval
 	// state and must never be writable by a task, even when a broad write
 	// grant covers their directory. Deno emits them as --deny-write flags;
@@ -114,6 +118,9 @@ func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[stri
 	}
 	if g := live.TestGuard; g != nil {
 		srv.SetTestGuard(g)
+	}
+	if c := live.CryptoDeriver; c != nil {
+		srv.SetCryptoHandler(c)
 	}
 	return srv
 }
@@ -177,6 +184,10 @@ func (d *BridgeDeps) SetRepoResolver(r ipc.RepoPathResolver) { d.RepoResolver = 
 // SetTestGuard wires the approval gate's veto for dicode.tasks.test into
 // every per-run IPC server. Nil means allow; mirrors the SetReplayer wiring.
 func (d *BridgeDeps) SetTestGuard(g func(taskID string) error) { d.TestGuard = g }
+
+// SetCryptoDeriver wires the SubKeyDeriver that serves dicode.crypto.{encrypt,
+// decrypt} on every per-run IPC server built through NewIPCServer.
+func (d *BridgeDeps) SetCryptoDeriver(c ipc.SubKeyDeriver) { d.CryptoDeriver = c }
 
 // SetProtectedPaths records files that no task may ever write (dicode.lock,
 // dicode.yaml — the approval-gate state); the deny always wins over any broad

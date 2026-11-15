@@ -30,6 +30,7 @@ var optionalBridgeDeps = map[string]bool{
 	"TestGuard":        true, // setupApprovalGate
 	"MCPTokenMinter":   true, // wireMCPTokenMinter
 	"ProtectedPaths":   true, // setupApprovalGate
+	"CryptoDeriver":    true, // wireCryptoIPC, only when a SubKeyDeriver exists
 }
 
 // TestBuildRuntimesWiresBothRuntimes guards the wiring obligation BridgeDeps

@@ -30,6 +30,7 @@ declare interface SecretOutputOptions {
 declare interface Output {
   html:  (content: string, opts?: OutputOptions)        => Promise<void>;
   text:  (content: string)                              => Promise<void>;
+  json:  (value: unknown)                               => Promise<void>;
   image: (mime: string | null, content: string)         => Promise<void>;
   file:  (name: string, content: string, mime?: string) => Promise<void>;
   /** Provider-task entry point (issue #119). Throws synchronously if `value`
@@ -75,6 +76,58 @@ declare interface TaskSummary {
   enabled:      boolean;
 }
 
+/** One row of the security audit log. Params are sanitized at write time. */
+declare interface AuditEvent {
+  id:          string;
+  ts:          string;
+  event_type:  string;
+  actor_kind:  string;
+  actor_id:    string;
+  target_kind: string;
+  target_id:   string;
+  params?:     string;
+  run_id?:     string;
+  allowed:     boolean;
+  reason?:     string;
+}
+
+declare interface AuditQueryResult {
+  events:      AuditEvent[];
+  next_cursor: string;
+}
+
+declare interface DicodeAudit {
+  /** Read the security audit trail. Pass `after` (a prior next_cursor) with
+   *  order:"asc" to walk the log forward exactly-once.
+   *  Requires permissions.dicode.audit_query. */
+  query: (opts?: {
+    after?:      string;
+    limit?:      number;
+    order?:      "asc" | "desc";
+    taskID?:     string;
+    actor?:      string;
+    eventType?:  string;
+  }) => Promise<AuditQueryResult>;
+}
+
+/** One entry of `dicode.sources.list()`. Host paths are withheld. */
+declare interface SourceSummary {
+  name:     string;
+  type?:    string;
+  url?:     string;
+  branch?:  string;
+  dev_mode: boolean;
+}
+
+/** Result of `dicode.sources.set_dev_mode()`. `clone_path` is the clone
+ *  directory and `dev_root_path` its root taskset.yaml; both are absent when
+ *  dev mode was disabled. */
+declare interface SetDevModeResult {
+  ok: boolean;
+  dev_root_path?: string;
+  clone_path?: string;
+}
+
 /** A JSON Schema (draft 2020-12) object describing the input a suspended task
  *  collects before resume (#512). The daemon validates the submission against
  *  it server-side. Loosely typed — any valid JSON Schema is accepted; the
@@ -112,8 +165,11 @@ declare interface Dicode {
   task_id:        string;
   /** Id of the current run (uuid). */
   run_id:         string;
-  run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
-  list_tasks:     ()                                                 => Promise<TaskSummary[]>;
+  /** Capabilities granted to this run. A dicode.* member is only callable
+   *  when its capability is present; otherwise it fails with "permission denied". */
+  caps:           string[];
+  run_task:       (taskID: string, params?: Record<string, string>, opts?: { mcpContext?: boolean }) => Promise<unknown>;
+  list_tasks:     (opts?: { mcpContext?: boolean })                  => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
   /** set_group labels the current run with a free-text string used by the
    *  WebUI to collapse same-group siblings (#116). Last write wins; only
@@ -129,6 +185,46 @@ declare interface Dicode {
   /** Secrets presence API. Requires permissions.dicode.secrets_has: true. */
   secrets:        DicodeSecrets;
   crypto:         DicodeCrypto;
+  /** Security audit trail. Requires permissions.dicode.audit_query. */
+  audit:          DicodeAudit;
+  runs: {
+    list_expired:  (opts?: { before_ts?: number }) => Promise<unknown>;
+    delete_input:  (runID: string)                 => Promise<unknown>;
+    /** Batched delete_input. */
+    delete_inputs: (runIDs: string[])              => Promise<unknown>;
+    pin_input:     (runID: string)                 => Promise<unknown>;
+    unpin_input:   (runID: string)                 => Promise<unknown>;
+    get_input:     (runID: string)                 => Promise<unknown>;
+    replay:        (runID: string, taskName?: string) => Promise<unknown>;
+    /** Like list_expired / delete_input, for offloaded dicode.suspend() state. */
+    list_expired_resume_state: (opts?: { before_ts?: number }) => Promise<unknown>;
+    delete_resume_state:       (runID: string)                 => Promise<unknown>;
+  };
+  tasks: {
+    test: (taskID: string) => Promise<unknown>;
+  };
+  sources: {
+    list: () => Promise<SourceSummary[]>;
+    set_dev_mode: (name: string, opts: {
+      enabled: boolean;
+      local_path?: string;
+      branch?: string;
+      base?: string;
+      run_id?: string;
+    }) => Promise<SetDevModeResult>;
+  };
+  git: {
+    commit_push: (sourceID: string, opts: {
+      message: string;
+      branch: string;
+      branch_prefix?: string;
+      allow_main?: boolean;
+      files?: string[];
+      author_name: string;
+      author_email: string;
+      auth_token_env?: string;
+    }) => Promise<{ commit: string }>;
+  };
 }
 
 /** The context each task handler (main / resume / steps[x]) receives (#512). */

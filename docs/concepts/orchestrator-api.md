@@ -66,16 +66,60 @@ runs = dicode.get_runs("morning-email-check", limit=5)
 
 ---
 
-### `dicode.secrets_set()` / `dicode.secrets_delete()` (Deno only)
+### `dicode.secrets_set()` / `dicode.secrets_delete()`
 
-Manage secrets from within a task.
+Manage secrets from within a task. Write-only: a task can never read a secret
+back. Requires `permissions.dicode.secrets_write: true`.
 
 ```typescript
+// Deno
 await dicode.secrets_set("MY_TOKEN", "new-value")
 await dicode.secrets_delete("OLD_TOKEN")
 ```
 
-Not available in the Python SDK.
+```python
+# Python
+dicode.secrets_set("MY_TOKEN", "new-value")
+dicode.secrets_delete("OLD_TOKEN")
+```
+
+---
+
+### `dicode.crypto.encrypt()` / `dicode.crypto.decrypt()`
+
+Encrypt and decrypt bytes under a context-scoped sub-key. Requires the context
+in `permissions.dicode.crypto`. Deno takes and returns `Uint8Array`; Python takes
+and returns `bytes`.
+
+```typescript
+// Deno
+const blob = await dicode.crypto.encrypt("my-ctx", new TextEncoder().encode("hi"))
+const data = await dicode.crypto.decrypt("my-ctx", blob)
+```
+
+```python
+# Python
+blob = dicode.crypto.encrypt("my-ctx", b"hi")
+data = dicode.crypto.decrypt("my-ctx", blob)
+```
+
+---
+
+### `dicode.runs.*` — run-input and resume-state retention
+
+Each method needs its own `permissions.dicode.runs_*` flag (see
+[task format](task-format.md)). Python takes the same arguments in snake_case.
+
+| Deno | Python |
+|---|---|
+| `runs.list_expired({ before_ts? })` | `runs.list_expired(before_ts=0)` |
+| `runs.delete_input(runID)` | `runs.delete_input(run_id)` |
+| `runs.delete_inputs(runIDs)` | `runs.delete_inputs(run_ids)` |
+| `runs.pin_input(runID)` / `runs.unpin_input(runID)` | `runs.pin_input(run_id)` / `runs.unpin_input(run_id)` |
+| `runs.get_input(runID)` | `runs.get_input(run_id)` |
+| `runs.replay(runID, taskName?)` | `runs.replay(run_id, task_name=None)` |
+| `runs.list_expired_resume_state({ before_ts? })` | `runs.list_expired_resume_state(before_ts=0)` |
+| `runs.delete_resume_state(runID)` | `runs.delete_resume_state(run_id)` |
 
 ---
 
@@ -129,8 +173,10 @@ exists = dicode.secrets.has("MY_TOKEN")
 | `run_task(id, params?)` | `await dicode.run_task(...)` | `dicode.run_task(...)` | Implemented |
 | `list_tasks()` | `await dicode.list_tasks()` | `dicode.list_tasks()` | Implemented |
 | `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Implemented |
-| `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Implemented (Deno only) |
-| `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Implemented (Deno only) |
+| `secrets_set(key, val)` | `await dicode.secrets_set(...)` | `dicode.secrets_set(...)` | Implemented |
+| `secrets_delete(key)` | `await dicode.secrets_delete(...)` | `dicode.secrets_delete(...)` | Implemented |
+| `crypto.encrypt/decrypt` | `await dicode.crypto.encrypt(...)` | `dicode.crypto.encrypt(...)` | Implemented |
+| `runs.*` | `await dicode.runs.list_expired(...)` | `dicode.runs.list_expired(...)` | Implemented |
 | `secrets.has(key)` | `await dicode.secrets.has(...)` | `dicode.secrets.has(...)` | Implemented |
 | `suspend(req)` | `await dicode.suspend(...)` | `dicode.suspend(...)` | Implemented |
 | `progress(msg, data)` | — | — | Planned |
