@@ -108,7 +108,9 @@ data = dicode.crypto.decrypt("my-ctx", blob)
 ### `dicode.runs.*` — run-input and resume-state retention
 
 Each method needs its own `permissions.dicode.runs_*` flag (see
-[task format](task-format.md)). Python takes the same arguments in snake_case.
+[task format](task-format.md)), except `runs.delete_inputs()`, which shares
+`runs_delete_input` with `runs.delete_input()`. Python takes the same
+arguments in snake_case.
 
 | Deno | Python |
 |---|---|
