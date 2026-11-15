@@ -77,7 +77,8 @@ type BridgeDeps struct {
 	MCPTokenMinter MCPTokenMinter
 	// CryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
 	// declare permissions.dicode.crypto. Nil disables crypto IPC. The Deno
-	// runtime wires its own deriver instead.
+	// runtime leaves this nil and sets its deriver on each IPC server itself
+	// (Runtime.SetCryptoHandler).
 	CryptoDeriver ipc.SubKeyDeriver
 	// ProtectedPaths are files (dicode.lock, dicode.yaml) that hold approval
 	// state and must never be writable by a task, even when a broad write

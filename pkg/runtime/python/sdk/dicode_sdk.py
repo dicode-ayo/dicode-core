@@ -477,11 +477,11 @@ output = _Output()
 class _Runs:
     def list_expired(self, before_ts=0):
         return _call({"method": "dicode.runs.list_expired",
-                      "before_ts": before_ts})
+                      "before_ts": int(before_ts)})
 
     async def list_expired_async(self, before_ts=0):
         return await _call_async({"method": "dicode.runs.list_expired",
-                                  "before_ts": before_ts})
+                                  "before_ts": int(before_ts)})
 
     def delete_input(self, run_id):
         return _call({"method": "dicode.runs.delete_input", "runID": run_id})
@@ -521,11 +521,11 @@ class _Runs:
 
     def list_expired_resume_state(self, before_ts=0):
         return _call({"method": "dicode.runs.list_expired_resume_state",
-                      "before_ts": before_ts})
+                      "before_ts": int(before_ts)})
 
     async def list_expired_resume_state_async(self, before_ts=0):
         return await _call_async({"method": "dicode.runs.list_expired_resume_state",
-                                  "before_ts": before_ts})
+                                  "before_ts": int(before_ts)})
 
     def delete_resume_state(self, run_id):
         return _call({"method": "dicode.runs.delete_resume_state",
@@ -590,30 +590,45 @@ class _Secrets:
         return bool(await _call_async({"method": "dicode.secrets.has", "key": key}))
 
 
+def _check_secret_args(key, value):
+    if not isinstance(key, str):
+        raise TypeError(f"secret key must be a str, not {type(key).__name__}")
+    if not isinstance(value, str):
+        raise TypeError(f"secret value must be a str, not {type(value).__name__}")
+
+
+def _bytes_arg(name, value):
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        hint = "; call .encode() on a str" if isinstance(value, str) else ""
+        raise TypeError(f"{name} must be bytes, bytearray or memoryview, "
+                        f"not {type(value).__name__}{hint}")
+    return base64.b64encode(value).decode()
+
+
 class _Crypto:
     """AEAD encryption bound to a context string (requires the context in
     permissions.dicode.crypto). Takes and returns bytes."""
 
     def encrypt(self, context, plaintext):
         res = _call({"method": "dicode.crypto.encrypt", "context": context,
-                     "plaintext_b64": base64.b64encode(bytes(plaintext)).decode()})
+                     "plaintext_b64": _bytes_arg("plaintext", plaintext)})
         return base64.b64decode(res["ciphertext_b64"])
 
     async def encrypt_async(self, context, plaintext):
         res = await _call_async({"method": "dicode.crypto.encrypt",
                                  "context": context,
-                                 "plaintext_b64": base64.b64encode(bytes(plaintext)).decode()})
+                                 "plaintext_b64": _bytes_arg("plaintext", plaintext)})
         return base64.b64decode(res["ciphertext_b64"])
 
     def decrypt(self, context, ciphertext):
         res = _call({"method": "dicode.crypto.decrypt", "context": context,
-                     "ciphertext_b64": base64.b64encode(bytes(ciphertext)).decode()})
+                     "ciphertext_b64": _bytes_arg("ciphertext", ciphertext)})
         return base64.b64decode(res["plaintext_b64"])
 
     async def decrypt_async(self, context, ciphertext):
         res = await _call_async({"method": "dicode.crypto.decrypt",
                                  "context": context,
-                                 "ciphertext_b64": base64.b64encode(bytes(ciphertext)).decode()})
+                                 "ciphertext_b64": _bytes_arg("ciphertext", ciphertext)})
         return base64.b64decode(res["plaintext_b64"])
 
 
@@ -701,10 +716,12 @@ class _Dicode:
         _call({"method": "dicode.set_group", "group": str(label or "")})
 
     def secrets_set(self, key, value):
+        _check_secret_args(key, value)
         _call({"method": "dicode.secrets_set", "key": key,
                "stringValue": value})
 
     async def secrets_set_async(self, key, value):
+        _check_secret_args(key, value)
         await _call_async({"method": "dicode.secrets_set", "key": key,
                            "stringValue": value})
 
