@@ -96,11 +96,136 @@ func readFile(t *testing.T, path string) string {
 
 func sentMethods(t *testing.T, path string) map[string]bool {
 	t.Helper()
+	strip := stripTSComments
+	if strings.HasSuffix(path, ".py") {
+		strip = stripPyComments
+	}
+	return scanMethods(sentMethodRe[path], strip(readFile(t, path)))
+}
+
+func scanMethods(re *regexp.Regexp, src string) map[string]bool {
 	out := map[string]bool{}
-	for _, m := range sentMethodRe[path].FindAllStringSubmatch(readFile(t, path), -1) {
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		out[m[1]] = true
 	}
 	return out
+}
+
+// blank writes s to b with every byte but newlines turned into a space, so
+// offsets and line numbers survive stripping.
+func blank(b *strings.Builder, s string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			b.WriteByte('\n')
+		} else {
+			b.WriteByte(' ')
+		}
+	}
+}
+
+// quotedEnd returns the index just past the string literal that opens at i
+// with quote q, honouring backslash escapes. Unterminated literals run to EOF.
+func quotedEnd(src string, i int, q string) int {
+	for j := i + len(q); j < len(src); j++ {
+		if src[j] == '\\' {
+			j++
+			continue
+		}
+		if strings.HasPrefix(src[j:], q) {
+			return j + len(q)
+		}
+	}
+	return len(src)
+}
+
+// stripTSComments blanks // and /* */ comments, leaving string and template
+// literals intact. Regex literals are not recognised.
+func stripTSComments(src string) string {
+	var b strings.Builder
+	for i := 0; i < len(src); {
+		switch {
+		case strings.HasPrefix(src[i:], "//"):
+			j := strings.IndexByte(src[i:], '\n')
+			if j < 0 {
+				j = len(src) - i
+			}
+			blank(&b, src[i:i+j])
+			i += j
+		case strings.HasPrefix(src[i:], "/*"):
+			j := strings.Index(src[i+2:], "*/")
+			end := len(src)
+			if j >= 0 {
+				end = i + 2 + j + 2
+			}
+			blank(&b, src[i:end])
+			i = end
+		case src[i] == '"' || src[i] == '\'' || src[i] == '`':
+			end := quotedEnd(src, i, src[i:i+1])
+			b.WriteString(src[i:end])
+			i = end
+		default:
+			b.WriteByte(src[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+// stripPyComments blanks # comments and docstrings (triple-quoted strings
+// that open a line), leaving every other string literal intact.
+func stripPyComments(src string) string {
+	var b strings.Builder
+	for i := 0; i < len(src); {
+		switch {
+		case src[i] == '#':
+			j := strings.IndexByte(src[i:], '\n')
+			if j < 0 {
+				j = len(src) - i
+			}
+			blank(&b, src[i:i+j])
+			i += j
+		case strings.HasPrefix(src[i:], `"""`) || strings.HasPrefix(src[i:], "'''"):
+			end := quotedEnd(src, i, src[i:i+3])
+			lineStart := strings.LastIndexByte(src[:i], '\n') + 1
+			if strings.TrimSpace(src[lineStart:i]) == "" {
+				blank(&b, src[i:end])
+			} else {
+				b.WriteString(src[i:end])
+			}
+			i = end
+		case src[i] == '"' || src[i] == '\'':
+			end := quotedEnd(src, i, src[i:i+1])
+			b.WriteString(src[i:end])
+			i = end
+		default:
+			b.WriteByte(src[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+func TestSentMethodsScannerIgnoresComments(t *testing.T) {
+	ts := `// _call({ method: "ts.line" })
+/* _call({ method: "ts.block" }) */
+const u = "http://x"; _call({ method: "ts.real" }); // method: "ts.trailing"
+const v = '/* not a comment */'; _call({ method: "ts.after_string" });`
+	got := strings.Join(sortedKeys(scanMethods(sentMethodRe[shimPath], stripTSComments(ts))), ",")
+	if want := "ts.after_string,ts.real"; got != want {
+		t.Errorf("TS: got %s, want %s", got, want)
+	}
+
+	py := `def f():
+    """Docstring: {"method": "py.docstring"}"""
+    # _call({"method": "py.comment"})
+    tag = "#not-a-comment"
+    _call({"method": "py.real", "tag": tag})  # "method": "py.trailing"
+    s = """inline {"method": "py.inline_triple"}"""
+`
+	got = strings.Join(sortedKeys(scanMethods(sentMethodRe[pySDKPath], stripPyComments(py))), ",")
+	if want := "py.inline_triple,py.real"; got != want {
+		t.Errorf("Python: got %s, want %s", got, want)
+	}
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -151,18 +276,39 @@ func TestSDKParity_EverySentVerbIsDispatched(t *testing.T) {
 	}
 }
 
-// TestSDKParity_SdkDtsDeclaresShimDicode asserts that the Monaco declarations
-// declare every member (nested namespace keys included) of each Dicode*
-// interface in shim.ts.
-func TestSDKParity_SdkDtsDeclaresShimDicode(t *testing.T) {
-	shim := readFile(t, shimPath)
-	dts := readFile(t, sdkDtsPath)
-	names := regexp.MustCompile(`\binterface\s+(Dicode\w*)\s*\{`).FindAllStringSubmatch(shim, -1)
-	if len(names) == 0 {
-		t.Fatal("no Dicode* interfaces found in shim.ts")
-	}
+// shimInternalInterfaces are shim.ts interfaces with no public SDK type, so
+// sdk.d.ts need not declare them. Every entry carries its reason.
+var shimInternalInterfaces = map[string]string{
+	"IpcRequest":        "IPC wire frame, never handed to task code",
+	"IpcResponse":       "IPC wire frame, never handed to task code",
+	"HandshakeResponse": "IPC handshake frame, never handed to task code",
+	"TaskModule":        "shape of the imported task module, consumed by the shim itself",
+}
+
+// TestSDKParity_SdkDtsDeclaresShimInterfaces asserts that, for every
+// interface in shim.ts other than the shim-internal ones, sdk.d.ts declares
+// an interface of the same name with every member (nested namespace keys
+// included) the shim declares.
+func TestSDKParity_SdkDtsDeclaresShimInterfaces(t *testing.T) {
+	shim := stripTSComments(readFile(t, shimPath))
+	dts := stripTSComments(readFile(t, sdkDtsPath))
+	names := regexp.MustCompile(`\binterface\s+(\w+)\s*\{`).FindAllStringSubmatch(shim, -1)
+	seen := map[string]bool{}
 	for _, n := range names {
-		name := n[1]
+		seen[n[1]] = true
+	}
+	for name, reason := range shimInternalInterfaces {
+		if !seen[name] {
+			t.Errorf("skipped interface %s is not declared in shim.ts; drop it", name)
+		}
+		if reason == "" {
+			t.Errorf("skipped interface %s has no reason", name)
+		}
+	}
+	for _, name := range sortedKeys(seen) {
+		if _, internal := shimInternalInterfaces[name]; internal {
+			continue
+		}
 		want := interfaceMembers(t, shim, name)
 		if len(want) == 0 {
 			t.Fatalf("shim.ts interface %s has no members; the scanner is broken", name)
@@ -177,6 +323,9 @@ func TestSDKParity_SdkDtsDeclaresShimDicode(t *testing.T) {
 				t.Errorf("sdk.d.ts %s is missing member %q declared in shim.ts", name, m)
 			}
 		}
+	}
+	if !seen["Dicode"] || !seen["Output"] {
+		t.Fatal("shim.ts interface scan missed Dicode or Output; the scanner is broken")
 	}
 }
 
@@ -198,14 +347,12 @@ interface DicodeOther { z: string }`
 	}
 }
 
-var commentRe = regexp.MustCompile(`(?s)/\*.*?\*/|//[^\n]*`)
-
 // interfaceMembers returns the dotted member paths of `interface <name> {…}`
 // in src. Keys inside parameter lists and generic arguments are ignored, so
 // only members and nested object-type namespaces are reported.
 func interfaceMembers(t *testing.T, src, name string) map[string]bool {
 	t.Helper()
-	src = commentRe.ReplaceAllString(src, "")
+	src = stripTSComments(src)
 	loc := regexp.MustCompile(`\binterface\s+` + name + `\s*\{`).FindStringIndex(src)
 	if loc == nil {
 		return nil
