@@ -34,11 +34,11 @@ import (
 //     unsafe to share across concurrent provider runs; it now flows per-run
 //     through runtime.RunOptions.SecretOutputCh instead (issue #719).
 //   - Late-wired fields (InputStore, ResumeStateStore, Replayer, SourceMgr,
-//     RepoResolver, TestGuard, CryptoDeriver, ProtectedPaths, SharedResolver)
-//     are set by daemon.go after buildRuntimes returns. Per-version
-//     executors must therefore read them live through their parent (manager)
-//     Runtime's BridgeDeps rather than from their own snapshot — see each
-//     runtime's parent back-reference.
+//     RepoResolver, TestGuard, CryptoDeriver, MCPTokenMinter, ProtectedPaths,
+//     SharedResolver) are set by daemon.go after buildRuntimes returns.
+//     Per-version executors must therefore read them live through their
+//     parent (manager) Runtime's BridgeDeps rather than from their own
+//     snapshot — see each runtime's parent back-reference.
 type BridgeDeps struct {
 	Registry     *registry.Registry
 	SecretsChain secrets.Chain
@@ -97,7 +97,8 @@ type BridgeDeps struct {
 // ResumeStateStore, Replayer, SourceMgr, RepoResolver, TestGuard,
 // CryptoDeriver) are read from live, which per-version executors point at the
 // manager's BridgeDeps so daemon wiring that happens after NewExecutor is
-// still honored; the manager passes itself.
+// still honored; the manager passes itself. MCPTokenMinter is read from the
+// same live pointer, by ApplyMCPToken rather than here.
 //
 // The provider secret-output channel is NOT wired here: it is per-run state
 // (issue #719), so the caller wires it explicitly via srv.SetSecretOutput

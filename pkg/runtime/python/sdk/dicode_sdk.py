@@ -16,8 +16,10 @@
 #                               return, dicode.*, mcp.list_tools, mcp.call
 import asyncio
 import base64
+import decimal
 import inspect
 import json
+import numbers
 import os
 import struct
 import sys
@@ -480,15 +482,28 @@ def _str_arg(name, value):
     return value
 
 
+_INT64_MIN, _INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+
 def _ts_arg(before_ts):
-    if isinstance(before_ts, bool) or not isinstance(before_ts, (int, float, type(None))):
+    if before_ts is None:
+        return 0
+    # Decimal is a numbers.Number but not registered as numbers.Real.
+    if isinstance(before_ts, bool) or not isinstance(before_ts, (numbers.Real, decimal.Decimal)):
         raise TypeError(f"before_ts must be a number, not {type(before_ts).__name__}")
-    return int(before_ts or 0)
+    try:
+        ts = int(before_ts)
+    except (ValueError, ArithmeticError):
+        raise TypeError(f"before_ts must be finite, not {before_ts!r}") from None
+    if not _INT64_MIN <= ts <= _INT64_MAX:
+        raise TypeError("before_ts is outside the int64 range")
+    return ts
 
 
 def _run_ids_arg(run_ids):
-    if isinstance(run_ids, (str, bytes, bytearray)):
-        raise TypeError(f"run_ids must be an iterable of str, not {type(run_ids).__name__}")
+    if not isinstance(run_ids, (list, tuple, set, frozenset)):
+        raise TypeError(
+            f"run_ids must be a list, tuple, set or frozenset of str, not {type(run_ids).__name__}")
     return [_str_arg("run_ids item", r) for r in run_ids]
 
 

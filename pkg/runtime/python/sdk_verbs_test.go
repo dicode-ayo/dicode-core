@@ -352,6 +352,9 @@ func TestExecute_SDKArgTypeErrors(t *testing.T) {
 	ex := rt.NewExecutor(uv)
 
 	spec := writePythonTask(t, "examples/sdk-arg-types", `
+import decimal
+import fractions
+
 async def main():
     errs = {}
 
@@ -378,23 +381,37 @@ async def main():
     record("context_int", lambda: dicode.crypto.encrypt(5, b"x"))
     await record_async("context_async_int", dicode.crypto.decrypt_async(5, b"x"))
     record("secret_delete_key", lambda: dicode.secrets_delete(9))
+    await record_async("secret_delete_async_key", dicode.secrets_delete_async(9))
     record("run_id_int", lambda: dicode.runs.pin_input(42))
     await record_async("run_id_async_int", dicode.runs.get_input_async(42))
     record("run_ids_str", lambda: dicode.runs.delete_inputs("abc"))
     record("run_ids_item_int", lambda: dicode.runs.delete_inputs(["a", 3]))
+    record("run_ids_dict", lambda: dicode.runs.delete_inputs({"a": 1}))
+    await record_async("run_ids_async_str", dicode.runs.delete_inputs_async("abc"))
+    record("resume_run_id_int", lambda: dicode.runs.delete_resume_state(42))
+    await record_async("resume_run_id_async_int", dicode.runs.delete_resume_state_async(42))
     record("before_ts_bool", lambda: dicode.runs.list_expired(before_ts=True))
     await record_async("before_ts_str", dicode.runs.list_expired_resume_state_async(before_ts="1"))
+    record("before_ts_nan", lambda: dicode.runs.list_expired(before_ts=float("nan")))
+    record("before_ts_int64", lambda: dicode.runs.list_expired(before_ts=1 << 63))
 
     ct = dicode.crypto.encrypt("verbs", bytearray(b"still-ok"))
     after = dicode.crypto.decrypt("verbs", memoryview(ct))
     dicode.secrets_set("AFTER", "ok")
     expired_none = dicode.runs.list_expired(before_ts=None)
-    return {"errs": errs, "after": after == b"still-ok", "expired_none": expired_none}
+    expired_fraction = dicode.runs.list_expired(before_ts=fractions.Fraction(4001, 2))
+    expired_decimal = dicode.runs.list_expired(before_ts=decimal.Decimal("2000.9"))
+    resume_none = dicode.runs.list_expired_resume_state(before_ts=None)
+    return {"errs": errs, "after": after == b"still-ok", "expired_none": expired_none,
+            "expired_fraction": expired_fraction, "expired_decimal": expired_decimal,
+            "resume_none": resume_none}
 `)
 	spec.Permissions = task.Permissions{Dicode: &task.DicodePermissions{
 		Crypto:          []string{"verbs"},
 		SecretsWrite:    true,
 		RunsListExpired: true,
+
+		RunsListExpiredResumeState: true,
 	}}
 	if err := reg.Register(spec); err != nil {
 		t.Fatal(err)
@@ -425,23 +442,30 @@ async def main():
 	}
 	errs, _ := m["errs"].(map[string]any)
 	for name, want := range map[string]string{
-		"secret_value":       "secret value must be a str, not int",
-		"secret_key":         "secret key must be a str, not int",
-		"secret_value_async": "secret value must be a str, not bytes",
-		"encrypt_str":        ".encode()",
-		"encrypt_int":        "plaintext must be bytes, bytearray or memoryview, not int",
-		"decrypt_int":        "ciphertext must be bytes, bytearray or memoryview, not int",
-		"encrypt_async_int":  "plaintext must be bytes",
-		"decrypt_async_str":  ".encode()",
-		"context_int":        "context must be a str, not int",
-		"context_async_int":  "context must be a str, not int",
-		"secret_delete_key":  "secret key must be a str, not int",
-		"run_id_int":         "run_id must be a str, not int",
-		"run_id_async_int":   "run_id must be a str, not int",
-		"run_ids_str":        "run_ids must be an iterable of str, not str",
-		"run_ids_item_int":   "run_ids item must be a str, not int",
-		"before_ts_bool":     "before_ts must be a number, not bool",
-		"before_ts_str":      "before_ts must be a number, not str",
+		"secret_value":            "secret value must be a str, not int",
+		"secret_key":              "secret key must be a str, not int",
+		"secret_value_async":      "secret value must be a str, not bytes",
+		"encrypt_str":             ".encode()",
+		"encrypt_int":             "plaintext must be bytes, bytearray or memoryview, not int",
+		"decrypt_int":             "ciphertext must be bytes, bytearray or memoryview, not int",
+		"encrypt_async_int":       "plaintext must be bytes",
+		"decrypt_async_str":       ".encode()",
+		"context_int":             "context must be a str, not int",
+		"context_async_int":       "context must be a str, not int",
+		"secret_delete_key":       "secret key must be a str, not int",
+		"secret_delete_async_key": "secret key must be a str, not int",
+		"run_id_int":              "run_id must be a str, not int",
+		"run_id_async_int":        "run_id must be a str, not int",
+		"run_ids_str":             "run_ids must be a list, tuple, set or frozenset of str, not str",
+		"run_ids_item_int":        "run_ids item must be a str, not int",
+		"run_ids_dict":            "run_ids must be a list, tuple, set or frozenset of str, not dict",
+		"run_ids_async_str":       "run_ids must be a list, tuple, set or frozenset of str, not str",
+		"resume_run_id_int":       "run_id must be a str, not int",
+		"resume_run_id_async_int": "run_id must be a str, not int",
+		"before_ts_bool":          "before_ts must be a number, not bool",
+		"before_ts_str":           "before_ts must be a number, not str",
+		"before_ts_nan":           "before_ts must be finite, not nan",
+		"before_ts_int64":         "before_ts is outside the int64 range",
 	} {
 		if got, _ := errs[name].(string); !strings.Contains(got, want) {
 			t.Errorf("%s TypeError = %q, want it to contain %q", name, got, want)
@@ -452,6 +476,16 @@ async def main():
 	}
 	if got := runIDs(m["expired_none"]); !slices.Contains(got, old) {
 		t.Errorf("list_expired(before_ts=None) = %v, want %s (stored_at 1000)", got, old)
+	}
+	for _, key := range []string{"expired_fraction", "expired_decimal"} {
+		if got := runIDs(m[key]); !slices.Contains(got, old) {
+			t.Errorf("%s = %v, want %s (stored_at 1000, before_ts 2000)", key, got, old)
+		}
+	}
+	if v, present := m["resume_none"]; !present {
+		t.Errorf("list_expired_resume_state(before_ts=None) result missing: %+v", m)
+	} else if _, isList := v.([]any); v != nil && !isList {
+		t.Errorf("list_expired_resume_state(before_ts=None) = %#v, want a list", v)
 	}
 	sec.mu.Lock()
 	defer sec.mu.Unlock()
