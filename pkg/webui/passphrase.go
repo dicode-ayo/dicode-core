@@ -2,14 +2,14 @@ package webui
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
+	"github.com/dicode/dicode/internal/passphrase"
 	"github.com/dicode/dicode/pkg/db"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
@@ -97,16 +97,6 @@ func (p *passphraseStore) setHashed(ctx context.Context, plaintext string, cost 
 		return "", err
 	}
 	return string(hash), nil
-}
-
-// generateRandomPassphrase produces a cryptographically random passphrase
-// (32 bytes, base64url-encoded — 43 printable characters, no padding).
-func generateRandomPassphrase() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate passphrase: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // looksLikeBcryptHash reports whether v has a bcrypt-style prefix. Used to
@@ -372,10 +362,7 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	}
 
 	// First boot with auth enabled and no passphrase — generate one.
-	plaintext, err := generateRandomPassphrase()
-	if err != nil {
-		return err
-	}
+	plaintext := passphrase.Generate()
 	hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
 	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
@@ -387,14 +374,9 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 
 	// Print the plaintext clearly to stdout — this is the operator's only
 	// chance to see it. After this function returns, the plaintext is gone.
-	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║  dicode — auth passphrase generated                         ║")
-	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %s  ║\n", plaintext)
-	fmt.Println("║                                                              ║")
-	fmt.Println("║  Save this somewhere safe. You can change it any time at    ║")
-	fmt.Println("║  /security in the web UI (requires a valid session).        ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+	passphrase.PrintBanner(os.Stdout, "dicode — auth passphrase generated", plaintext,
+		"Save this somewhere safe. You can change it any time at",
+		"/security in the web UI (requires a valid session).")
 
 	s.log.Info("auth passphrase auto-generated and stored as bcrypt hash")
 	return nil

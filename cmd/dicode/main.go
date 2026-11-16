@@ -53,6 +53,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/dicode/dicode/internal/passphrase"
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -257,28 +258,6 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 	}
 }
 
-// printResetBanner emits the new passphrase to stdout in the same
-// banner shape as pkg/webui/passphrase.go ensurePassphrase, so the
-// operator can record it. Operator-terminal output is the contract;
-// not a log call. The lgtm suppression below is intentional — CodeQL's
-// go/clear-text-logging query treats every fmt.Printf of an upstream
-// "passphrase"-named value as a leak, but here the print IS the
-// purpose: this is the only moment the operator can capture the
-// rotated value. The same pattern lives unsuppressed in
-// pkg/webui/passphrase.go ensurePassphrase only because it routes
-// through a local named "plaintext" rather than a struct field.
-func printResetBanner(value string) {
-	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║  dicode — auth passphrase reset                              ║")
-	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %s  ║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
-	fmt.Println("║                                                              ║")
-	fmt.Println("║  Restart dicode (Ctrl-C, then `dicode daemon`) for this to   ║")
-	fmt.Println("║  take effect — the running WebUI still caches the previous   ║")
-	fmt.Println("║  hash. After restart, log in at /security with this value.   ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
-}
-
 // cmdAuth implements `dicode auth <subcommand>`. Today only
 // reset-passphrase is exposed — generates a fresh WebUI passphrase,
 // stores its bcrypt hash in the daemon's kv store, and prints the
@@ -300,13 +279,10 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 		if err := remarshal(resp.Result, &result); err != nil {
 			return fmt.Errorf("decode reset result: %w", err)
 		}
-		// Hand the plaintext to a small banner printer. The intermediate
-		// local + closure match the webui auto-generation pattern in
-		// pkg/webui/passphrase.go ensurePassphrase; the indirection keeps
-		// CodeQL's clear-text-logging heuristic from flagging the
-		// struct-field path on the IPC response.
-		printResetBanner(result.Value)
-		result.Value = ""
+		passphrase.PrintBanner(os.Stdout, "dicode — auth passphrase reset", result.Value,
+			"Restart dicode (Ctrl-C, then `dicode daemon`) for this to",
+			"take effect — the running WebUI still caches the previous",
+			"hash. After restart, log in at /security with this value.")
 		return nil
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
