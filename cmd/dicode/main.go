@@ -271,7 +271,7 @@ func printResetBanner(value string) {
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  dicode — auth passphrase reset                              ║")
 	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %s  ║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
+	fmt.Printf("║  %-60s║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
 	fmt.Println("║                                                              ║")
 	fmt.Println("║  Restart dicode (Ctrl-C, then `dicode daemon`) for this to   ║")
 	fmt.Println("║  take effect — the running WebUI still caches the previous   ║")

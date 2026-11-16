@@ -6,57 +6,70 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"github.com/dicode/dicode/pkg/config"
-	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
-	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/trigger"
-	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // printedPassphrase matches the boxed plaintext line ensurePassphrase prints.
 var printedPassphrase = regexp.MustCompile(`(?m)^║\s+([A-Za-z0-9_-]+)\s+║$`)
 
-func TestEnsurePassphrase_GeneratesCanonicalLength(t *testing.T) {
-	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	defer d.Close()
-
-	reg := registry.New(d)
-	eng := trigger.New(reg, nil, zap.NewNop())
-	cfg := &config.Config{Server: config.ServerConfig{Auth: true, BcryptCost: bcrypt.MinCost}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
-
+// captureStdout returns everything fn writes to os.Stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	stdout := os.Stdout
 	os.Stdout = w
-	ensureErr := srv.ensurePassphrase(context.Background())
+	t.Cleanup(func() { os.Stdout = stdout })
+	done := make(chan []byte)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.Bytes()
+	}()
+	fn()
 	os.Stdout = stdout
 	w.Close()
-	var out bytes.Buffer
-	if _, err := io.Copy(&out, r); err != nil {
-		t.Fatal(err)
-	}
+	return string(<-done)
+}
+
+func TestEnsurePassphrase_GeneratesCanonicalLength(t *testing.T) {
+	srv := newAuthServer(t, "")
+	srv.cfg.Server.BcryptCost = bcrypt.MinCost
+
+	var ensureErr error
+	out := captureStdout(t, func() { ensureErr = srv.ensurePassphrase(context.Background()) })
 	if ensureErr != nil {
 		t.Fatalf("ensurePassphrase: %v", ensureErr)
 	}
 
-	m := printedPassphrase.FindStringSubmatch(out.String())
+	m := printedPassphrase.FindStringSubmatch(out)
 	if m == nil {
-		t.Fatalf("no passphrase line in output:\n%s", out.String())
+		t.Fatalf("no passphrase line in output:\n%s", out)
 	}
 	plaintext := m[1]
 	if len(plaintext) != 43 {
 		t.Errorf("generated passphrase len = %d; want 43 (got %q)", len(plaintext), plaintext)
 	}
 
-	stored, _ := srv.passphraseStore.get(context.Background())
+	stored, err := srv.passphraseStore.get(context.Background())
+	if err != nil {
+		t.Fatalf("read stored passphrase: %v", err)
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(stored), []byte(plaintext)); err != nil {
 		t.Errorf("printed passphrase does not verify against stored hash: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	want := utf8.RuneCountInString(lines[0])
+	for _, line := range lines {
+		if got := utf8.RuneCountInString(line); got != want {
+			t.Errorf("banner line width = %d; want %d (top border): %q", got, want, line)
+		}
 	}
 }

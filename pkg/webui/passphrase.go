@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/dicode/dicode/internal/passphrase"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/onboarding"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sync/singleflight"
@@ -361,7 +361,7 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	}
 
 	// First boot with auth enabled and no passphrase — generate one.
-	plaintext := onboarding.GeneratePassphrase()
+	plaintext := passphrase.Generate()
 	hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
 	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
@@ -374,12 +374,12 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	// Print the plaintext clearly to stdout — this is the operator's only
 	// chance to see it. After this function returns, the plaintext is gone.
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║  dicode — auth passphrase generated                         ║")
+	fmt.Println("║  dicode — auth passphrase generated                          ║")
 	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %s  ║\n", plaintext)
+	fmt.Printf("║  %-60s║\n", plaintext)
 	fmt.Println("║                                                              ║")
-	fmt.Println("║  Save this somewhere safe. You can change it any time at    ║")
-	fmt.Println("║  /security in the web UI (requires a valid session).        ║")
+	fmt.Println("║  Save this somewhere safe. You can change it any time at     ║")
+	fmt.Println("║  /security in the web UI (requires a valid session).         ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 
 	s.log.Info("auth passphrase auto-generated and stored as bcrypt hash")

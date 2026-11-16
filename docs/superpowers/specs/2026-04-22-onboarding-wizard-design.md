@@ -83,7 +83,7 @@ cmd/dicode (daemon subcommand)
 | `pkg/onboarding/cli.go` | `RunCLI(stdin, stdout) (Result, error)` — bufio-based prompts. |
 | `pkg/onboarding/browser.go` | `RunBrowser(ctx) (Result, error)` — ephemeral HTTP server + embedded HTML/JS form. |
 | `pkg/onboarding/render.go` | `RenderConfig(Result) string` (`pkg/onboarding/render.go:23`) — generates the YAML from a wizard `Result`. |
-| `pkg/onboarding/passphrase.go` | `GeneratePassphrase() string` — 32 random bytes → base64url → 43 chars. The only passphrase generator in dicode; first boot and `dicode auth reset-passphrase` use it too. |
+| `internal/passphrase/passphrase.go` | `Generate() string` — 32 random bytes → base64url → 43 chars. The only passphrase generator in dicode; `pkg/onboarding/passphrase.go` wraps it as `GeneratePassphrase()`. |
 | `pkg/onboarding/onboarding.go` | Existing file kept; add `Run(ctx, configPath) error` as the single entry point called from daemon. |
 
 ### Modified files
@@ -249,22 +249,24 @@ Emits a commented, local-only-by-default YAML file *plus* a `sources:` array ass
 ### Passphrase generation
 
 ```go
-// pkg/onboarding/passphrase.go
+// internal/passphrase/passphrase.go
 import (
     "crypto/rand"
     "encoding/base64"
 )
 
-// GeneratePassphrase returns a 43-character URL-safe base64 token
-// (32 random bytes, 256 bits of entropy).
-func GeneratePassphrase() string {
+// Generate returns a 43-character URL-safe base64 token (32 random bytes,
+// 256 bits of entropy).
+func Generate() string {
     var b [32]byte
-    _, _ = rand.Read(b[:]) // never fails since Go 1.24
+    if _, err := rand.Read(b[:]); err != nil {
+        panic(err) // crypto/rand never fails on modern kernels
+    }
     return base64.RawURLEncoding.EncodeToString(b[:])
 }
 ```
 
-Since Go 1.24 `crypto/rand.Read` never returns an error; it crashes the program on a broken entropy source.
+A `crypto/rand.Read` error means the entropy source is broken, so the generator panics rather than return a weak passphrase. `onboarding.GeneratePassphrase()` returns `passphrase.Generate()`.
 
 ### Final stdout block
 
@@ -291,7 +293,7 @@ Called after the YAML is written on *both* surfaces. Browser surface additionall
 | Test | File | Asserts |
 |---|---|---|
 | Preset shape valid | `presets_test.go` | each has non-empty name/label/url/entry_path; names unique |
-| `GeneratePassphrase` entropy | `passphrase_test.go` | 43 chars, URL-safe, 100 calls produce 100 distinct values |
+| `passphrase.Generate` entropy | `internal/passphrase/passphrase_test.go` | 43 chars, URL-safe, 100 calls produce 100 distinct values |
 | `RenderConfig` — all tasksets enabled | `render_test.go` | YAML parses via `yaml.Unmarshal`; `sources` has 3 git + 1 local; `server.auth == true`; `server.secret` matches passphrase |
 | `RenderConfig` — partial selection | `render_test.go` | only selected presets appear in `sources` |
 | `RenderConfig` — skip local dir | `render_test.go` | no `type: local` entry when LocalTasksDir is empty |

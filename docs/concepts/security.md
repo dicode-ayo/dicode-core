@@ -100,16 +100,16 @@ silently returning "none" on an error would let any login through during
 an outage. The login and passphrase-change endpoints both translate
 `passphraseSourceUnknown` → `503 Service Unavailable`.
 
-**Auto-generation on first boot**: if `server.auth: true` and no passphrase is set (neither YAML nor DB), dicode generates a cryptographically random 43-character passphrase (32 random bytes, base64url) and prints it to stdout once. Every passphrase dicode generates — first boot, the onboarding wizard, silent onboarding, and `dicode auth reset-passphrase` — comes from the same generator, `onboarding.GeneratePassphrase`, so all are 43 characters:
+**Auto-generation on first boot**: if `server.auth: true` and no passphrase is set (neither YAML nor DB), dicode generates a cryptographically random 43-character passphrase (32 random bytes, base64url) and prints it to stdout once. Every passphrase dicode generates — first boot, the onboarding wizard, silent onboarding, and `dicode auth reset-passphrase` — comes from the same generator in `internal/passphrase`, so all are 43 characters:
 
 ```text
 ╔══════════════════════════════════════════════════════════════╗
-║  dicode — auth passphrase generated                         ║
+║  dicode — auth passphrase generated                          ║
 ║                                                              ║
 ║  <43-char passphrase>                                        ║
 ║                                                              ║
-║  Save this somewhere safe. You can change it any time at    ║
-║  /security in the web UI (requires a valid session).        ║
+║  Save this somewhere safe. You can change it any time at     ║
+║  /security in the web UI (requires a valid session).         ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
