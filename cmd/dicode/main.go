@@ -283,7 +283,6 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 			"Restart dicode (Ctrl-C, then `dicode daemon`) for this to",
 			"take effect — the running WebUI still caches the previous",
 			"hash. After restart, log in at /security with this value.")
-		result.Value = ""
 		return nil
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
