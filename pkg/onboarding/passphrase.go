@@ -5,16 +5,12 @@ import (
 	"encoding/base64"
 )
 
-// GeneratePassphrase returns a 24-character URL-safe base64 token
-// (18 random bytes → ~108 bits of entropy). Used to seed the dashboard
-// login wall during first-run onboarding.
-//
-// Panics if crypto/rand is unavailable, which only happens on broken
-// systems where the daemon wouldn't work anyway.
+// GeneratePassphrase returns a 43-character URL-safe base64 token (32 random
+// bytes, 256 bits of entropy). It is the only passphrase generator: the
+// onboarding wizard, silent onboarding, first-boot auto-generation and
+// `dicode auth reset-passphrase` all use it.
 func GeneratePassphrase() string {
-	var b [18]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
-	}
+	var b [32]byte
+	_, _ = rand.Read(b[:]) // never fails since Go 1.24; it crashes the program instead
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }

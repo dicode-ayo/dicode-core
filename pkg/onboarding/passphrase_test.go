@@ -7,8 +7,8 @@ import (
 
 func TestGeneratePassphrase_Length(t *testing.T) {
 	got := GeneratePassphrase()
-	if len(got) != 24 {
-		t.Errorf("len = %d; want 24 (got %q)", len(got), got)
+	if len(got) != 43 {
+		t.Errorf("len = %d; want 43 (got %q)", len(got), got)
 	}
 }
 

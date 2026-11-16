@@ -64,8 +64,8 @@ func TestRun_Silent_WritesParseableYAML(t *testing.T) {
 	if !parsed.Server.Auth {
 		t.Error("silent default did not set server.auth")
 	}
-	if len(parsed.Server.Secret) != 24 {
-		t.Errorf("silent default passphrase len = %d; want 24", len(parsed.Server.Secret))
+	if len(parsed.Server.Secret) != 43 {
+		t.Errorf("silent default passphrase len = %d; want 43", len(parsed.Server.Secret))
 	}
 }
 

@@ -41,8 +41,8 @@ func TestRunCLI_AllDefaults_AllPresetsOn(t *testing.T) {
 	if res.Port != 8080 {
 		t.Errorf("Port = %d; want 8080", res.Port)
 	}
-	if len(res.Passphrase) != 24 {
-		t.Errorf("Passphrase len = %d; want 24", len(res.Passphrase))
+	if len(res.Passphrase) != 43 {
+		t.Errorf("Passphrase len = %d; want 43", len(res.Passphrase))
 	}
 }
 

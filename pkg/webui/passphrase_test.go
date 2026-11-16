@@ -602,26 +602,6 @@ func TestPassphraseAPI_YAMLOverrideBlocksAPIChange(t *testing.T) {
 	}
 }
 
-// ── generateRandomPassphrase ──────────────────────────────────────────────────
-
-func TestGenerateRandomPassphrase_Length(t *testing.T) {
-	p, err := generateRandomPassphrase()
-	if err != nil {
-		t.Fatalf("generateRandomPassphrase: %v", err)
-	}
-	if len(p) < 20 {
-		t.Errorf("passphrase too short: %q (%d chars)", p, len(p))
-	}
-}
-
-func TestGenerateRandomPassphrase_Unique(t *testing.T) {
-	a, _ := generateRandomPassphrase()
-	b, _ := generateRandomPassphrase()
-	if a == b {
-		t.Error("two generated passphrases should not be equal")
-	}
-}
-
 // ── DB-error fail-closed paths ────────────────────────────────────────────────
 //
 // failingDB wraps a real DB but rejects every Query — used to drive the

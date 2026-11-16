@@ -82,8 +82,8 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v; body=%q", err, rec.Body.String())
 	}
-	if len(resp.Passphrase) != 24 {
-		t.Errorf("passphrase len = %d; want 24", len(resp.Passphrase))
+	if len(resp.Passphrase) != 43 {
+		t.Errorf("passphrase len = %d; want 43", len(resp.Passphrase))
 	}
 
 	select {

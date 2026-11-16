@@ -2,15 +2,14 @@ package webui
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/onboarding"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sync/singleflight"
@@ -97,16 +96,6 @@ func (p *passphraseStore) setHashed(ctx context.Context, plaintext string, cost 
 		return "", err
 	}
 	return string(hash), nil
-}
-
-// generateRandomPassphrase produces a cryptographically random passphrase
-// (32 bytes, base64url-encoded — 43 printable characters, no padding).
-func generateRandomPassphrase() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate passphrase: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // looksLikeBcryptHash reports whether v has a bcrypt-style prefix. Used to
@@ -372,10 +361,7 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	}
 
 	// First boot with auth enabled and no passphrase — generate one.
-	plaintext, err := generateRandomPassphrase()
-	if err != nil {
-		return err
-	}
+	plaintext := onboarding.GeneratePassphrase()
 	hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
 	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)

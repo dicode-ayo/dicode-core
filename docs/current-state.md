@@ -179,6 +179,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 ### `pkg/onboarding/` 🔧
 
 - `onboarding.go` — `Required()`, `DefaultLocalConfig()` (with Docker examples), `WriteConfig()` ✅
+- `passphrase.go` — `GeneratePassphrase()`, the single passphrase generator (32 random bytes → 43 base64url chars) used by the wizard, silent onboarding, first-boot `ensurePassphrase` and `dicode auth reset-passphrase` ✅
 - Browser wizard (HTTP server + HTML page) — **not yet implemented**
 
 ### `pkg/ipc/` ✅
