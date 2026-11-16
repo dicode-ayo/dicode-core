@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/dicode/dicode/internal/passphrase"
@@ -373,14 +374,9 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 
 	// Print the plaintext clearly to stdout — this is the operator's only
 	// chance to see it. After this function returns, the plaintext is gone.
-	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║  dicode — auth passphrase generated                          ║")
-	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %-60s║\n", plaintext)
-	fmt.Println("║                                                              ║")
-	fmt.Println("║  Save this somewhere safe. You can change it any time at     ║")
-	fmt.Println("║  /security in the web UI (requires a valid session).         ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+	passphrase.PrintBanner(os.Stdout, "dicode — auth passphrase generated", plaintext,
+		"Save this somewhere safe. You can change it any time at",
+		"/security in the web UI (requires a valid session).")
 
 	s.log.Info("auth passphrase auto-generated and stored as bcrypt hash")
 	return nil

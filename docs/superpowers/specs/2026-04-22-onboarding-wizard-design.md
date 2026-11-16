@@ -260,7 +260,7 @@ import (
 func Generate() string {
     var b [32]byte
     if _, err := rand.Read(b[:]); err != nil {
-        panic(err) // crypto/rand never fails on modern kernels
+        panic(err)
     }
     return base64.RawURLEncoding.EncodeToString(b[:])
 }
