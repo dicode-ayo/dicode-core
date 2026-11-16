@@ -787,7 +787,7 @@ func (cs *ControlServer) handleAPIKeyRevokeByName(ctx context.Context, req Reque
 // The field is named "Value" rather than "Passphrase" so CodeQL's
 // go/clear-text-logging name-based source heuristic doesn't flag the
 // CLI-side print (the operator-terminal display is the contract — see
-// printResetBanner in cmd/dicode/main.go). The wire JSON tag stays
+// cmdAuth in cmd/dicode/main.go). The wire JSON tag stays
 // "value" for the same reason.
 type AuthResetPassphraseResult struct {
 	Value string `json:"value"`

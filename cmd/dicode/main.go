@@ -279,7 +279,7 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 		if err := remarshal(resp.Result, &result); err != nil {
 			return fmt.Errorf("decode reset result: %w", err)
 		}
-		passphrase.PrintBanner(os.Stdout, "dicode — auth passphrase reset", result.Value, // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
+		passphrase.PrintBanner(os.Stdout, "dicode — auth passphrase reset", result.Value,
 			"Restart dicode (Ctrl-C, then `dicode daemon`) for this to",
 			"take effect — the running WebUI still caches the previous",
 			"hash. After restart, log in at /security with this value.")
