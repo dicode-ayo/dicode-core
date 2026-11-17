@@ -114,6 +114,11 @@ jobs:
       - name: Test the IPC endpoint and the sandbox grants derived from it
         run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_NetDenyBlocksConnect|TestPythonSDK' -timeout 300s
 
+      # Clones local bare fixtures over file:// URLs; go-git's file transport
+      # runs git-upload-pack, which Git for Windows provides.
+      - name: Test cloning a local fixture over a file URL
+        run: go test ./internal/gitops/ -run '^(TestTestFixtureRemoteURL|TestCloneAtRef_PinsToTagCommit|TestCloneAtRef_FollowsAMovedRef|TestCloneAtRef_RecoversFromAnInterruptedRefresh|TestCloneAtRef_UnmovedRefLeavesTheWorktreeAlone|TestCloneAtRef_UnknownTagKeepsTheClone|TestCloneAtRef_UnknownTagOnFirstCloneIsNamed|TestCloneAtRef_FetchesATagAddedAfterTheClone)$' -timeout 300s
+
       # Both suites skip themselves when their toolchain is missing, so a green
       # `go test` alone would not prove a task ran: the grep is what asserts it.
       # uv is provisioned by the test itself, as the runtime provisions it.

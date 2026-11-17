@@ -1,5 +1,11 @@
 package gitops
 
+import (
+	"net/url"
+	"path/filepath"
+	"strings"
+)
+
 // TestFixtureRemoteURL returns a file:// URL for bareDir (an absolute path to
 // a local bare git repo) suitable for use as a git remote in tests that need
 // to exercise the real CloneAtRef/ValidateRemoteHost code path against a
@@ -7,7 +13,7 @@ package gitops
 //
 // file:// URLs are host-less by construction — go-git's file transport only
 // ever reads Endpoint.Path, never Endpoint.Host — but ValidateRemoteHost's
-// SSRF guard (wired into CloneAtRef for #489) rejects any host-less remote
+// SSRF guard (wired into CloneAtRef) rejects any host-less remote
 // as indistinguishable from an unparseable/attacker-supplied URL missing a
 // host entirely. Prepending a placeholder, obviously-fake hostname (RFC 2606
 // reserves the .invalid TLD for exactly this) satisfies the guard without
@@ -16,8 +22,15 @@ package gitops
 // http/https/ssh at config-load time), so this is purely a test-fixture
 // convenience, not a bypass.
 //
-// Shared by pkg/source/git, pkg/taskset, and pkg/webui test fixtures so the
+// Shared by internal/gitops, pkg/taskset, and pkg/webui test fixtures so the
 // hostname choice and its rationale live in exactly one place.
+//
+// A Windows drive path becomes file://test-fixture.invalid/C:/...; go-git's
+// file transport drops the slash before the drive letter.
 func TestFixtureRemoteURL(bareDir string) string {
-	return "file://test-fixture.invalid" + bareDir
+	p := filepath.ToSlash(bareDir)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return (&url.URL{Scheme: "file", Host: "test-fixture.invalid", Path: p}).String()
 }
