@@ -122,6 +122,7 @@ jobs:
           go test ./internal/gitops/ -run '^(TestTestFixtureRemoteURL|TestCloneAtRef_)' -v -timeout 300s | tee gitops.log
           grep -q -- '--- PASS: TestCloneAtRef_PinsToTagCommit' gitops.log
           grep -q -- '--- PASS: TestTestFixtureRemoteURL ' gitops.log
+          if grep -q -- '--- SKIP: TestCloneAtRef_' gitops.log; then exit 1; fi
 
       # Both suites skip themselves when their toolchain is missing, so a green
       # `go test` alone would not prove a task ran: the grep is what asserts it.

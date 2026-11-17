@@ -3,7 +3,6 @@ package gitops
 import (
 	"net/url"
 	"path/filepath"
-	"strings"
 )
 
 // TestFixtureRemoteURL returns a file:// URL for the local bare repo at
@@ -19,11 +18,9 @@ import (
 // the drive letter). Anything else panics.
 func TestFixtureRemoteURL(bareDir string) string {
 	p := filepath.ToSlash(bareDir)
-	switch {
-	case isDrivePath(p):
+	if isDrivePath(p) {
 		p = "/" + p
-	case filepath.IsAbs(bareDir) && strings.HasPrefix(p, "/"):
-	default:
+	} else if !filepath.IsAbs(bareDir) {
 		panic("gitops.TestFixtureRemoteURL: bareDir must be absolute, got " + bareDir)
 	}
 	return (&url.URL{Scheme: "file", Host: "test-fixture.invalid", Path: p}).String()
