@@ -13,9 +13,9 @@ import (
 // reads only the path. Production config never admits file:// remotes
 // (pkg/taskset.ValidateRefURL allows http/https/ssh only).
 //
-// bareDir must be absolute: a POSIX path, or a Windows drive path, which
-// becomes file://test-fixture.invalid/C:/... (go-git drops the slash before
-// the drive letter). Anything else panics.
+// bareDir must be absolute on the host OS, or a drive path (C:/... or C:\...,
+// recognised on any OS), which becomes file://test-fixture.invalid/C:/...
+// (go-git drops the slash before the drive letter). Anything else panics.
 func TestFixtureRemoteURL(bareDir string) string {
 	p := filepath.ToSlash(bareDir)
 	if isDrivePath(p) {
