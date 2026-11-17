@@ -3,11 +3,8 @@ package gitops
 import (
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
-
-var drivePath = regexp.MustCompile(`^[A-Za-z]:/`)
 
 // TestFixtureRemoteURL returns a file:// URL for the local bare repo at
 // bareDir, for tests that clone a fixture through CloneAtRef.
@@ -23,11 +20,18 @@ var drivePath = regexp.MustCompile(`^[A-Za-z]:/`)
 func TestFixtureRemoteURL(bareDir string) string {
 	p := filepath.ToSlash(bareDir)
 	switch {
-	case strings.HasPrefix(p, "/"):
-	case drivePath.MatchString(p):
+	case isDrivePath(p):
 		p = "/" + p
+	case filepath.IsAbs(bareDir) && strings.HasPrefix(p, "/"):
 	default:
 		panic("gitops.TestFixtureRemoteURL: bareDir must be absolute, got " + bareDir)
 	}
 	return (&url.URL{Scheme: "file", Host: "test-fixture.invalid", Path: p}).String()
+}
+
+// isDrivePath reports whether p starts with a drive letter, a colon and a
+// slash, independent of the host OS.
+func isDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' &&
+		(p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z')
 }

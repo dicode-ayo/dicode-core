@@ -48,3 +48,15 @@ func TestTestFixtureRemoteURL_RelativePathPanics(t *testing.T) {
 	}()
 	TestFixtureRemoteURL("repo.git")
 }
+
+func TestTestFixtureRemoteURL_RootedWithoutDrivePanicsOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("a rooted path without a drive letter is absolute everywhere but Windows")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal(`TestFixtureRemoteURL("\\repo.git") did not panic`)
+		}
+	}()
+	TestFixtureRemoteURL(`\repo.git`)
+}
