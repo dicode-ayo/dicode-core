@@ -8,21 +8,23 @@ import (
 )
 
 func TestTestFixtureRemoteURL(t *testing.T) {
-	cases := []struct {
-		name, dir, wantPath string
-	}{
-		{"posix", "/tmp/repo.git", "/tmp/repo.git"},
-		{"drive with forward slashes", "C:/Users/a/repo.git", "/C:/Users/a/repo.git"},
-		{"space", "/tmp/my repo.git", "/tmp/my repo.git"},
+	type tcase struct{ name, dir, wantURL, wantPath string }
+	cases := []tcase{
+		{"posix", "/tmp/repo.git", "file://test-fixture.invalid/tmp/repo.git", "/tmp/repo.git"},
+		{"drive with forward slashes", "C:/Users/a/repo.git", "file://test-fixture.invalid/C:/Users/a/repo.git", "/C:/Users/a/repo.git"},
+		{"space", "/tmp/my repo.git", "file://test-fixture.invalid/tmp/my%20repo.git", "/tmp/my repo.git"},
 	}
 	if runtime.GOOS == "windows" {
-		cases = append(cases, struct{ name, dir, wantPath string }{
-			"drive with backslashes", `C:\Users\a\repo.git`, "/C:/Users/a/repo.git",
+		cases = append(cases, tcase{
+			"drive with backslashes", `C:\Users\a\repo.git`, "file://test-fixture.invalid/C:/Users/a/repo.git", "/C:/Users/a/repo.git",
 		})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			u := TestFixtureRemoteURL(tc.dir)
+			if u != tc.wantURL {
+				t.Errorf("TestFixtureRemoteURL(%q) = %q, want %q", tc.dir, u, tc.wantURL)
+			}
 			ep, err := transport.NewEndpoint(u)
 			if err != nil {
 				t.Fatalf("NewEndpoint(%q): %v", u, err)
@@ -36,4 +38,13 @@ func TestTestFixtureRemoteURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTestFixtureRemoteURL_RelativePathPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal(`TestFixtureRemoteURL("repo.git") did not panic`)
+		}
+	}()
+	TestFixtureRemoteURL("repo.git")
 }

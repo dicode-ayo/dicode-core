@@ -3,34 +3,31 @@ package gitops
 import (
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
-// TestFixtureRemoteURL returns a file:// URL for bareDir (an absolute path to
-// a local bare git repo) suitable for use as a git remote in tests that need
-// to exercise the real CloneAtRef/ValidateRemoteHost code path against a
-// local fixture repo instead of a network remote.
+var drivePath = regexp.MustCompile(`^[A-Za-z]:/`)
+
+// TestFixtureRemoteURL returns a file:// URL for the local bare repo at
+// bareDir, for tests that clone a fixture through CloneAtRef.
 //
-// file:// URLs are host-less by construction — go-git's file transport only
-// ever reads Endpoint.Path, never Endpoint.Host — but ValidateRemoteHost's
-// SSRF guard (wired into CloneAtRef) rejects any host-less remote
-// as indistinguishable from an unparseable/attacker-supplied URL missing a
-// host entirely. Prepending a placeholder, obviously-fake hostname (RFC 2606
-// reserves the .invalid TLD for exactly this) satisfies the guard without
-// weakening it: no production caller can ever reach CloneAtRef with a
-// file:// URL in the first place (pkg/taskset.ValidateRefURL only allows
-// http/https/ssh at config-load time), so this is purely a test-fixture
-// convenience, not a bypass.
+// ValidateRemoteHost rejects host-less remotes, so the URL carries the
+// reserved placeholder host test-fixture.invalid; go-git's file transport
+// reads only the path. Production config never admits file:// remotes
+// (pkg/taskset.ValidateRefURL allows http/https/ssh only).
 //
-// Shared by internal/gitops, pkg/taskset, and pkg/webui test fixtures so the
-// hostname choice and its rationale live in exactly one place.
-//
-// A Windows drive path becomes file://test-fixture.invalid/C:/...; go-git's
-// file transport drops the slash before the drive letter.
+// bareDir must be absolute: a POSIX path, or a Windows drive path, which
+// becomes file://test-fixture.invalid/C:/... (go-git drops the slash before
+// the drive letter). Anything else panics.
 func TestFixtureRemoteURL(bareDir string) string {
 	p := filepath.ToSlash(bareDir)
-	if !strings.HasPrefix(p, "/") {
+	switch {
+	case strings.HasPrefix(p, "/"):
+	case drivePath.MatchString(p):
 		p = "/" + p
+	default:
+		panic("gitops.TestFixtureRemoteURL: bareDir must be absolute, got " + bareDir)
 	}
 	return (&url.URL{Scheme: "file", Host: "test-fixture.invalid", Path: p}).String()
 }
