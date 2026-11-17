@@ -10,14 +10,18 @@ import (
 func TestTestFixtureRemoteURL(t *testing.T) {
 	type tcase struct{ name, dir, wantURL, wantPath string }
 	cases := []tcase{
-		{"posix", "/tmp/repo.git", "file://test-fixture.invalid/tmp/repo.git", "/tmp/repo.git"},
 		{"drive with forward slashes", "C:/Users/a/repo.git", "file://test-fixture.invalid/C:/Users/a/repo.git", "/C:/Users/a/repo.git"},
-		{"space", "/tmp/my repo.git", "file://test-fixture.invalid/tmp/my%20repo.git", "/tmp/my repo.git"},
 	}
 	if runtime.GOOS == "windows" {
-		cases = append(cases, tcase{
-			"drive with backslashes", `C:\Users\a\repo.git`, "file://test-fixture.invalid/C:/Users/a/repo.git", "/C:/Users/a/repo.git",
-		})
+		cases = append(cases,
+			tcase{"drive with backslashes", `C:\Users\a\repo.git`, "file://test-fixture.invalid/C:/Users/a/repo.git", "/C:/Users/a/repo.git"},
+			tcase{"space", `C:\tmp\my repo.git`, "file://test-fixture.invalid/C:/tmp/my%20repo.git", "/C:/tmp/my repo.git"},
+		)
+	} else {
+		cases = append(cases,
+			tcase{"posix", "/tmp/repo.git", "file://test-fixture.invalid/tmp/repo.git", "/tmp/repo.git"},
+			tcase{"space", "/tmp/my repo.git", "file://test-fixture.invalid/tmp/my%20repo.git", "/tmp/my repo.git"},
+		)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
