@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.7](https://github.com/dicode-ayo/dicode-core/compare/v0.6.6...v0.6.7) (2026-11-19)
+
+
+### Features
+
+* **cli:** add dicode task search over configured and remote TaskSets ([#932](https://github.com/dicode-ayo/dicode-core/issues/932)) ([d00bede](https://github.com/dicode-ayo/dicode-core/commit/d00bedeecbbbd0e829eab2900bf4617ec7854071))
+
+
+### Bug Fixes
+
+* **registry:** deregister a removed source's tasks and clean its dev clones ([#922](https://github.com/dicode-ayo/dicode-core/issues/922)) ([ae93a1f](https://github.com/dicode-ayo/dicode-core/commit/ae93a1ffb7bfca842f4049331912290ef1913e05))
+
 ## [0.6.6](https://github.com/dicode-ayo/dicode-core/compare/v0.6.5...v0.6.6) (2026-10-22)
 
 
