@@ -45,3 +45,19 @@ func TestConfiguredSearchTargets_RootRefusesOtherUsersConfig(t *testing.T) {
 		t.Fatalf("err = %v, want refusal of another user's config", err)
 	}
 }
+
+func TestConfiguredSearchTargets_RefusesSymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(real, []byte("spec:\n  entries: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "dicode.yaml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := configuredSearchTargets(link)
+	if err == nil || !strings.Contains(err.Error(), "refusing to read") {
+		t.Fatalf("want refusal for symlinked config, got %v", err)
+	}
+}

@@ -20,3 +20,9 @@ func configOwnedBy(fi os.FileInfo, callerUID int) bool {
 func uidMatches(fileUID uint32, callerUID int) bool {
 	return callerUID >= 0 && uint32(callerUID) == fileUID
 }
+
+// openConfigNoFollow opens path without following a final symlink, so the
+// ownership check and the read see the same file.
+func openConfigNoFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+}

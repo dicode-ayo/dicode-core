@@ -194,17 +194,31 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 // reads a config whose owner is exactly the calling user, root included: the
 // config picks which env tokens go to which remotes.
 func configuredSearchTargets(configPath string) ([]searchTarget, error) {
-	fi, err := os.Lstat(configPath)
+	refuse := fmt.Errorf("refusing to read %s: not a regular file owned by the current user", configPath)
+	f, err := openConfigNoFollow(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("no config at %s — pass --config PATH, or --taskset to search a TaskSet directly", configPath)
 		}
+		if lfi, lerr := os.Lstat(configPath); lerr == nil && !lfi.Mode().IsRegular() {
+			return nil, refuse
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() || !configOwnedBy(fi, os.Getuid()) {
-		return nil, fmt.Errorf("refusing to read %s: not a regular file owned by the current user", configPath)
+		return nil, refuse
 	}
-	cfg, err := config.Load(configPath)
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("open config: %w", err)
+	}
+	configDir, _ := filepath.Abs(filepath.Dir(configPath))
+	cfg, err := config.LoadBytes(data, configDir)
 	if err != nil {
 		return nil, errors.New(gitops.StripURLCredentials(err.Error()))
 	}
