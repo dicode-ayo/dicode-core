@@ -217,6 +217,17 @@ tasks = dicode.list_tasks()
 runs = dicode.get_runs("send-report", limit=5)
 ```
 
+The rest of the Deno `dicode` surface is available too, each gated by its
+`permissions.dicode.*` flag (see [Orchestrator API](concepts/orchestrator-api.md)):
+
+- `dicode.secrets_set(key, value)`, `dicode.secrets_delete(key)`, `dicode.secrets.has(key)`
+- `dicode.crypto.encrypt(context, plaintext)` / `dicode.crypto.decrypt(context, ciphertext)`, which take and return `bytes`
+- `dicode.runs.list_expired(before_ts=0)`, `delete_input(run_id)`, `delete_inputs(run_ids)`,
+  `pin_input(run_id)`, `unpin_input(run_id)`, `get_input(run_id)`, `replay(run_id, task_name=None)`,
+  `list_expired_resume_state(before_ts=0)`, `delete_resume_state(run_id)`
+- `dicode.tasks.test(task_id)`, `dicode.sources.list()`, `dicode.sources.set_dev_mode(...)`,
+  `dicode.git.commit_push(...)`, `dicode.audit.query(...)`, `dicode.caps`
+
 ```yaml
 # task.yaml
 security:

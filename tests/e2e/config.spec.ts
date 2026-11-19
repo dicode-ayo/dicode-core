@@ -1,7 +1,8 @@
 /**
  * config.spec.ts
  *
- * Tests for config read/write via the REST API and UI.
+ * Tests for config read/write via the REST API and UI, plus the public
+ * /api/sdk/types declarations the browser editor loads.
  *
  * Runs in the unauthenticated project where server.auth=false. The require-auth
  * middleware is therefore a no-op and protected endpoints (/api/config/raw,
@@ -189,5 +190,35 @@ test.describe('Config UI', () => {
       { timeout: 5_000 },
     );
     await expect(page.locator('dc-config')).toBeVisible({ timeout: 10_000 });
+  });
+});
+
+// /api/sdk/types feeds the browser editor's IntelliSense. Each namespace the
+// Deno SDK implements at runtime must be declared here, or editor completion
+// silently drops it.
+test.describe('SDK type declarations', () => {
+  test('GET /api/sdk/types declares every dicode namespace the runtime implements', async ({ request }) => {
+    const res = await request.get('/api/sdk/types');
+    expect(res.ok()).toBe(true);
+    expect(res.headers()['content-type']).toContain('application/typescript');
+    const dts = await res.text();
+
+    const start = dts.indexOf('declare interface Dicode {');
+    expect(start).toBeGreaterThanOrEqual(0);
+    let depth = 0;
+    let end = start;
+    for (let i = dts.indexOf('{', start); i < dts.length; i++) {
+      if (dts[i] === '{') depth++;
+      else if (dts[i] === '}' && --depth === 0) { end = i; break; }
+    }
+    const dicode = dts.slice(start, end);
+
+    for (const member of ['caps', 'audit', 'runs', 'tasks', 'sources', 'git', 'crypto', 'secrets']) {
+      expect(dicode, `Dicode.${member}`).toMatch(new RegExp(`\\b${member}\\s*:`));
+    }
+    for (const verb of ['list_expired', 'delete_inputs', 'get_input', 'replay', 'delete_resume_state', 'set_dev_mode', 'commit_push']) {
+      expect(dicode, `Dicode.*.${verb}`).toMatch(new RegExp(`\\b${verb}\\s*:`));
+    }
+    expect(dicode).toMatch(/run_task\s*:[^\n]*mcpContext/);
   });
 });

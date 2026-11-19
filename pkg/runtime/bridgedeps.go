@@ -33,11 +33,12 @@ import (
 //     snapshotted before the first provider invocation ever set it) and
 //     unsafe to share across concurrent provider runs; it now flows per-run
 //     through runtime.RunOptions.SecretOutputCh instead (issue #719).
-//   - Late-wired fields (InputStore, Replayer, SourceMgr, RepoResolver,
-//     TestGuard, ProtectedPaths, SharedResolver) are set by daemon.go after
-//     buildRuntimes returns. Per-version executors must therefore read them
-//     live through their parent (manager) Runtime's BridgeDeps rather than
-//     from their own snapshot — see each runtime's parent back-reference.
+//   - Late-wired fields (InputStore, ResumeStateStore, Replayer, SourceMgr,
+//     RepoResolver, TestGuard, CryptoDeriver, MCPTokenMinter, ProtectedPaths,
+//     SharedResolver) are set by daemon.go after buildRuntimes returns.
+//     Per-version executors must therefore read them live through their
+//     parent (manager) Runtime's BridgeDeps rather than from their own
+//     snapshot — see each runtime's parent back-reference.
 type BridgeDeps struct {
 	Registry     *registry.Registry
 	SecretsChain secrets.Chain
@@ -75,6 +76,11 @@ type BridgeDeps struct {
 	// MCPTokenEnvName then gets whatever the secrets chain resolves for that
 	// name, same as before this feature existed.
 	MCPTokenMinter MCPTokenMinter
+	// CryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
+	// declare permissions.dicode.crypto. Nil disables crypto IPC. The Deno
+	// runtime leaves this nil and sets its deriver on each IPC server itself
+	// (Runtime.SetCryptoHandler).
+	CryptoDeriver ipc.SubKeyDeriver
 	// ProtectedPaths are files (dicode.lock, dicode.yaml) that hold approval
 	// state and must never be writable by a task, even when a broad write
 	// grant covers their directory. Deno emits them as --deny-write flags;
@@ -87,17 +93,19 @@ type BridgeDeps struct {
 //
 // Construction-time dependencies (IPCSecret, Registry, DB, Log, Engine,
 // Gateway, SecretsManager) are read from the receiver — the snapshot each
-// runtime's NewExecutor made. Late-wired capabilities (InputStore, Replayer,
-// SourceMgr, RepoResolver, TestGuard) are read from live, which per-version
-// executors point at the manager's BridgeDeps so daemon wiring that happens
-// after NewExecutor is still honored; the manager passes itself.
+// runtime's NewExecutor made. Late-wired capabilities (InputStore,
+// ResumeStateStore, Replayer, SourceMgr, RepoResolver, TestGuard,
+// CryptoDeriver) are read from live, which per-version executors point at the
+// manager's BridgeDeps so daemon wiring that happens after NewExecutor is
+// still honored; the manager passes itself. MCPTokenMinter is read from the
+// same live pointer, by ApplyMCPToken rather than here.
 //
 // The provider secret-output channel is NOT wired here: it is per-run state
 // (issue #719), so the caller wires it explicitly via srv.SetSecretOutput
 // after this returns, using the channel from that run's RunOptions.
 //
-// Runtime-specific capabilities are wired by the caller afterwards (Deno
-// adds SetCryptoHandler); all setters are inert until srv.Start.
+// Deno leaves CryptoDeriver nil and calls srv.SetCryptoHandler itself after
+// this returns; all setters are inert until srv.Start.
 func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[string]string, input any, red *secrets.Redactor, live *BridgeDeps) *ipc.Server {
 	srv := ipc.New(runID, spec.ID, d.IPCSecret, d.Registry, d.DB, params, input, d.Log, spec, d.Engine)
 	srv.SetGateway(d.Gateway)
@@ -114,6 +122,9 @@ func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[stri
 	}
 	if g := live.TestGuard; g != nil {
 		srv.SetTestGuard(g)
+	}
+	if c := live.CryptoDeriver; c != nil {
+		srv.SetCryptoHandler(c)
 	}
 	return srv
 }
@@ -177,6 +188,10 @@ func (d *BridgeDeps) SetRepoResolver(r ipc.RepoPathResolver) { d.RepoResolver = 
 // SetTestGuard wires the approval gate's veto for dicode.tasks.test into
 // every per-run IPC server. Nil means allow; mirrors the SetReplayer wiring.
 func (d *BridgeDeps) SetTestGuard(g func(taskID string) error) { d.TestGuard = g }
+
+// SetCryptoDeriver wires the SubKeyDeriver that serves dicode.crypto.{encrypt,
+// decrypt} on every per-run IPC server built through NewIPCServer.
+func (d *BridgeDeps) SetCryptoDeriver(c ipc.SubKeyDeriver) { d.CryptoDeriver = c }
 
 // SetProtectedPaths records files that no task may ever write (dicode.lock,
 // dicode.yaml — the approval-gate state); the deny always wins over any broad

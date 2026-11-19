@@ -342,7 +342,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return err
 	}
-	wireCryptoIPC(secretsChain, denoRT, log)
+	wireCryptoIPC(secretsChain, denoRT, pythonRT, log)
 
 	// 9.5. Audit-log retention (#45).
 	auditStore, auditRetentionDays := initAuditPruning(ctx, cfg, database, log)
@@ -1131,7 +1131,7 @@ func (a resumerAdapter) ResumeRun(ctx context.Context, token string, input []byt
 // so buildin tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt
 // blobs via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the
 // encrypt/decrypt operations are exposed.
-func wireCryptoIPC(secretsChain secrets.Chain, denoRT *denoruntime.Runtime, log *zap.Logger) {
+func wireCryptoIPC(secretsChain secrets.Chain, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) {
 	var cryptoDeriver secrets.SubKeyDeriver
 	for _, p := range secretsChain {
 		if d, ok := p.(secrets.SubKeyDeriver); ok {
@@ -1143,6 +1143,7 @@ func wireCryptoIPC(secretsChain secrets.Chain, denoRT *denoruntime.Runtime, log 
 		log.Warn("crypto IPC handler: no SubKeyDeriver available in secrets chain — dicode.crypto.{encrypt,decrypt} disabled")
 	} else {
 		denoRT.SetCryptoHandler(cryptoDeriver)
+		pythonRT.SetCryptoDeriver(cryptoDeriver)
 	}
 }
 
