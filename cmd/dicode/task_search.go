@@ -370,7 +370,7 @@ func searchTaskSet(ctx context.Context, cacheDir string, t searchTarget, terms [
 			branch, derr := gitops.DefaultBranch(ctx, ref.URL)
 			if derr == nil && branch != ref.TrackedName() {
 				headRef := &taskset.Ref{URL: ref.URL, Branch: branch}
-				if taskset.ValidateRefTarget(headRef) == nil {
+				if taskset.ValidateBranchName(branch, "") == nil && taskset.ValidateRefTarget(headRef) == nil {
 					ref = headRef
 					dir, err = r.Pull(ctx, ref)
 				}
