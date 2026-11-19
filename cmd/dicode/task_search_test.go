@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -506,9 +507,9 @@ func TestExplicitSearchTargets_OneRemotePredicate(t *testing.T) {
 	}
 
 	remoteSchemeAllowed = func(string) bool { return false }
-	_, err = explicitSearchTargets([]string{"git@github.com:org/repo.git"})
-	if err == nil || !strings.Contains(err.Error(), "no such file") {
-		t.Fatalf("SCP value with a predicate that rejects it should be a local path: err=%v", err)
+	targets, err = explicitSearchTargets([]string{"git@github.com:org/repo.git"})
+	if err != nil || len(targets) != 1 || targets[0].ref.IsGit() || targets[0].err == nil || !strings.Contains(targets[0].err.Error(), "no such file") {
+		t.Fatalf("SCP value with a predicate that rejects it should be a local path: targets=%+v err=%v", targets, err)
 	}
 }
 
@@ -821,5 +822,60 @@ func TestTasksetLabel(t *testing.T) {
 		if got := tasksetLabel(in); got != want {
 			t.Errorf("tasksetLabel(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestTaskSearch_MissingTaskSetPathKeepsOtherResults(t *testing.T) {
+	dir := t.TempDir()
+	writeSearchTaskSet(t, dir, searchFixtureTasks)
+	missing := filepath.Join(t.TempDir(), "gone")
+
+	out, stderr, err := runSearch(t, "backup", "--taskset", missing, "--taskset", dir, "--json")
+	if err == nil || !strings.Contains(err.Error(), "1 of 2 TaskSets") {
+		t.Fatalf("err = %v, want partial failure", err)
+	}
+	if !strings.Contains(stderr, missing) || !strings.Contains(stderr, "no such file") {
+		t.Fatalf("stderr = %q, want the missing path reported", stderr)
+	}
+	var rows []map[string]any
+	if jerr := json.Unmarshal([]byte(out), &rows); jerr != nil {
+		t.Fatalf("decode %q: %v", out, jerr)
+	}
+	if got := resultIDs(rows); len(got) != 1 || got[0] != filepath.Base(dir)+"/db-backup" {
+		t.Fatalf("got %v, want the valid TaskSet's match", got)
+	}
+}
+
+func TestTaskSearch_ConfiguredLocalLocationIsAbsolute(t *testing.T) {
+	root := t.TempDir()
+	writeSearchTaskSet(t, filepath.Join(root, "tasks"), searchFixtureTasks)
+	cfgPath := filepath.Join(root, "dicode.yaml")
+	cfg := "data_dir: " + filepath.Join(root, "data") + "\n" +
+		"spec:\n  entries:\n    mytasks:\n      ref:\n        path: ./tasks/taskset.yaml\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	rows := searchJSON(t, "backup", "--config", cfgPath)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %v", rows)
+	}
+	if want := filepath.Join(root, "tasks", "taskset.yaml"); rows[0]["location"] != want {
+		t.Fatalf("location = %v, want %s", rows[0]["location"], want)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestTaskSearch_TextOutputReturnsWriteError(t *testing.T) {
+	dir := t.TempDir()
+	writeSearchTaskSet(t, dir, searchFixtureTasks)
+
+	err := runTaskSearch(context.Background(), []string{"backup", "--taskset", dir}, failingWriter{}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("err = %v, want the write error", err)
 	}
 }

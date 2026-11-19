@@ -68,6 +68,9 @@ type searchTarget struct {
 	// untrusted strips every token_env declared inside the TaskSet.
 	untrusted        bool
 	allowedTokenEnvs []string
+	// err, when set, is reported as this target's failure instead of
+	// resolving it.
+	err error
 }
 
 func cmdTaskSearch(args []string) error {
@@ -171,9 +174,13 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 	} else if len(results) == 0 {
 		fmt.Fprintf(stderr, "no tasks match %q\n", strings.Join(terms, " "))
 	} else {
-		fmt.Fprintf(stdout, "%-40s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
+		if _, err := fmt.Fprintf(stdout, "%-40s %-30s %s\n", "ID", "NAME", "DESCRIPTION"); err != nil {
+			return err
+		}
 		for _, r := range results {
-			fmt.Fprintf(stdout, "%-40s %-30s %s\n", cleanText(r.ID), orDash(cleanText(r.Name)), orDash(oneLine(r.Description, 60)))
+			if _, err := fmt.Fprintf(stdout, "%-40s %-30s %s\n", cleanText(r.ID), orDash(cleanText(r.Name)), orDash(oneLine(r.Description, 60))); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -183,8 +190,9 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 	return nil
 }
 
-// configuredSearchTargets lists the TaskSets dicode.yaml configures. Like
-// cliDataDirFor, it only reads a config the calling user owns.
+// configuredSearchTargets lists the TaskSets dicode.yaml configures. It only
+// reads a config whose owner is exactly the calling user, root included: the
+// config picks which env tokens go to which remotes.
 func configuredSearchTargets(configPath string) ([]searchTarget, error) {
 	fi, err := os.Lstat(configPath)
 	if err != nil {
@@ -193,7 +201,7 @@ func configuredSearchTargets(configPath string) ([]searchTarget, error) {
 		}
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() || !ownedByCurrentUser(fi) {
+	if !fi.Mode().IsRegular() || !configOwnedBy(fi, os.Getuid()) {
 		return nil, fmt.Errorf("refusing to read %s: not a regular file owned by the current user", configPath)
 	}
 	cfg, err := config.Load(configPath)
@@ -216,9 +224,11 @@ func configuredSearchTargets(configPath string) ([]searchTarget, error) {
 	targets := make([]searchTarget, 0, len(names))
 	for _, name := range names {
 		e := cfg.Spec.Entries[name]
-		loc := e.Ref.Path
+		var loc string
 		if e.Ref.IsGit() {
 			loc = gitops.StripURLCredentials(e.Ref.URL)
+		} else if loc, err = filepath.Abs(e.Ref.Path); err != nil {
+			return nil, err
 		}
 		targets = append(targets, searchTarget{
 			label:            name,
@@ -268,14 +278,15 @@ func parseExplicitTargets(values []string) ([]searchTarget, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := os.Stat(abs); err != nil {
-				return nil, fmt.Errorf("--taskset %s: %w", v, err)
-			}
-			targets = append(targets, searchTarget{
+			t := searchTarget{
 				label:    tasksetLabel(abs),
 				location: abs,
 				ref:      &taskset.Ref{Path: abs},
-			})
+			}
+			if _, err := os.Stat(abs); err != nil {
+				t.err = err
+			}
+			targets = append(targets, t)
 			continue
 		}
 		url, refName := splitRefSuffix(v)
@@ -355,6 +366,9 @@ func pathLabel(loc string) string {
 }
 
 func searchTaskSet(ctx context.Context, cacheDir string, t searchTarget, terms []string) ([]searchResult, []string, error) {
+	if t.err != nil {
+		return nil, nil, t.err
+	}
 	r := taskset.NewResolver(cacheDir, false, zap.NewNop())
 	r.SetAllowedTokenEnvs(t.allowedTokenEnvs)
 	r.SetUntrustedRoot(t.untrusted)
