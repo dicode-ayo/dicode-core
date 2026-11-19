@@ -52,10 +52,15 @@ test.describe('dicode task search (CLI)', () => {
     const configPath = requiredEnv('DICODE_E2E_CONFIG_PATH');
     const { stdout } = await search(['HELLO', 'manual', '--config', configPath, '--json']);
 
+    // Other specs may add sources to the shared config, so only the fixture
+    // row is pinned.
     const rows = JSON.parse(stdout) as Record<string, string>[];
-    expect(rows).toHaveLength(1);
-    expect(Object.keys(rows[0]).sort()).toEqual(JSON_KEYS);
-    expect(rows[0]).toMatchObject({
+    for (const row of rows) {
+      expect(Object.keys(row).sort()).toEqual(JSON_KEYS);
+    }
+    const fixture = rows.filter((r) => r.id === 'e2e-tests/hello-manual');
+    expect(fixture).toHaveLength(1);
+    expect(fixture[0]).toMatchObject({
       source: 'e2e-tests',
       id: 'e2e-tests/hello-manual',
       name: 'Hello Manual',

@@ -134,7 +134,7 @@ func main() {
 	}
 
 	// `task search` reads TaskSets directly, so it needs no daemon.
-	if os.Args[1] == "task" && len(os.Args) > 2 && os.Args[2] == "search" {
+	if isNoDaemonTaskSearch(os.Args[1:]) {
 		if err := cmdTaskSearch(os.Args[3:]); err != nil {
 			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
 			os.Exit(1)
@@ -587,8 +587,6 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 			return err
 		}
 		return cmdTaskTest(c, args[1:])
-	case "search":
-		return cmdTaskSearch(args[1:])
 	case "create":
 		return cmdTaskCreate(c, args[1:])
 	case "edit":

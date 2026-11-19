@@ -19,7 +19,7 @@ dicode task search <query...> [--taskset <git-url-or-path>[@ref]]... [--config P
 **Sources.**
 
 - With no `--taskset`, every source in `spec.entries` of `dicode.yaml` is searched (local and git; `--config` names a different file, default `./dicode.yaml`). The config is only read when it is a regular file owned by the calling user. Git sources honour the same `ref.auth.token_env`, `source_security.allowed_token_envs`, and `source_security.allow_internal_hosts` settings the daemon does.
-- `--taskset` (repeatable) searches the named TaskSets **instead of** the configured ones — this is how you browse a remote or community TaskSet before adding it. A value with a scheme (`https://`, `http://`, `ssh://`) or in SCP form (`git@host:org/repo.git`) is a git remote; anything else is a local path to a `taskset.yaml` or the directory holding one. A git remote's `taskset.yaml` is read from the repo root. `@ref` selects a branch or tag: the branch is tried first, then a tag of that name; with no `@ref` the `main` branch is used. `--taskset` never carries credentials of its own and is subject to the default SSRF guard (internal hosts are refused).
+- `--taskset` (repeatable) searches the named TaskSets **instead of** the configured ones — this is how you browse a remote or community TaskSet before adding it. A value with a scheme (`https://`, `http://`, `ssh://`) or in SCP form (`git@host:org/repo.git`) is a git remote; anything else is a local path to a `taskset.yaml` or the directory holding one. A git remote's `taskset.yaml` is read from the repo root. `@ref` selects a branch or tag: the branch is tried first, then a tag of that name; with no `@ref` the `main` branch is used. `--taskset` never uses credentials: it carries none of its own, and every `ref.auth.token_env` declared by the TaskSet's own entries is ignored — a local path included, since it may be an untrusted checkout — so a TaskSet you are only browsing cannot have your environment's tokens sent to a host it names. It is subject to the default SSRF guard (internal hosts are refused).
 
 Git TaskSets are fetched with go-git into a temporary directory that is removed when the command exits; your sources are never written. (Loading `dicode.yaml` for the default sources creates `<data_dir>/ai-tasks/` if it is missing, exactly as the daemon's config load does; `--taskset` alone does not read the config.) Credentials in a URL's userinfo are stripped from every URL and error the command prints.
 
@@ -30,7 +30,7 @@ ID                                       NAME                           DESCRIPT
 community/slack-digest                   Slack Daily Digest             Posts a digest of the day's messages to a channel.
 ```
 
-`ID` is `<taskset>/<task-id>`: for a configured source, the `dicode.yaml` entry key (the id the daemon registers); for `--taskset`, the last element of the URL or path (minus `.git`, or the parent directory for a `taskset.yaml` path). Descriptions are cut to one line of 60 characters. When nothing matches, stdout is empty and `no tasks match "<query>"` is written to stderr.
+`ID` is `<taskset>/<task-id>`: for a configured source, the `dicode.yaml` entry key (the id the daemon registers); for `--taskset`, the last element of the URL or path (minus `.git`, or the parent directory for a `taskset.yaml` path); when two `--taskset` values share that name, later ones get `-2`, `-3`, … in flag order. Descriptions are cut to one line of 60 characters. When nothing matches, stdout is empty and `no tasks match "<query>"` is written to stderr.
 
 `--json` prints a JSON array (`[]` when nothing matches). Every object carries the same keys, empty strings when unknown:
 
@@ -42,7 +42,7 @@ community/slack-digest                   Slack Daily Digest             Posts a 
 | `description` | resolved `description` (full text) |
 | `location` | the TaskSet's git URL (credentials stripped) or absolute local path |
 | `ref` | the branch or tag searched (git only) |
-| `commit` | the commit the task was read at (git only) |
+| `commit` | the HEAD commit of the TaskSet's own repo (git only) — for a task pulled in from another repo by a nested ref, this is still the root TaskSet's commit |
 
 **Exit status.** `0` on success, including when nothing matches. Non-zero on bad usage (no query, unknown flag, missing flag value), a missing or untrusted config, or when any TaskSet could not be fetched or parsed — results from the TaskSets that did resolve are still printed. Per-entry load failures inside a TaskSet are warnings on stderr and do not change the exit status.
 

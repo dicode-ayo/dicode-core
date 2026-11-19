@@ -61,6 +61,9 @@ type searchTarget struct {
 	// refFallback, when set, is retried as a tag after a branch lookup finds
 	// no such ref on the remote.
 	refFallback string
+	// untrusted strips every token_env declared inside the TaskSet.
+	untrusted        bool
+	allowedTokenEnvs []string
 }
 
 func cmdTaskSearch(args []string) error {
@@ -94,7 +97,7 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 		case a == "--json":
 			asJSON = true
 		case a == "--taskset" || a == "--config":
-			if i+1 >= len(args) || args[i+1] == "" {
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
 				return fmt.Errorf("%s requires a value\n%s", a, taskSearchUsage)
 			}
 			if a == "--taskset" {
@@ -111,6 +114,9 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 			tasksets = append(tasksets, v)
 		case strings.HasPrefix(a, "--config="):
 			configPath = strings.TrimPrefix(a, "--config=")
+			if configPath == "" {
+				return fmt.Errorf("--config requires a value\n%s", taskSearchUsage)
+			}
 		default:
 			return fmt.Errorf("unknown flag %q\n%s", a, taskSearchUsage)
 		}
@@ -210,18 +216,50 @@ func configuredSearchTargets(configPath string) ([]searchTarget, error) {
 		if e.Ref.IsGit() {
 			loc = gitops.StripURLCredentials(e.Ref.URL)
 		}
-		targets = append(targets, searchTarget{label: name, location: loc, ref: e.Ref, overrides: e.Overrides})
+		targets = append(targets, searchTarget{
+			label:            name,
+			location:         loc,
+			ref:              e.Ref,
+			overrides:        e.Overrides,
+			allowedTokenEnvs: cfg.SourceSecurity.AllowedTokenEnvs,
+		})
 	}
 	return targets, nil
 }
 
 // explicitSearchTargets turns --taskset values into targets. A value is a git
 // remote when it has a scheme or is SCP shorthand; anything else is a local
-// path, which takes no @ref.
+// path, which takes no @ref. Every --taskset is untrusted, local paths
+// included: credentials named by its own entries are never used. Labels that
+// share a basename get -2, -3, ... in flag order.
 func explicitSearchTargets(values []string) ([]searchTarget, error) {
+	targets, err := parseExplicitTargets(values)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]int{}
+	for i := range targets {
+		base := targets[i].label
+		seen[base]++
+		if n := seen[base]; n > 1 {
+			label := fmt.Sprintf("%s-%d", base, n)
+			for seen[label] > 0 {
+				n++
+				label = fmt.Sprintf("%s-%d", base, n)
+			}
+			seen[base] = n
+			seen[label]++
+			targets[i].label = label
+		}
+		targets[i].untrusted = true
+	}
+	return targets, nil
+}
+
+func parseExplicitTargets(values []string) ([]searchTarget, error) {
 	targets := make([]searchTarget, 0, len(values))
 	for _, v := range values {
-		if !strings.Contains(v, "://") && !taskset.IsAllowedRefScheme(v) {
+		if !isRemoteTaskSet(v) {
 			abs, err := filepath.Abs(v)
 			if err != nil {
 				return nil, err
@@ -253,6 +291,12 @@ func explicitSearchTargets(values []string) ([]searchTarget, error) {
 		})
 	}
 	return targets, nil
+}
+
+// isRemoteTaskSet reports whether a --taskset value names a git remote: it
+// has a scheme, or remoteSchemeAllowed accepts it (SCP shorthand).
+func isRemoteTaskSet(v string) bool {
+	return strings.Contains(v, "://") || remoteSchemeAllowed(v)
 }
 
 // splitRefSuffix splits a trailing @ref off a git URL. Only an @ after the
@@ -294,15 +338,30 @@ func tasksetLabel(loc string) string {
 
 func searchTaskSet(ctx context.Context, cacheDir string, t searchTarget, terms []string) ([]searchResult, []string, error) {
 	r := taskset.NewResolver(cacheDir, false, zap.NewNop())
+	r.SetAllowedTokenEnvs(t.allowedTokenEnvs)
+	r.SetUntrustedRoot(t.untrusted)
 	ref := t.ref
-	resolved, failures, err := r.Resolve(ctx, t.label, ref, nil, t.overrides, nil)
-	if err != nil && t.refFallback != "" && errors.Is(err, gitops.ErrRefNotFound) {
-		ref = &taskset.Ref{URL: t.ref.URL, Tag: t.refFallback}
-		if verr := taskset.ValidateRefTarget(ref); verr != nil {
+	var commit string
+	if ref.IsGit() {
+		// Pulling first fills the resolver's clone cache, so Resolve reuses
+		// this clone and commit names the root TaskSet's checkout.
+		dir, err := r.Pull(ctx, ref)
+		if err != nil && t.refFallback != "" && errors.Is(err, gitops.ErrRefNotFound) {
+			tagRef := &taskset.Ref{URL: t.ref.URL, Tag: t.refFallback}
+			if verr := taskset.ValidateRefTarget(tagRef); verr != nil {
+				return nil, nil, err
+			}
+			ref = tagRef
+			dir, err = r.Pull(ctx, ref)
+		}
+		if err != nil {
 			return nil, nil, err
 		}
-		resolved, failures, err = r.Resolve(ctx, t.label, ref, nil, t.overrides, nil)
+		if c, _, herr := gitops.HeadInfo(dir); herr == nil {
+			commit = c
+		}
 	}
+	resolved, failures, err := r.Resolve(ctx, t.label, ref, nil, t.overrides, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -328,9 +387,7 @@ func searchTaskSet(ctx context.Context, cacheDir string, t searchTarget, terms [
 		}
 		if ref.IsGit() {
 			res.Ref = ref.TrackedName()
-			if commit, _, err := gitops.HeadInfo(rt.TaskDir); err == nil {
-				res.Commit = commit
-			}
+			res.Commit = commit
 		}
 		out = append(out, res)
 	}
@@ -365,4 +422,10 @@ func oneLine(s string, max int) string {
 		return string(r[:max-1]) + "…"
 	}
 	return s
+}
+
+// isNoDaemonTaskSearch reports whether args (os.Args[1:]) invoke
+// `task search`, which main runs before dialing the daemon.
+func isNoDaemonTaskSearch(args []string) bool {
+	return len(args) > 1 && args[0] == "task" && args[1] == "search"
 }

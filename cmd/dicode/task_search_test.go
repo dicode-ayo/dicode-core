@@ -4,16 +4,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
 	gogit "github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/storer"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/server"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 
 	"github.com/dicode/dicode/internal/gitops"
 )
@@ -396,8 +407,326 @@ func TestSplitRefSuffix(t *testing.T) {
 	}
 }
 
-func TestTaskSearch_DispatchedUnderTask(t *testing.T) {
-	if err := cmdTask(nil, []string{"search"}); err == nil || !strings.Contains(err.Error(), "usage: dicode task search") {
-		t.Fatalf("cmdTask search = %v", err)
+func TestIsNoDaemonTaskSearch(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"task", "search"}, true},
+		{[]string{"task", "search", "slack", "--json"}, true},
+		{[]string{"task"}, false},
+		{[]string{"task", "test", "search"}, false},
+		{[]string{"search"}, false},
+	} {
+		if got := isNoDaemonTaskSearch(tc.args); got != tc.want {
+			t.Errorf("isNoDaemonTaskSearch(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+func TestTaskSearch_FlagValues(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"x", "--config="}, "--config requires a value"},
+		{[]string{"x", "--config", ""}, "--config requires a value"},
+		{[]string{"x", "--taskset", "--json"}, "--taskset requires a value"},
+		{[]string{"x", "--config", "--json"}, "--config requires a value"},
+	} {
+		_, _, err := runSearch(t, tc.args...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("args %q: err = %v, want %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+func TestExplicitSearchTargets_DisambiguatesLabels(t *testing.T) {
+	root := t.TempDir()
+	var paths []string
+	for _, sub := range []string{"a", "b", "c"} {
+		p := filepath.Join(root, sub, "tasks")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	tasks2 := filepath.Join(root, "d", "tasks-2")
+	if err := os.MkdirAll(tasks2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := explicitSearchTargets([]string{
+		"https://example.com/a/tasks.git", paths[0], tasks2, paths[1], "https://example.com/b/tasks.git",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, tg := range targets {
+		got = append(got, tg.label)
+		if !tg.untrusted {
+			t.Errorf("%s: --taskset target must be untrusted", tg.location)
+		}
+	}
+	if want := "tasks,tasks-2,tasks-2-2,tasks-3,tasks-4"; strings.Join(got, ",") != want {
+		t.Fatalf("labels = %v, want %s", got, want)
+	}
+}
+
+func TestExplicitSearchTargets_OneRemotePredicate(t *testing.T) {
+	prev := remoteSchemeAllowed
+	t.Cleanup(func() { remoteSchemeAllowed = prev })
+
+	remoteSchemeAllowed = func(u string) bool { return u == "fixture-remote" || prev(u) }
+	targets, err := explicitSearchTargets([]string{"fixture-remote"})
+	if err != nil || len(targets) != 1 || targets[0].ref.URL != "fixture-remote" {
+		t.Fatalf("widened predicate not used to classify: targets=%+v err=%v", targets, err)
+	}
+
+	remoteSchemeAllowed = func(string) bool { return false }
+	_, err = explicitSearchTargets([]string{"git@github.com:org/repo.git"})
+	if err == nil || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("SCP value with a predicate that rejects it should be a local path: err=%v", err)
+	}
+}
+
+func TestTaskSearch_SameBasenameTaskSetsKeepDistinctIDs(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a", "tasks")
+	b := filepath.Join(root, "b", "tasks")
+	writeSearchTaskSet(t, a, searchFixtureTasks[2:])
+	writeSearchTaskSet(t, b, searchFixtureTasks[2:])
+
+	rows := searchJSON(t, "hello", "--taskset", a, "--taskset", b)
+	if got := strings.Join(resultIDs(rows), ","); got != "tasks-2/hello,tasks/hello" {
+		t.Fatalf("ids = %s", got)
+	}
+}
+
+// commitBareRepo creates a bare repo whose main branch holds what write puts
+// in the worktree, and returns the bare dir.
+func commitBareRepo(t *testing.T, write func(dir string)) string {
+	t.Helper()
+	main := plumbing.NewBranchReferenceName("main")
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	if _, err := gogit.PlainInitWithOptions(bare, &gogit.PlainInitOptions{
+		Bare: true, InitOptions: gogit.InitOptions{DefaultBranch: main},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wtPath := t.TempDir()
+	repo, err := gogit.PlainInitWithOptions(wtPath, &gogit.PlainInitOptions{InitOptions: gogit.InitOptions{DefaultBranch: main}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateRemote(&gogitconfig.RemoteConfig{Name: "origin", URLs: []string{bare}}); err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(wtPath)
+	if err := wt.AddGlob("."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("seed", &gogit.CommitOptions{
+		All: true, Author: &object.Signature{Name: "t", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Push(&gogit.PushOptions{RemoteName: "origin"}); err != nil {
+		t.Fatal(err)
+	}
+	return bare
+}
+
+func bareHead(t *testing.T, bare string) string {
+	t.Helper()
+	repo, err := gogit.PlainOpen(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head.Hash().String()
+}
+
+type fixedLoader struct{ s storer.Storer }
+
+func (l fixedLoader) Load(*transport.Endpoint) (storer.Storer, error) { return l.s, nil }
+
+// httpGitRemote serves bare over smart HTTP on loopback, permits loopback in
+// the SSRF guard, and records every Authorization header it receives.
+func httpGitRemote(t *testing.T, bare string) (url string, authSeen func() []string) {
+	t.Helper()
+	srv := server.NewServer(fixedLoader{filesystem.NewStorage(osfs.New(bare), cache.NewObjectLRUDefault())})
+	var mu sync.Mutex
+	var seen []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a := r.Header.Get("Authorization"); a != "" {
+			mu.Lock()
+			seen = append(seen, a)
+			mu.Unlock()
+		}
+		ep, err := transport.NewEndpoint("http://fixture/repo.git")
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		sess, err := srv.NewUploadPackSession(ep, nil)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs"):
+			ar, err := sess.AdvertisedReferencesContext(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			_, _ = io.WriteString(w, "001e# service=git-upload-pack\n0000")
+			_ = ar.Encode(w)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack"):
+			req := packp.NewUploadPackRequest()
+			if err := req.Decode(r.Body); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			resp, err := sess.UploadPack(r.Context(), req)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+			_ = resp.Encode(w)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+
+	allow, err := gitops.ParseAllowlist([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitops.SetInternalHostAllowlist(allow)
+	t.Cleanup(func() { gitops.SetInternalHostAllowlist(nil) })
+
+	return ts.URL + "/repo.git", func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+// singleTaskRepo is a bare repo whose root is one task.
+func singleTaskRepo(t *testing.T) string {
+	t.Helper()
+	return commitBareRepo(t, func(dir string) {
+		yml := "apiVersion: dicode/v1\nkind: Task\nname: Nested Remote\ndescription: pulled from another repo\nruntime: deno\ntrigger:\n  manual: true\n"
+		if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(yml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async () => {};\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// appendEntry adds a raw entry to a taskset.yaml written by writeSearchTaskSet.
+func appendEntry(t *testing.T, tsPath, entry string) {
+	t.Helper()
+	f, err := os.OpenFile(tsPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTaskSearch_CommitIsRootTaskSetHead(t *testing.T) {
+	allowFileRemotes(t)
+	nestedURL, _ := httpGitRemote(t, singleTaskRepo(t))
+	root := commitBareRepo(t, func(dir string) {
+		p := writeSearchTaskSet(t, dir, searchFixtureTasks[2:])
+		appendEntry(t, p, "    nested:\n      ref:\n        url: "+nestedURL+"\n        path: task.yaml\n")
+	})
+
+	rows := searchJSON(t, "e", "--taskset", gitops.TestFixtureRemoteURL(root))
+	if got := strings.Join(resultIDs(rows), ","); got != "repo/hello,repo/nested" {
+		t.Fatalf("ids = %s", got)
+	}
+	want := bareHead(t, root)
+	for _, r := range rows {
+		if r["commit"] != want {
+			t.Errorf("%s: commit = %v, want root HEAD %s", r["id"], r["commit"], want)
+		}
+	}
+}
+
+const hostileTokenEnv = "DICODE_SEARCH_TEST_TOKEN"
+
+// hostileTaskSet writes a local TaskSet whose entry asks for hostileTokenEnv
+// to be sent to remote.
+func hostileTaskSet(t *testing.T, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := writeSearchTaskSet(t, dir, searchFixtureTasks[2:])
+	appendEntry(t, p, "    grab:\n      ref:\n        url: "+remote+"\n        path: task.yaml\n        auth:\n          token_env: "+hostileTokenEnv+"\n")
+	return dir
+}
+
+func TestTaskSearch_ExplicitTaskSetNeverSendsEntryCredentials(t *testing.T) {
+	t.Setenv(hostileTokenEnv, "operator-secret")
+	remote, authSeen := httpGitRemote(t, singleTaskRepo(t))
+	dir := hostileTaskSet(t, remote)
+
+	rows := searchJSON(t, "nested", "--taskset", dir)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %v", rows)
+	}
+	if got := authSeen(); len(got) != 0 {
+		t.Fatalf("--taskset sent credentials to the TaskSet's own remote: %v", got)
+	}
+}
+
+func TestTaskSearch_ConfiguredSourceTokenEnvs(t *testing.T) {
+	t.Setenv(hostileTokenEnv, "operator-secret")
+	for _, tc := range []struct {
+		name      string
+		allowlist string
+		wantAuth  bool
+	}{
+		{"unrestricted", "", true},
+		{"listed", "  allowed_token_envs: [" + hostileTokenEnv + "]\n", true},
+		{"not listed", "  allowed_token_envs: [SOME_OTHER_TOKEN]\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remote, authSeen := httpGitRemote(t, singleTaskRepo(t))
+			dir := hostileTaskSet(t, remote)
+			root := t.TempDir()
+			cfgPath := filepath.Join(root, "dicode.yaml")
+			cfg := "data_dir: " + filepath.Join(root, "data") + "\n" +
+				"source_security:\n  allow_internal_hosts: [127.0.0.1]\n" + tc.allowlist +
+				"spec:\n  entries:\n    mine:\n      ref:\n        path: " + filepath.Join(dir, "taskset.yaml") + "\n"
+			if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if rows := searchJSON(t, "nested", "--config", cfgPath); len(rows) != 1 {
+				t.Fatalf("rows = %v", rows)
+			}
+			if got := len(authSeen()) > 0; got != tc.wantAuth {
+				t.Fatalf("credentials sent = %v, want %v", got, tc.wantAuth)
+			}
+		})
 	}
 }
