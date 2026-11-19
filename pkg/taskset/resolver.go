@@ -70,6 +70,7 @@ type Resolver struct {
 	mu               sync.Mutex
 	clones           map[repoKey]string // (url, target) → absolute local dir
 	allowedTokenEnvs []string           // operator allowlist for ref.auth.token_env (#753); nil/empty = unrestricted
+	untrustedRoot    bool               // see SetUntrustedRoot
 }
 
 // NewResolver creates a Resolver.
@@ -182,13 +183,14 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	// ${TASK_SET_DIR} in task.yaml paths.
 	rootVars := withTaskSetDir(extraVars, tsPath)
 
-	// allowAuth=true: entries declared directly in this call's taskset.yaml are
-	// the source's ROOT taskset — the file the operator pointed dicode.yaml (or
-	// a sibling root ref) at. That is operator-owned config, so a git entry's
-	// ref.auth.token_env is honoured. Anything resolveBody recurses into via a
+	// Entries declared directly in this call's taskset.yaml are the source's
+	// ROOT taskset — the file the operator pointed dicode.yaml (or a sibling
+	// root ref) at. That is operator-owned config, so a git entry's
+	// ref.auth.token_env is honoured unless SetUntrustedRoot says the root is
+	// not operator-owned. Anything resolveBody recurses into via a
 	// KindTaskSet entry is a resolved sub-tree, not operator-owned config, and
 	// resolveNestedRef always resolves it with allowAuth=false (#740).
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir, cloneRoot, true)
+	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir, cloneRoot, !r.isUntrustedRoot())
 }
 
 // withTaskSetDir returns a copy of base with VarTaskSetDir set to

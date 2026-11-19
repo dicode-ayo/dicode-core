@@ -698,6 +698,12 @@ See [docs/concepts/ai-agent.md](docs/concepts/ai-agent.md) for the full design.
 
 Tasks can be shared as git repos. Any git repo with a `tasks/` directory is a valid task source — add it as a git source in `dicode.yaml` and the reconciler pulls tasks automatically.
 
+`dicode task search <query>` finds tasks by id, name, or description across your configured TaskSets, or across any git/local TaskSet named with `--taskset <url-or-path>[@ref]` — no daemon needed:
+
+```bash
+dicode task search slack --taskset https://github.com/acme/dicode-tasks.git@v1.2.0
+```
+
 A dedicated `dicode task install` CLI command and community registry are planned. When built, they will support:
 
 ```bash
@@ -1163,7 +1169,7 @@ The testing and validation system is designed with four layers. Not all are impl
 | Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | ✅ Implemented (Deno, Python; Docker/Podman tracked as #159) |
 | Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
 
-> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task pending`, `task approve`, `secrets`, `relay`, `webhook sign`, `init`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
+> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task search`, `task pending`, `task approve`, `secrets`, `relay`, `webhook sign`, `init`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
 
 ---
 

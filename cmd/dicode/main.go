@@ -19,6 +19,8 @@
 //	status [task-id]                daemon health or latest run for a task
 //	ai <prompt> [flags]             run the configured AI task with a prompt
 //	task test <task-id>             run the task's sibling task.test.* through its runtime
+//	task search <query> [flags]     find tasks in configured or --taskset TaskSets
+//	                                (no daemon required)
 //	task create <name> [flags]      scaffold a task; with --ai, open an edit session
 //	task edit <task-id> <prompt>    open or resume an AI edit session
 //	task save <session-id>          apply a session's changes
@@ -125,6 +127,15 @@ func main() {
 	// doesn't exist yet.
 	if os.Args[1] == "init" {
 		if err := cmdInit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `task search` reads TaskSets directly, so it needs no daemon.
+	if isNoDaemonTaskSearch(os.Args[1:]) {
+		if err := cmdTaskSearch(os.Args[3:]); err != nil {
 			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
 			os.Exit(1)
 		}
@@ -240,7 +251,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdAI(c, args[1:])
 	case "task":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel|delete|approve|pending> [args...]")
+			return fmt.Errorf("usage: dicode task <test|search|create|edit|save|cancel|delete|approve|pending> [args...]")
 		}
 		return cmdTask(c, args[1:])
 	case "auth":
@@ -591,7 +602,7 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 	case "pending":
 		return cmdTaskPending(c)
 	default:
-		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete, approve, pending", args[0])
+		return fmt.Errorf("unknown task subcommand %q — supported: test, search, create, edit, save, cancel, delete, approve, pending", args[0])
 	}
 }
 
@@ -1732,6 +1743,10 @@ Commands:
                                   flags: --session-id ID, --task TASK_ID
   task test <task-id> [flags]     run the task's sibling task.test.* through its runtime
                                   flags: --format=text|junit|gh-summary
+  task search <query...> [flags]  find tasks whose id/name/description contain
+                                  every query word; no daemon required
+                                  flags: --taskset <git-url-or-path>[@ref]
+                                  (repeatable), --config PATH, --json
   task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
                                   flags: --source NAME, --force
   task pending                    list tasks held pending by the approval gate, with their content hash
