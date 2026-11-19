@@ -76,6 +76,7 @@ export default defineConfig({
         '**/suspend-resume.spec.ts',
         '**/resume-params-redaction.spec.ts',
         '**/cli-suspend.spec.ts',
+        '**/task-search-cli.spec.ts',
         '**/run-tree-collapse.spec.ts',
         '**/login-no-passphrase.spec.ts',
         '**/task-create-registers.spec.ts',

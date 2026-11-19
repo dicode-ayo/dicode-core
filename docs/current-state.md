@@ -239,7 +239,7 @@ The daemon process logic, invoked via `dicode daemon`. Exported entry point: `da
 
 CLI dispatcher + daemon mode in one binary:
 
-- Subcommands: `daemon [-config dicode.yaml]`, `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `task {test,create,edit,save,cancel,delete,approve,pending}`, `secrets {list,set,delete}`, `version` — `task pending` lists gate-held tasks with their content hash; `list` marks them in an APPROVAL column
+- Subcommands: `daemon [-config dicode.yaml]`, `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `task {test,search,create,edit,save,cancel,delete,approve,pending}`, `secrets {list,set,delete}`, `version` — `task pending` lists gate-held tasks with their content hash; `list` marks them in an APPROVAL column; `task search` matches id/name/description across configured or `--taskset` TaskSets without a daemon
 - `daemon` subcommand calls `pkg/daemon.Run()` — starts the full engine in-process
 - **Auto-start**: if `~/.dicode/daemon.sock` is not connectable, re-execs itself (`dicode daemon`) in the background, redirects stderr to `~/.dicode/daemon.log`, polls for the socket (8 second timeout)
 - Reads `~/.dicode/daemon.token` and calls `ipc.Dial()` to connect

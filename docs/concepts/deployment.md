@@ -222,6 +222,7 @@ dicode status [task-id]                        Daemon health or latest run for a
 dicode resume [run-id]                         List suspended runs, or resume one
 
 dicode task test <task-id>                     Run the task's sibling task.test.* through its runtime
+dicode task search <query> [--taskset SRC]     Find tasks in configured or named TaskSets (no daemon)
 dicode task create <name> [--ai]               Scaffold a task; with --ai, open an edit session
 dicode task edit <task-id> <prompt>             Open or resume an AI edit session
 dicode task save <session-id>                  Apply a session's changes
