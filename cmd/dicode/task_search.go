@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.uber.org/zap"
 
@@ -32,7 +33,8 @@ Flags:
   --taskset <src>[@ref]  search this TaskSet instead of the configured ones
                          (repeatable). <src> is an http(s)/ssh git URL or a
                          local path; @ref names a branch or tag (branch tried
-                         first, default branch "main")
+                         first); without @ref, "main", else the remote's
+                         default branch
   --config PATH          config to read sources from (default dicode.yaml)
   --json                 print a JSON array instead of columns`
 
@@ -61,6 +63,8 @@ type searchTarget struct {
 	// refFallback, when set, is retried as a tag after a branch lookup finds
 	// no such ref on the remote.
 	refFallback string
+	// remoteDefault retries a missing main branch on the remote's HEAD branch.
+	remoteDefault bool
 	// untrusted strips every token_env declared inside the TaskSet.
 	untrusted        bool
 	allowedTokenEnvs []string
@@ -147,11 +151,11 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 	for _, t := range targets {
 		found, warnings, err := searchTaskSet(ctx, cacheDir, t, terms)
 		for _, w := range warnings {
-			fmt.Fprintf(stderr, "dicode: warning: %s\n", gitops.StripURLCredentials(w))
+			fmt.Fprintf(stderr, "dicode: warning: %s\n", cleanText(gitops.StripURLCredentials(w)))
 		}
 		if err != nil {
 			failed++
-			fmt.Fprintf(stderr, "dicode: %s: %s\n", t.location, gitops.StripURLCredentials(err.Error()))
+			fmt.Fprintf(stderr, "dicode: %s: %s\n", cleanText(t.location), cleanText(gitops.StripURLCredentials(err.Error())))
 			continue
 		}
 		results = append(results, found...)
@@ -169,7 +173,7 @@ func runTaskSearch(ctx context.Context, args []string, stdout, stderr io.Writer)
 	} else {
 		fmt.Fprintf(stdout, "%-40s %-30s %s\n", "ID", "NAME", "DESCRIPTION")
 		for _, r := range results {
-			fmt.Fprintf(stdout, "%-40s %-30s %s\n", r.ID, orDash(r.Name), orDash(oneLine(r.Description, 60)))
+			fmt.Fprintf(stdout, "%-40s %-30s %s\n", cleanText(r.ID), orDash(cleanText(r.Name)), orDash(oneLine(r.Description, 60)))
 		}
 	}
 
@@ -284,10 +288,11 @@ func parseExplicitTargets(values []string) ([]searchTarget, error) {
 			ref.Branch = refName
 		}
 		targets = append(targets, searchTarget{
-			label:       tasksetLabel(url),
-			location:    safe,
-			ref:         ref,
-			refFallback: refName,
+			label:         tasksetLabel(url),
+			location:      safe,
+			ref:           ref,
+			refFallback:   refName,
+			remoteDefault: refName == "",
 		})
 	}
 	return targets, nil
@@ -320,17 +325,30 @@ func splitRefSuffix(raw string) (url, ref string) {
 	return raw[:start+at], raw[start+at+1:]
 }
 
-// tasksetLabel names a --taskset by the last element of its URL or path.
+// tasksetLabel names a --taskset by the last element of its URL or path, or
+// a remote's host when its path names nothing better.
 func tasksetLabel(loc string) string {
-	loc = strings.TrimRight(gitops.StripURLCredentials(loc), "/")
-	base := loc[strings.LastIndexAny(loc, "/:\\")+1:]
+	loc = gitops.StripURLCredentials(loc)
+	if host, path, ok := gitops.ParseRemote(loc); ok {
+		if l := pathLabel(path); l != "taskset" {
+			return l
+		}
+		return host
+	}
+	return pathLabel(loc)
+}
+
+func pathLabel(loc string) string {
+	loc = strings.TrimRight(loc, "/\\")
+	i := strings.LastIndexAny(loc, "/\\")
+	base := loc[i+1:]
 	for _, suffix := range []string{".git", ".yaml", ".yml"} {
 		base = strings.TrimSuffix(base, suffix)
 	}
-	if base == "taskset" {
-		return tasksetLabel(filepath.Dir(loc))
+	if base == "taskset" && i > 0 {
+		return pathLabel(loc[:i])
 	}
-	if base == "" {
+	if base == "" || base == "." || base == ".." {
 		return "taskset"
 	}
 	return base
@@ -345,7 +363,19 @@ func searchTaskSet(ctx context.Context, cacheDir string, t searchTarget, terms [
 	if ref.IsGit() {
 		// Pulling first fills the resolver's clone cache, so Resolve reuses
 		// this clone and commit names the root TaskSet's checkout.
+		// Explicit refs never carry Auth, so the trusted clone partition this
+		// fills holds only tokenless clones.
 		dir, err := r.Pull(ctx, ref)
+		if err != nil && t.remoteDefault && errors.Is(err, gitops.ErrRefNotFound) {
+			branch, derr := gitops.DefaultBranch(ctx, ref.URL)
+			if derr == nil && branch != ref.TrackedName() {
+				headRef := &taskset.Ref{URL: ref.URL, Branch: branch}
+				if taskset.ValidateRefTarget(headRef) == nil {
+					ref = headRef
+					dir, err = r.Pull(ctx, ref)
+				}
+			}
+		}
 		if err != nil && t.refFallback != "" && errors.Is(err, gitops.ErrRefNotFound) {
 			tagRef := &taskset.Ref{URL: t.ref.URL, Tag: t.refFallback}
 			if verr := taskset.ValidateRefTarget(tagRef); verr != nil {
@@ -416,8 +446,21 @@ func matchesAll(terms []string, fields ...string) bool {
 	return true
 }
 
+// cleanText makes untrusted text safe for a terminal: control characters
+// (C0, DEL and C1, so ESC, BEL, CR and newlines too) become spaces and
+// whitespace runs collapse to one space.
+func cleanText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func oneLine(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = cleanText(s)
 	if r := []rune(s); len(r) > max {
 		return string(r[:max-1]) + "…"
 	}

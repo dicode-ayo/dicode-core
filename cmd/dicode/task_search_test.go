@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/go-git/go-billy/v5/osfs"
 	gogit "github.com/go-git/go-git/v5"
@@ -48,7 +50,7 @@ func writeSearchTaskSet(t *testing.T, dir string, tasks []fixtureTask) string {
 		if err := os.MkdirAll(taskDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		yml := "apiVersion: dicode/v1\nkind: Task\nname: " + tk.name + "\ndescription: " + tk.description +
+		yml := "apiVersion: dicode/v1\nkind: Task\nname: " + yamlQuote(tk.name) + "\ndescription: " + yamlQuote(tk.description) +
 			"\nruntime: deno\ntrigger:\n  manual: true\n"
 		if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(yml), 0o644); err != nil {
 			t.Fatal(err)
@@ -63,6 +65,26 @@ func writeSearchTaskSet(t *testing.T, dir string, tasks []fixtureTask) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// yamlQuote renders s as a YAML double-quoted scalar, escaping every control
+// character since YAML forbids them raw.
+func yamlQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case unicode.IsControl(r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 func runSearch(t *testing.T, args ...string) (stdout, stderr string, err error) {
@@ -507,7 +529,13 @@ func TestTaskSearch_SameBasenameTaskSetsKeepDistinctIDs(t *testing.T) {
 // in the worktree, and returns the bare dir.
 func commitBareRepo(t *testing.T, write func(dir string)) string {
 	t.Helper()
-	main := plumbing.NewBranchReferenceName("main")
+	return commitBareRepoOn(t, "main", write)
+}
+
+// commitBareRepoOn is commitBareRepo with branch as the only (and HEAD) branch.
+func commitBareRepoOn(t *testing.T, branch string, write func(dir string)) string {
+	t.Helper()
+	main := plumbing.NewBranchReferenceName(branch)
 	bare := filepath.Join(t.TempDir(), "repo.git")
 	if _, err := gogit.PlainInitWithOptions(bare, &gogit.PlainInitOptions{
 		Bare: true, InitOptions: gogit.InitOptions{DefaultBranch: main},
@@ -728,5 +756,70 @@ func TestTaskSearch_ConfiguredSourceTokenEnvs(t *testing.T) {
 				t.Fatalf("credentials sent = %v, want %v", got, tc.wantAuth)
 			}
 		})
+	}
+}
+
+func TestTaskSearch_TextOutputStripsControlCharacters(t *testing.T) {
+	dir := t.TempDir()
+	tsPath := writeSearchTaskSet(t, dir, []fixtureTask{
+		{"evil", "Evil\x1b]52;c;AAAA\x07\nInjected\rName", "Line one\nline\x1b[2Jtwo\u009b"},
+	})
+	appendEntry(t, tsPath, "    broken:\n      ref:\n        path: "+yamlQuote("./\x1b]0;pwned\x07/task.yaml")+"\n")
+
+	out, stderr, err := runSearch(t, "evil", "--taskset", dir)
+	if err != nil {
+		t.Fatalf("err = %v (stderr %q)", err, stderr)
+	}
+	for _, s := range []string{out, stderr} {
+		if strings.ContainsAny(s, "\x1b\x07\r\u009b") {
+			t.Fatalf("control characters reached the terminal: %q", s)
+		}
+	}
+	if !strings.Contains(stderr, "warning") {
+		t.Fatalf("want a warning for the broken entry, stderr %q", stderr)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want header + 1 row, got %q (stderr %q)", out, stderr)
+	}
+	if !strings.Contains(lines[1], "Evil ]52;c;AAAA Injected Name") || !strings.Contains(lines[1], "Line one line [2Jtwo") {
+		t.Fatalf("row = %q", lines[1])
+	}
+
+	rows := searchJSON(t, "evil", "--taskset", dir)
+	if rows[0]["name"] != "Evil\x1b]52;c;AAAA\x07\nInjected\rName" {
+		t.Fatalf("JSON name altered: %q", rows[0]["name"])
+	}
+}
+
+func TestTaskSearch_RemoteWithoutRefUsesDefaultBranch(t *testing.T) {
+	allowFileRemotes(t)
+	bare := commitBareRepoOn(t, "master", func(dir string) { writeSearchTaskSet(t, dir, searchFixtureTasks) })
+	url := gitops.TestFixtureRemoteURL(bare)
+
+	rows := searchJSON(t, "backup", "--taskset", url)
+	if len(rows) != 1 || rows[0]["ref"] != "master" {
+		t.Fatalf("rows = %v", rows)
+	}
+	if rows[0]["commit"] != bareHead(t, bare) {
+		t.Fatalf("commit = %v", rows[0]["commit"])
+	}
+}
+
+func TestTasksetLabel(t *testing.T) {
+	for in, want := range map[string]string{
+		"git@host.example:taskset.git":          "host.example",
+		"git@host.example:org/taskset.git":      "org",
+		"git@host.example:org/tools.git":        "tools",
+		"https://host.example/taskset.git":      "host.example",
+		"https://u:p@host.example/org/repo.git": "repo",
+		"ssh://git@host.example/org/taskset":    "org",
+		"/srv/tasks/taskset.yaml":               "tasks",
+		"/taskset.yaml":                         "taskset",
+		"/":                                     "taskset",
+	} {
+		if got := tasksetLabel(in); got != want {
+			t.Errorf("tasksetLabel(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
