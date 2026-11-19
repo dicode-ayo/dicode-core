@@ -1,23 +1,34 @@
 package gitops
 
-// TestFixtureRemoteURL returns a file:// URL for bareDir (an absolute path to
-// a local bare git repo) suitable for use as a git remote in tests that need
-// to exercise the real CloneAtRef/ValidateRemoteHost code path against a
-// local fixture repo instead of a network remote.
+import (
+	"net/url"
+	"path/filepath"
+)
+
+// TestFixtureRemoteURL returns a file:// URL for the local bare repo at
+// bareDir, for tests that clone a fixture through CloneAtRef.
 //
-// file:// URLs are host-less by construction — go-git's file transport only
-// ever reads Endpoint.Path, never Endpoint.Host — but ValidateRemoteHost's
-// SSRF guard (wired into CloneAtRef for #489) rejects any host-less remote
-// as indistinguishable from an unparseable/attacker-supplied URL missing a
-// host entirely. Prepending a placeholder, obviously-fake hostname (RFC 2606
-// reserves the .invalid TLD for exactly this) satisfies the guard without
-// weakening it: no production caller can ever reach CloneAtRef with a
-// file:// URL in the first place (pkg/taskset.ValidateRefURL only allows
-// http/https/ssh at config-load time), so this is purely a test-fixture
-// convenience, not a bypass.
+// ValidateRemoteHost rejects host-less remotes, so the URL carries the
+// reserved placeholder host test-fixture.invalid; go-git's file transport
+// reads only the path. Production config never admits file:// remotes
+// (pkg/taskset.ValidateRefURL allows http/https/ssh only).
 //
-// Shared by pkg/source/git, pkg/taskset, and pkg/webui test fixtures so the
-// hostname choice and its rationale live in exactly one place.
+// bareDir must be absolute on the host OS, or a drive path (C:/... on any OS,
+// C:\... on Windows), which becomes file://test-fixture.invalid/C:/...
+// (go-git drops the slash before the drive letter). Anything else panics.
 func TestFixtureRemoteURL(bareDir string) string {
-	return "file://test-fixture.invalid" + bareDir
+	p := filepath.ToSlash(bareDir)
+	if isDrivePath(p) {
+		p = "/" + p
+	} else if !filepath.IsAbs(bareDir) {
+		panic("gitops.TestFixtureRemoteURL: bareDir must be absolute, got " + bareDir)
+	}
+	return (&url.URL{Scheme: "file", Host: "test-fixture.invalid", Path: p}).String()
+}
+
+// isDrivePath reports whether p starts with a drive letter, a colon and a
+// slash, independent of the host OS.
+func isDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' &&
+		(p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z')
 }
