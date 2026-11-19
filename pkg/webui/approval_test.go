@@ -13,7 +13,6 @@ import (
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
@@ -168,7 +167,7 @@ func newApprovalTestServer(t *testing.T, auth bool) (*Server, *registry.Registry
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Port: 8080, Auth: auth, Secret: "hunter2"}}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

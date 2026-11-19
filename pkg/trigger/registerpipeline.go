@@ -3,8 +3,10 @@ package trigger
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
@@ -154,7 +156,12 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 //
 // NOTE: registerPipeline must be called with e.registerMu already held (Engine.Register does this),
 // which is also what guards deferredPipelines.
-func (e *Engine) registerPipeline(p *task.PipelineTask) error {
+func (e *Engine) registerPipeline(p *task.PipelineTask) (err error) {
+	defer func() {
+		if err != nil {
+			e.unregisterTriggers(p.ID)
+		}
+	}()
 	if err := p.Validate(); err != nil {
 		return err
 	}
@@ -166,8 +173,7 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	// neither, forcing unregisterTriggersKeeping to fully tear down any
 	// previously-armed trigger.
 	keepWebhook := ""
-	if p.Enabled && p.Trigger.Webhook != "" &&
-		!(p.Trigger.Webhook == reservedOAuthCompletePath && p.ID != oauthRelayBuiltinID) {
+	if p.Enabled {
 		keepWebhook = p.Trigger.Webhook
 	}
 	keepCron := ""
@@ -203,6 +209,13 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 					zap.String("task", p.ID), zap.Error(err))
 			}
 			e.deferredPipelines[p.ID] = p
+			// Hold a free path while deferred so it stays this pipeline's; it
+			// answers 404 until the stages land and the claim below swaps in the
+			// webhook handler. A path someone else serves is left to them until
+			// the pipeline can dispatch.
+			if p.Trigger.Webhook != "" {
+				_ = e.routes.ClaimNoPreempt(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, http.NotFoundHandler())
+			}
 			return nil
 		}
 		return err
@@ -220,7 +233,7 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 		e.registerPipelineCron(p, keptCron)
 	}
 	if p.Trigger.Webhook != "" {
-		e.registerWebhookPath(p.ID, p.Trigger.Webhook)
+		e.claimWebhook(p.ID, p.Trigger.Webhook, ipc.RoutePipelineWebhook, e.WebhookHandler())
 	}
 	e.log.Info("pipeline registered", zap.String("task", p.ID), zap.Int("stages", len(p.Stages)))
 	return nil

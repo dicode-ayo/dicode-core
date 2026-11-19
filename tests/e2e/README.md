@@ -105,7 +105,7 @@ file.
 |---|---|---|---|
 | `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, resume-params-redaction, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
-| `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
+| `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts`, `webhook-auth-any.spec.ts`, `http-register-auth.spec.ts`, … | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
 
 The authenticated project is a separate server start, hence a separate
@@ -293,6 +293,18 @@ relay-broker and standalone (BYO token) flows.
 | 8 | connect routes _oauth-app inheritors to their webhook | Connect action resolves to the inheriting task's webhook. |
 | 9 | connect with standalone openrouter returns the webhook URL | BYO-token provider returns a webhook URL to POST the token to. |
 | 10 | connect with unknown provider returns 5xx | Unknown provider id fails loudly rather than silently. |
+
+### [http-register-auth.spec.ts](http-register-auth.spec.ts) — http.register route auth (3 tests)
+
+Runs in the `authenticated` project. The `http-register-guarded` fixture is a
+daemon task with `trigger.auth: true` that serves `/hooks/test-http-register`
+through `http.register` over its own IPC connection.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | with a session the daemon task serves the route | A logged-in request (including a sub-path) reaches the daemon task. |
+| 2 | without a session POST → 401 and nothing is served | The route inherits the task's `trigger.auth`; the task never sees the request. |
+| 3 | without a session a browser GET is redirected to /login | Same login redirect as a webhook task. |
 
 ### [dev-mode-clone.spec.ts](dev-mode-clone.spec.ts) — Dev-mode clone + on_failure_chain (22 tests)
 

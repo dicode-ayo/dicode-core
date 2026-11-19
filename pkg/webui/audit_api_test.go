@@ -11,7 +11,6 @@ import (
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
@@ -29,7 +28,7 @@ func newAuditTestServer(t *testing.T, cfg *config.Config) *Server {
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	srv, err := New(cfg.Server.Port, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(cfg.Server.Port, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -101,7 +100,7 @@ func TestAPIAudit_ManualRunRecordsActor(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	eng.SetDB(d) // wire the engine's audit store, as daemon.go does in production
-	srv, err := New(cfg.Server.Port, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(cfg.Server.Port, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

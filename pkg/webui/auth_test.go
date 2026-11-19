@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +41,7 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 			MCP:    &mcpOn,
 		},
 	}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -63,9 +65,9 @@ func login(t *testing.T, h http.Handler, password string, trust bool) *http.Cook
 }
 
 // armSpecWebhook registers an enabled webhook Spec on both the registry and the
-// trigger engine, mirroring a live daemon. The engine's webhook dispatch map is
-// what the auth guard resolves against, so a registry-only registration would
-// not be seen (and would 404 as an inactive path).
+// trigger engine, mirroring a live daemon. The engine claims the route the auth
+// guard resolves against, so a registry-only registration would not be seen
+// (and would 404 as an inactive path).
 func armSpecWebhook(t *testing.T, srv *Server, id, path string, mode task.WebhookAuthMode, secret string) {
 	t.Helper()
 	s := &task.Spec{
@@ -188,7 +190,7 @@ func TestAuth_NoAuthConfig_AllEndpointsOpen(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Port: 8080, Auth: false}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -402,7 +404,7 @@ func TestCORS_DisallowedOrigin_NoHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -424,7 +426,7 @@ func TestCORS_AllowedOrigin_HasHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -444,7 +446,7 @@ func TestSecurityHeaders_Present(t *testing.T) {
 	defer d.Close()
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -594,7 +596,7 @@ func TestCORS_MalformedOrigin_IsSkipped(t *testing.T) {
 		// space-separated string is a common config typo — should be ignored
 		AllowedOrigins: []string{"https://good.example.com https://evil.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	h := srv.Handler()
 
 	// The malformed entry is skipped, so neither origin gets the CORS header.
@@ -917,12 +919,8 @@ func TestWebhookAuthGuard_LongestPrefixWins_Inverse(t *testing.T) {
 	}
 }
 
-// TestWebhookAuthGuard_TrailingSlashPattern covers the exact class of drift
-// between the auth guard and the gateway that the shared PathMatches helper
-// was introduced to prevent. A webhook registered with a trailing slash
-// must still match a longer request path — otherwise `auth: true` would
-// silently drop for the misconfigured registration while the gateway
-// still dispatched the request.
+// TestWebhookAuthGuard_TrailingSlashPattern: a webhook registered with a
+// trailing slash must still gate a longer request path below it.
 func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 
@@ -934,6 +932,154 @@ func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("trailing-slash pattern must still gate nested paths: got %d", w.Code)
+	}
+}
+
+// armDaemonRoute registers a daemon task in the registry and claims an
+// http.register route for it, as its IPC connection would.
+func armDaemonRoute(t *testing.T, srv *Server, id, pattern string, mode task.WebhookAuthMode, register bool) {
+	t.Helper()
+	if register {
+		s := &task.Spec{ID: id, Name: id, Enabled: true,
+			Trigger: task.TriggerConfig{Daemon: true, WebhookAuth: mode}}
+		if err := srv.registry.Register(s); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("served by " + id))
+	})
+	if _, err := srv.gateway.Claim(id, pattern, ipc.RouteHTTPRegister, h); err != nil {
+		t.Fatalf("claim %s: %v", pattern, err)
+	}
+}
+
+// TestWebhookAuthGuard_HTTPRegisterRouteInheritsTaskAuth: a daemon task's
+// http.register route carries the task's trigger.auth.
+func TestWebhookAuthGuard_HTTPRegisterRouteInheritsTaskAuth(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	armDaemonRoute(t, srv, "guarded-daemon", "/hooks/guarded", task.WebhookAuthSession, true)
+	armDaemonRoute(t, srv, "public-daemon", "/hooks/open", task.WebhookAuthNone, true)
+	h := srv.Handler()
+
+	for _, path := range []string{"/hooks/guarded", "/hooks/guarded/api/x"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("POST %s without session: got %d %q, want 401", path, w.Code, w.Body.String())
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Accept", "text/html")
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/login") {
+			t.Errorf("browser GET %s without session: got %d (Location %q), want redirect to /login", path, w.Code, w.Header().Get("Location"))
+		}
+	}
+
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/hooks/guarded/api/x", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "served by guarded-daemon" {
+		t.Errorf("POST with session: got %d %q", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/open", nil))
+	if w.Code != http.StatusOK || w.Body.String() != "served by public-daemon" {
+		t.Errorf("public daemon route without session: got %d %q", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookAuthGuard_RouteClaimedAfterCheckNotServed: a route claimed
+// between the guard's "no route" answer and dispatch is not served unguarded.
+func TestWebhookAuthGuard_RouteClaimedAfterCheckNotServed(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	s := &task.Spec{ID: "late-daemon", Name: "late-daemon", Enabled: true,
+		Trigger: task.TriggerConfig{Daemon: true, WebhookAuth: task.WebhookAuthSession}}
+	if err := srv.registry.Register(s); err != nil {
+		t.Fatal(err)
+	}
+	claimThenDispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		armDaemonRoute(t, srv, "late-daemon", "/hooks/late", task.WebhookAuthSession, false)
+		srv.gateway.ServeHTTP(w, r)
+	})
+	w := httptest.NewRecorder()
+	srv.webhookAuthGuard(w, httptest.NewRequest(http.MethodPost, "/hooks/late", nil), claimThenDispatch)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("route claimed after the guard's check: got %d %q, want 404", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookAuthGuard_ReloadAfterCheckNotServed: a task reloaded with a
+// stricter trigger.auth between the guard's decision and dispatch is not
+// served under the stale, public decision.
+func TestWebhookAuthGuard_ReloadAfterCheckNotServed(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>private ui</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec := func(mode task.WebhookAuthMode) *task.Spec {
+		return &task.Spec{ID: "flip", Name: "flip", Enabled: true, TaskDir: dir,
+			Trigger: task.TriggerConfig{Webhook: "/hooks/flip", WebhookAuth: mode}}
+	}
+	public := spec(task.WebhookAuthNone)
+	if err := srv.registry.Register(public); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.engine.Register(public); err != nil {
+		t.Fatal(err)
+	}
+	reloadThenDispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := srv.registry.Register(spec(task.WebhookAuthSession)); err != nil {
+			t.Fatal(err)
+		}
+		srv.gateway.ServeHTTP(w, r)
+	})
+	w := httptest.NewRecorder()
+	srv.webhookAuthGuard(w, httptest.NewRequest(http.MethodGet, "/hooks/flip", nil), reloadThenDispatch)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "private ui") {
+		t.Errorf("reloaded-to-session task served under the public decision: %d %q", w.Code, w.Body.String())
+	}
+}
+
+// TestNew_ServesEngineGateway: the web UI dispatches from the engine's route
+// table, so the routes the engine and IPC servers claim are the ones served.
+func TestNew_ServesEngineGateway(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	if srv.gateway != srv.engine.Gateway() {
+		t.Fatal("web UI gateway is not the engine's route table")
+	}
+}
+
+// TestWebhookAuthGuard_RouteWithoutRegisteredOwnerDenied: a route whose owner
+// is not in the registry has no readable posture; it answers 404 for everyone,
+// with no login redirect a session could never satisfy.
+func TestWebhookAuthGuard_RouteWithoutRegisteredOwnerDenied(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	armDaemonRoute(t, srv, "unknown", "/hooks/orphan", task.WebhookAuthNone, false)
+	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	for _, withSession := range []bool{false, true} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			req := httptest.NewRequest(method, "/hooks/orphan", nil)
+			req.Header.Set("Accept", "text/html")
+			if withSession {
+				req.AddCookie(cookie)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("%s orphan route (session=%v): got %d (Location %q), want 404",
+					method, withSession, w.Code, w.Header().Get("Location"))
+			}
+		}
 	}
 }
 

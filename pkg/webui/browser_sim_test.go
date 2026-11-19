@@ -10,7 +10,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
@@ -94,7 +93,7 @@ func newBrowserTestHandler(t *testing.T, passphrase string) http.Handler {
 	}
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	srv, err := webui.New(8765, reg, eng, cfg, "", nil, nil, nil, "", webui.NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := webui.New(8765, reg, eng, cfg, "", nil, nil, nil, "", webui.NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

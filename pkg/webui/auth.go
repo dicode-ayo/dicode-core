@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
 
@@ -109,13 +110,16 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 	return webhookDeny
 }
 
-// webhookAuthGuard enforces a webhook's trigger.auth posture. The matched
-// webhook is resolved through the engine's own path lookup (ResolveWebhookAuth),
-// the same one the gateway dispatches on, so the guard and the served route can
-// never disagree — a public `/hooks/ai` cannot shadow a protected
-// `/hooks/ai/dicodai`.
+// webhookAuthGuard enforces the trigger.auth posture of the route a /hooks/*
+// request resolves to, then dispatches through the gateway with that same
+// route and posture pinned in the request context, so the guarded route and
+// the served route are one answer (a task reloaded with a different posture in
+// between answers 404) — a public `/hooks/ai` cannot shadow a protected
+// `/hooks/ai/dicodai`. A daemon task's http.register route carries its task's
+// trigger.auth; a route whose owner is not in the registry answers 404.
 //
-//   - Public (no auth) → pass through.
+//   - No route, or a public one → pass through (the gateway 404s an unrouted path,
+//     even if a route is claimed between this check and dispatch).
 //   - session → a valid dicode session is required for GET (UI) and POST (run).
 //   - any → session OR a valid HMAC signature. HMAC is the only credential that
 //     survives the relay, so a relayed non-GET falls through to the signature
@@ -128,12 +132,21 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, meth
 // (device-token renewal, cookie clearing) that must not be relay-drivable.
 func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	info := s.engine.ResolveWebhookAuth(r.URL.Path)
+	if info.Deny {
+		// No login can make an orphaned route servable, so no redirect to one.
+		s.auditDenied(r, "webhook route has no registered owner")
+		http.NotFound(w, r)
+		return
+	}
+	relayed := r.Header.Get("X-Relay-Base") != ""
+	// Pin the answer even when it is "no route", so a route claimed after this
+	// check is not dispatched unguarded.
+	r = r.WithContext(trigger.WithWebhookAuth(ipc.WithRoute(r.Context(), info.Route), info))
 	if !info.Mode.Enabled() {
 		next.ServeHTTP(w, r)
 		return
 	}
 
-	relayed := r.Header.Get("X-Relay-Base") != ""
 	hasSession := false
 	if !relayed {
 		hasSession = s.hasValidSession(w, r)

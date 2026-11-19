@@ -31,49 +31,40 @@ import (
 	"go.uber.org/zap"
 )
 
-// reservedOAuthCompletePath is the webhook path the relay broker delivers
-// encrypted OAuth tokens to. Only buildin/auth-relay is allowed to bind it —
-// any other task that claims this path would be a drop-in exfiltration
-// sink for decrypted credentials once the built-in chains the data forward.
-const reservedOAuthCompletePath = "/hooks/oauth-complete"
-const oauthRelayBuiltinID = "buildin/auth-relay"
+// Gateway returns the engine's route table: the daemon's single HTTP gateway,
+// which the IPC servers and the web UI serve from.
+func (e *Engine) Gateway() *ipc.Gateway { return e.routes }
 
 func (e *Engine) registerWebhook(spec *task.Spec) {
-	e.registerWebhookPath(spec.ID, spec.Trigger.Webhook)
+	e.claimWebhook(spec.ID, spec.Trigger.Webhook, ipc.RouteTaskWebhook, e.WebhookHandler())
 }
 
-// registerWebhookPath claims a webhook path for a task ID (kind-agnostic). The
-// webhooks map routes incoming requests by path → task ID; the dispatcher
-// resolves the kind. Shared by kind: Task (registerWebhook) and kind:
-// PipelineTask (registerPipeline).
-func (e *Engine) registerWebhookPath(id, path string) {
-	if path == reservedOAuthCompletePath && id != oauthRelayBuiltinID {
-		e.log.Warn("rejecting task that tries to shadow reserved OAuth delivery path",
+// claimWebhook claims a webhook path on the gateway route table. A claim the
+// table refuses (another task's webhook, the reserved OAuth path) is logged —
+// at WARN once per task, path and reason, then at DEBUG on retries — and the
+// task stays registered without the route. A daemon task's
+// http.register route on the path is taken over.
+func (e *Engine) claimWebhook(id, path string, kind ipc.RouteKind, h http.Handler) {
+	displaced, err := e.routes.Claim(id, path, kind, h)
+	key := id + "\x00" + path
+	if err != nil {
+		logf := e.log.Warn
+		if prev, seen := e.claimRejections.Swap(key, err.Error()); seen && prev == err.Error() {
+			logf = e.log.Debug
+		}
+		logf("rejecting webhook path",
 			zap.String("task", id),
-			zap.String("path", reservedOAuthCompletePath))
-		return
-	}
-	// Normalise a trailing slash away so the map key matches how the gateway
-	// dispatches (ipc.PathMatches trims the pattern's trailing slash before
-	// prefix-matching). Without this, a `/hooks/x/` registration is dispatched
-	// for `/hooks/x/sub` by the gateway but missed by resolveWebhookPath's exact
-	// segment walk — the request 404s at the handler and the auth guard (which
-	// shares this lookup) reads it as public.
-	path = strings.TrimSuffix(path, "/")
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Reject duplicate registrations: a task from a watched repo must not be
-	// able to silently hijack another task's webhook path (last-writer-wins
-	// was the previous behavior). A task re-registering its own path (e.g.
-	// during reconciler reload) is allowed.
-	if existing, ok := e.webhooks[path]; ok && existing != id {
-		e.log.Warn("rejecting duplicate webhook path — already claimed by another task",
 			zap.String("path", path),
-			zap.String("existing_task", existing),
-			zap.String("rejected_task", id))
+			zap.Error(err))
 		return
 	}
-	e.webhooks[path] = id
+	e.claimRejections.Delete(key)
+	if displaced != "" {
+		e.log.Warn("webhook trigger took over another task's http.register route",
+			zap.String("task", id),
+			zap.String("path", path),
+			zap.String("displaced_task", displaced))
+	}
 }
 
 // decodeWebhookPayload reads and decodes a webhook request body (or GET query
@@ -437,23 +428,33 @@ func (e *Engine) WebhookHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		taskID, matchedHook, assetPath, ok := e.resolveWebhookPath(path)
+		m, ok := ipc.RouteFromContext(r.Context())
 		if !ok {
+			m, ok = e.routes.Resolve(path)
+		}
+		if !ok || m.Kind == ipc.RouteHTTPRegister {
 			http.NotFound(w, r)
 			return
+		}
+		taskID, matchedHook, assetPath := m.TaskID, m.Pattern, m.AssetPath
+
+		k, _ := e.registry.GetKinded(taskID)
+		if pinned, ok := r.Context().Value(authPostureCtxKey{}).(WebhookAuthInfo); ok {
+			if mode, hasSecret, _ := webhookPosture(k, m.Kind); mode != pinned.Mode || hasSecret != pinned.HasSecret {
+				http.NotFound(w, r)
+				return
+			}
 		}
 
 		// kind: PipelineTask webhooks have no task directory, index.html, or
 		// assets — fire the runner directly and return the parent run ID. Stage
 		// UIs/assets belong to the individual stage tasks, not the pipeline.
-		if k, isKinded := e.registry.GetKinded(taskID); isKinded {
-			if pipe, isPipe := k.(*task.PipelineTask); isPipe {
-				e.handlePipelineWebhook(w, r, pipe, assetPath)
-				return
-			}
+		if pipe, isPipe := k.(*task.PipelineTask); isPipe {
+			e.handlePipelineWebhook(w, r, pipe, assetPath)
+			return
 		}
 
-		spec, ok := e.registry.Get(taskID)
+		spec, ok := k.(*task.Spec)
 		if !ok {
 			http.Error(w, "task not found", http.StatusNotFound)
 			return
@@ -465,6 +466,15 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
 		// This applies to any webhook task that ships an index.html,
 		// not just the built-in webui — it is the standard "SPA shell" pattern.
+		// A held task serves nothing from its directory. A GET that would run
+		// the task (no index.html) falls through to the fire path's veto.
+		if (assetPath != "" || r.Method == http.MethodGet) && e.isHeld(taskID) {
+			if _, err := os.Stat(filepath.Join(spec.TaskDir, "index.html")); assetPath != "" || err == nil {
+				http.NotFound(w, r)
+				return
+			}
+		}
+
 		if assetPath != "" {
 			// Block path traversal before any extension check; the SPA fallback
 			// must not silently swallow traversal attempts by serving index.html.
@@ -490,79 +500,59 @@ func (e *Engine) WebhookHandler() http.Handler {
 	})
 }
 
-// resolveWebhookPath routes an incoming request path to a registered webhook:
-// either an exact match (normal webhook execution path) or, for static assets
-// under some webhook UI, the most-specific parent hook plus the remaining
-// asset sub-path. ok=false means no registered webhook claims the path.
-func (e *Engine) resolveWebhookPath(path string) (taskID, matchedHook, assetPath string, ok bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Exact match — normal webhook execution path.
-	if tid, found := e.webhooks[path]; found {
-		return tid, path, "", true
-	}
-	// No exact match — the request is for a static asset under some
-	// webhook UI. Walk up one path segment at a time doing exact
-	// map lookups, so the most-specific parent hook wins. This
-	// matters when both `/hooks/ai` and `/hooks/ai/openai` are
-	// registered: `/hooks/ai/openai/chat.js` must bind to the
-	// preset, not to the buildin. Exact map lookups (rather than
-	// iterating e.webhooks with strings.HasPrefix) are also
-	// immune to Go's randomised map iteration order.
-	for candidate := path; ; {
-		idx := strings.LastIndex(candidate, "/")
-		if idx <= 0 {
-			break
-		}
-		candidate = candidate[:idx]
-		if tid, found := e.webhooks[candidate]; found {
-			return tid, candidate, path[len(candidate)+1:], true
-		}
-	}
-	return "", "", "", false
-}
-
-// WebhookAuthInfo describes the auth posture of the webhook that claims a URL
-// path. Matched is false when no registered webhook claims the path. IsAsset is
-// true when the path resolves to a static asset under a webhook UI (a sub-path
-// of the hook), rather than the hook endpoint itself — such requests must never
-// fall through to HMAC, or an auth: any webhook's UI assets would be served to
-// unauthenticated callers.
+// WebhookAuthInfo describes the auth posture of the route that claims a URL
+// path; a zero Route means no route claims it. Deny is set when the
+// route's owner is not in the registry, so no posture can be read for it.
+// IsAsset is true when the path is below the claimed pattern rather than the
+// pattern itself — such requests must never fall through to HMAC, or an
+// auth: any webhook's UI assets would be served to unauthenticated callers.
 type WebhookAuthInfo struct {
-	Matched   bool
-	TaskID    string
+	Deny      bool
+	Route     ipc.RouteMatch
 	Mode      task.WebhookAuthMode
 	HasSecret bool
 	IsAsset   bool
 }
 
-// ResolveWebhookAuth reports the auth posture of the webhook claiming urlPath,
-// resolved through the SAME longest-prefix lookup the gateway dispatches on
-// (resolveWebhookPath). The auth guard consumes this so the decision it makes
-// and the route the gateway will serve can never diverge.
-//
-// A path claimed at the gateway but not yet present in the engine's webhooks map
-// (a daemon task whose route is reserved before it starts) returns Matched:false
-// — the guard then treats it as public, and the gateway 404s it, so nothing is
-// served and no auth is bypassed.
+// ResolveWebhookAuth reports the auth posture of the route claiming urlPath,
+// read from the owning task's trigger.auth and webhook_secret. An http.register
+// route inherits its daemon task's trigger.auth; HasSecret is always false for
+// it because nothing on that route verifies a signature.
 func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
-	taskID, _, assetPath, ok := e.resolveWebhookPath(urlPath)
+	m, ok := e.routes.Resolve(urlPath)
 	if !ok {
 		return WebhookAuthInfo{}
 	}
-	k, ok := e.registry.GetKinded(taskID)
-	if !ok {
-		return WebhookAuthInfo{}
-	}
-	isAsset := assetPath != ""
+	info := WebhookAuthInfo{Route: m, IsAsset: m.AssetPath != ""}
+	k, _ := e.registry.GetKinded(m.TaskID)
+	var known bool
+	info.Mode, info.HasSecret, known = webhookPosture(k, m.Kind)
+	info.Deny = !known || e.isHeld(m.TaskID)
+	return info
+}
+
+// webhookPosture is the auth posture route kind kind gets from its owner k;
+// ok is false when k is not a task that can own a route.
+func webhookPosture(k task.Kinded, kind ipc.RouteKind) (mode task.WebhookAuthMode, hasSecret, ok bool) {
 	switch t := k.(type) {
 	case *task.Spec:
-		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
+		mode, hasSecret, ok = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != "", true
 	case *task.PipelineTask:
-		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
-	default:
-		return WebhookAuthInfo{}
+		mode, hasSecret, ok = t.Trigger.WebhookAuth, t.Trigger.WebhookSecret != "", true
 	}
+	if kind == ipc.RouteHTTPRegister {
+		hasSecret = false
+	}
+	return mode, hasSecret, ok
+}
+
+type authPostureCtxKey struct{}
+
+// WithWebhookAuth pins the posture an auth guard decided on, so WebhookHandler
+// can refuse a request whose task was reloaded with a different posture after
+// the decision.
+func WithWebhookAuth(ctx context.Context, info WebhookAuthInfo) context.Context {
+	return context.WithValue(ctx, authPostureCtxKey{}, info)
 }
 
 // serveTaskUI serves the task directory's index.html with the dicode client

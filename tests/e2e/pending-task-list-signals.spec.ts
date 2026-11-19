@@ -138,6 +138,16 @@ test.describe('withGuaranteedCleanup', () => {
 });
 
 test.describe('Task list pending-approval signals', () => {
+  test('a pending webhook task holds no route: its path 404s until approved', async ({ request }) => {
+    await withPendingWebhookChange(request, async () => {
+      const res = await request.post('/hooks/test-webhook', { data: { probe: 'pending' } });
+      expect(res.status()).toBe(404);
+    });
+    await expect
+      .poll(async () => (await request.post('/hooks/test-webhook', { data: { probe: 'armed' } })).status(), { timeout: 20_000 })
+      .toBe(200);
+  });
+
   test('a pending row reads as held, not live: no green dot, no dead link, Run disabled', async ({ page, request }) => {
     await withPendingWebhookChange(request, async () => {
       await gotoWebui(page);

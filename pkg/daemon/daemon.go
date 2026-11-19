@@ -289,11 +289,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 4. Task registry + startup cleanup.
 	reg := setupRegistry(ctx, database, log)
 
-	// 5. HTTP gateway.
-	gateway := ipc.NewGateway()
-
-	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	// 5–6. Managed runtimes + trigger engine (which owns the HTTP gateway).
+	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log)
 	if err != nil {
 		return err
 	}
@@ -313,7 +310,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return err
 	}
-	arm, disarm := newArmDisarm(cfg, eng, gateway, reg, log)
+	arm, disarm := newArmDisarm(cfg, eng, reg, log)
 
 	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
 	// trust-on-change gate before its triggers arm. Approval records live in
@@ -324,7 +321,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 
 	// 8. Web UI (including the 8.5 relay env exports).
-	srv, err := buildWebUI(ctx, cfg, configPath, version, dataDir, database, reg, eng, localSecrets, rec, sourceMgr, gateway, logBroadcaster, managedRuntimes, approvalGate, replayer, log)
+	srv, err := buildWebUI(ctx, cfg, configPath, version, dataDir, database, reg, eng, localSecrets, rec, sourceMgr, logBroadcaster, managedRuntimes, approvalGate, replayer, log)
 	if err != nil {
 		return err
 	}
@@ -506,18 +503,15 @@ func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, den
 }
 
 // newArmDisarm builds the arm/disarm pair the approval gate drives (step 7).
-func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, reg *registry.Registry, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
-	webhookH := eng.WebhookHandler()
-	var webhookMu sync.Mutex
-	webhookPaths := make(map[string]string)
+func newArmDisarm(cfg *config.Config, eng *trigger.Engine, reg *registry.Registry, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
 	// bodyFullTextualWarned tracks which task IDs have already had their
 	// body_full_textual WARN emitted. The reconciler may re-register the same
 	// task on each reload cycle; without deduplication the WARN fires every
 	// 30 s, flooding the log. LoadOrStore ensures at most one WARN per task ID
 	// per daemon lifetime.
 	var bodyFullTextualWarned sync.Map
-	// arm wires an approval-gated task into the trigger engine plus the
-	// daemon-level gateway webhook route and footgun warnings. Called by the
+	// arm wires an approval-gated task into the trigger engine (which claims
+	// its gateway webhook route) and emits footgun warnings. Called by the
 	// approval gate for every task that passes it (immediately for trusted /
 	// builtin / already-approved tasks, later from Approve for pending ones).
 	arm = func(k task.Kinded) error {
@@ -540,10 +534,7 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 			}
 		}
 
-		// The footgun checks below only apply to kind: Task; the gateway-webhook
-		// route, however, applies to BOTH kind: Task and kind: PipelineTask —
-		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
-		// only kind: Task wired the daemon-level gateway route).
+		// The footgun checks below only apply to kind: Task.
 		spec, isSpec := k.(*task.Spec)
 		// overridden && spec.ID == "buildin/relay-server-body" identifies which
 		// of applyBuiltinOverrides' two cases fired (they're for disjoint task
@@ -558,24 +549,9 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 			// task, or pipeline ref/cycle errors) is the only error Register
 			// currently returns. The reconciler will retry
 			// on the next reload, so a transient registry mismatch heals itself;
-			// a persistent config error surfaces here every cycle. Skipping the
-			// downstream webhook/footgun checks means a half-registered task
-			// doesn't claim its gateway path.
+			// a persistent config error surfaces here every cycle.
 			return err
 		}
-		// Wire the daemon-level gateway webhook route. Kind-aware: handles both
-		// kind: Task and kind: PipelineTask, so a pipeline's webhook trigger is
-		// reachable over HTTP (GAP 1). Recording the path under the task ID lets
-		// the disarm path deregister it the same way for both kinds.
-		//
-		// Cross-layer note: for a deferred webhook pipeline (cold start, stage not
-		// yet registered) eng.Register returned nil, so we claim the gateway route
-		// here even though the engine's webhooks map is not populated until the
-		// stage lands and retryDeferredPipelines schedules it. Until then a POST
-		// reaches the gateway, misses the engine's webhooks lookup, and 404s from
-		// the engine layer (correct "not ready" behaviour); the route starts
-		// routing once the stage arrives. The route is released on disarm.
-		registerGatewayWebhook(gateway, webhookPaths, &webhookMu, webhookH, k)
 
 		if !isSpec {
 			return nil
@@ -597,19 +573,10 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		}
 		return nil
 	}
-	// disarm tears down a task's triggers and gateway route. Used both for
+	// disarm tears down a task's triggers and gateway routes. Used both for
 	// removed tasks and for changed tasks held pending approval (their
 	// previous version may still be armed).
-	disarm = func(id string) {
-		webhookMu.Lock()
-		path := webhookPaths[id]
-		delete(webhookPaths, id)
-		webhookMu.Unlock()
-		if path != "" {
-			gateway.Unregister(path)
-		}
-		eng.Unregister(id)
-	}
+	disarm = eng.Unregister
 	return arm, disarm
 }
 
@@ -718,6 +685,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 	// refused everywhere it can be invoked — REST (webui), CLI control
 	// socket, and the per-run dicode.tasks.test IPC capability.
 	eng.SetFireGuard(approvalGate.FireGuard)
+	eng.SetHoldCheck(approvalGate.Held)
 	denoRT.SetTestGuard(approvalGate.FireGuard)
 	pythonRT.SetTestGuard(approvalGate.FireGuard)
 
@@ -828,7 +796,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 
 // buildWebUI exports the relay-related env vars and builds the web UI server
 // with its approval / replay wiring (steps 8 + 8.5).
-func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
+func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -946,7 +914,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	}
 
 	webui.Version = version
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database)
 	if err != nil {
 		return nil, fmt.Errorf("build webui: %w", err)
 	}
@@ -1274,13 +1242,13 @@ func buildRuntimes(
 	secretsMgr secrets.Manager,
 	database db.DB,
 	log *zap.Logger,
-	gateway *ipc.Gateway,
 ) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, *pythonruntime.Runtime, error) {
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
+	gateway := eng.Gateway()
 	eng.SetDB(database)
 	eng.SetSecrets(secretsChain)
 	// Config value first, env var overrides when set. 0 = unlimited. Always

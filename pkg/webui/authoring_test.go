@@ -14,7 +14,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/trigger"
@@ -44,7 +43,7 @@ func newAuthoringTestServer(t *testing.T, sourceName, sourceDir string) *Server 
 		sm.Register(sourceName, src)
 	}
 
-	srv, err := New(0, reg, eng, cfg, "", nil, nil, sm, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(0, reg, eng, cfg, "", nil, nil, sm, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("webui.New: %v", err)
 	}

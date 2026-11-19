@@ -78,7 +78,8 @@ See [Webhooks](../webhooks.md) for the full HMAC signing and timestamp-binding d
 **Path rules:**
 - Must start with `/`
 - Alphanumeric characters, hyphens, underscores, and forward slashes only
-- No two tasks can share the same webhook path
+- No two tasks can share the same webhook path — a claim of a path another task holds, by a webhook trigger or a daemon task's `http.register`, is rejected
+- A trailing slash is ignored (`/hooks/x/` is `/hooks/x`)
 
 **Relay:** for webhook tasks to be reachable from the internet on a laptop, configure the webhook relay. See [Webhook Relay](./webhook-relay.md).
 

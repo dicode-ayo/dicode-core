@@ -9,7 +9,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
-	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -34,7 +33,7 @@ func newHealthServer(t *testing.T) *Server {
 			Secret: "test-passphrase",
 		},
 	}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
 	if err != nil {
 		t.Fatalf("webui.New: %v", err)
 	}

@@ -548,6 +548,23 @@ func (g *Gate) IsPending(id string) bool {
 	return ok
 }
 
+// Held reports, without hashing, whether id is kept from arming: pending
+// approval, or a gated task the gate has not admitted yet. FireGuard is the
+// authoritative check at fire time; Held is the cheap one for paths that run
+// per request.
+func (g *Gate) Held(id string) bool {
+	if g.IsPending(id) {
+		return true
+	}
+	if g.trusted(id) {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.admitted[id]
+	return !ok
+}
+
 // PendingView is the snapshot of a pending entry's externally-visible
 // fields, returned by PendingSnapshot. Every field describes one pending
 // generation, atomically.
