@@ -78,8 +78,8 @@ discovery (`tasktest.Discover`), so the task detail names exactly the file
 - Docker/Podman: the task's Dockerfile (`docker.build.dockerfile`, relative to
   the task dir), existing when it declares a `test` stage that isn't its last.
   A Dockerfile outside the task dir isn't read and reports an empty
-  `test_file` (and `script_file`), although `dicode task test` still runs
-  it; one that isn't a regular file or is over 1 MiB doesn't count.
+  `test_file`, although `dicode task test` still runs it; an image-only task
+  (no `docker.build`) also reports an empty `test_file`; one that isn't a regular file or is over 1 MiB doesn't count.
 
 Only regular files count as tests; symlinks and directories don't. When no
 test exists, `test_file` is the name a new test should use: `task.test.py`,

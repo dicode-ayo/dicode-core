@@ -142,8 +142,7 @@ func findTestFile(spec *task.Spec) (string, error) {
 // relative to its task dir, and whether it exists. For Docker/Podman that is
 // the Dockerfile, existing when it declares a "test" stage that isn't its
 // last. A Dockerfile outside the task dir is never read and reports ("",
-// false), although Run still accepts one: Discover backs a read-only view
-// that also serves tasks still pending approval. When nothing exists, name is the file a new test should go in, or
+// false), although Run still accepts one; so does an image-only task. When nothing exists, name is the file a new test should go in, or
 // "" for a runtime tasktest can't run.
 func Discover(spec *task.Spec) (name string, exists bool) {
 	switch spec.Runtime {
@@ -159,7 +158,9 @@ func Discover(spec *task.Spec) (name string, exists bool) {
 	if spec.Runtime == runtimePython {
 		return "task.test.py", false
 	}
-	if p := spec.ScriptPath(); p == "" || strings.HasSuffix(p, ".ts") {
+	deno := *spec
+	deno.Runtime = task.RuntimeDeno
+	if p := deno.ScriptPath(); p == "" || strings.HasSuffix(p, ".ts") {
 		return "task.test.ts", false
 	}
 	return "task.test.js", false
@@ -184,6 +185,9 @@ func DockerfileName(spec *task.Spec) string {
 }
 
 func discoverDockerfile(spec *task.Spec) (string, bool) {
+	if spec.Docker == nil || spec.Docker.Build == nil {
+		return "", false
+	}
 	name := DockerfileName(spec)
 	if name == "" {
 		return "", false
@@ -241,8 +245,7 @@ func dockerfileHasTestStage(content []byte) bool {
 // the real one.
 var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must not be its last stage")
 
-// maxDockerfileBytes bounds the Dockerfile read: the task-detail API runs
-// this discovery on every view, including for tasks still pending approval.
+// maxDockerfileBytes bounds the Dockerfile read.
 const maxDockerfileBytes = 1 << 20
 
 // readCapped reads path only if the opened file is the regular file lstat
