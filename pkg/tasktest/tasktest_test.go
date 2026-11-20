@@ -598,3 +598,53 @@ func TestRun_Podman_MissingBinary(t *testing.T) {
 		t.Fatal("expected an error when podman is not on PATH")
 	}
 }
+
+func TestDiscover(t *testing.T) {
+	dockerBuild := &task.DockerConfig{Build: &task.DockerBuild{}}
+	cases := []struct {
+		name       string
+		runtime    task.Runtime
+		docker     *task.DockerConfig
+		files      map[string]string
+		symlinks   []string
+		wantName   string
+		wantExists bool
+	}{
+		{name: "python py", runtime: runtimePython, files: map[string]string{"task.py": "", "task.test.py": ""}, wantName: "task.test.py", wantExists: true},
+		{name: "python stale ts only", runtime: runtimePython, files: map[string]string{"task.py": "", "task.test.ts": ""}, wantName: "task.test.py"},
+		{name: "python default", runtime: runtimePython, files: map[string]string{"task.py": ""}, wantName: "task.test.py"},
+		{name: "deno ts", runtime: task.RuntimeDeno, files: map[string]string{"task.ts": "", "task.test.ts": ""}, wantName: "task.test.ts", wantExists: true},
+		{name: "deno js", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "task.test.js": ""}, wantName: "task.test.js", wantExists: true},
+		{name: "deno mjs", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "task.test.mjs": ""}, wantName: "task.test.mjs", wantExists: true},
+		{name: "deno default ts script", runtime: task.RuntimeDeno, files: map[string]string{"task.ts": ""}, wantName: "task.test.ts"},
+		{name: "deno default js script", runtime: task.RuntimeDeno, files: map[string]string{"task.js": ""}, wantName: "task.test.js"},
+		{name: "deno default no script", runtime: task.RuntimeDeno, wantName: "task.test.ts"},
+		{name: "deno symlink rejected", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "real.test.js": ""}, symlinks: []string{"task.test.js"}, wantName: "task.test.js"},
+		{name: "python symlink rejected", runtime: runtimePython, files: map[string]string{"task.py": "", "real.test.py": ""}, symlinks: []string{"task.test.py"}, wantName: "task.test.py"},
+		{name: "docker test stage", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21 AS test\nFROM alpine:3.21\n"}, wantName: "Dockerfile", wantExists: true},
+		{name: "podman test stage last", runtime: task.RuntimePodman, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\nFROM alpine:3.21 AS test\n"}, wantName: "Dockerfile", wantExists: true},
+		{name: "docker no test stage", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\n"}, wantName: "Dockerfile"},
+		{name: "docker no build config", runtime: task.RuntimeDocker, wantName: "Dockerfile"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range tc.symlinks {
+				target := filepath.Join(dir, "real"+strings.TrimPrefix(name, "task"))
+				if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			spec := &task.Spec{TaskDir: dir, Runtime: tc.runtime, Docker: tc.docker}
+			name, exists := Discover(spec)
+			if name != tc.wantName || exists != tc.wantExists {
+				t.Errorf("Discover = (%q, %v), want (%q, %v)", name, exists, tc.wantName, tc.wantExists)
+			}
+		})
+	}
+}

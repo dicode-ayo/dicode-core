@@ -69,6 +69,15 @@ have no such summary to parse: `Passed`/`Failed` stay `0` and the container's
 exit code is the only pass/fail signal (`ExitCode` and `Output` still carry
 the full build+run log either way).
 
+`GET /api/tasks/{id}` reports `test_file` and `test_exists` from the same
+discovery (`tasktest.Discover`), so the task detail names exactly the file
+`dicode task test` runs: only `task.test.py` for a Python task (a stale
+`task.test.ts` beside it doesn't count), `task.test.ts`/`.js`/`.mjs` for
+Deno, and `Dockerfile` for Docker/Podman, existing when it declares a `test`
+stage. Symlinked test files don't count. When none exists, `test_file` is the
+name a new test should use: `task.test.py`, `Dockerfile`, or `task.test.js`
+for a Deno task whose script is `task.js` and `task.test.ts` otherwise.
+
 ### Output formats
 
 | Flag | stdout | $GITHUB_STEP_SUMMARY |

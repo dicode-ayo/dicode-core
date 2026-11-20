@@ -7,6 +7,7 @@ package tasktest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -128,6 +129,28 @@ func findTestFile(spec *task.Spec) (string, error) {
 		}
 	}
 	return "", ErrNoTestFile
+}
+
+// Discover reports the base name of the test file `dicode task test` would
+// run for spec and whether it exists. For Docker/Podman that is the
+// Dockerfile, existing when it declares a "test" stage. When nothing exists,
+// name is the file a new test should go in.
+func Discover(spec *task.Spec) (name string, exists bool) {
+	switch spec.Runtime {
+	case task.RuntimeDocker, task.RuntimePodman:
+		_, _, err := readDockerTestStage(spec)
+		return "Dockerfile", err == nil || errors.Is(err, ErrTestStageLast)
+	}
+	if p, err := findTestFile(spec); err == nil {
+		return filepath.Base(p), true
+	}
+	if spec.Runtime == runtimePython {
+		return "task.test.py", false
+	}
+	if p := spec.ScriptPath(); p == "" || strings.HasSuffix(p, ".ts") {
+		return "task.test.ts", false
+	}
+	return "task.test.js", false
 }
 
 // dockerFromRe matches every Dockerfile FROM instruction line, capturing

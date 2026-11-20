@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Python With Test
+description: A Python task with a task.test.py, for task detail test-file discovery.
+runtime: python
+trigger:
+  manual: true
+timeout: 10s
