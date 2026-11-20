@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/alexedwards/scs/v2"
-	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/audit"
@@ -1853,7 +1852,10 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	// Determine script file
 	switch spec.Runtime {
 	case task.RuntimeDocker, task.RuntimePodman:
-		detail.ScriptFile = "Dockerfile"
+		detail.ScriptFile = tasktest.DockerfileName(spec)
+		if detail.ScriptFile == "" {
+			detail.ScriptFile = "Dockerfile"
+		}
 	default:
 		// Use the runtime's own script discovery (Spec.ScriptPath) so the UI
 		// reports exactly the file the runtime would execute — ScriptPath
@@ -1861,24 +1863,13 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		// here previously disagreed with it.
 		if p := spec.ScriptPath(); p != "" {
 			detail.ScriptFile = filepath.Base(p)
+		} else if spec.Runtime == "python" {
+			detail.ScriptFile = "task.py"
 		} else {
 			detail.ScriptFile = "task.ts"
 		}
-		for _, name := range []string{"task.test.ts", "task.test.js"} {
-			if fsutil.Exists(filepath.Join(spec.TaskDir, name)) {
-				detail.TestFile = name
-				detail.TestExists = true
-				break
-			}
-		}
-		if detail.TestFile == "" {
-			if strings.HasSuffix(detail.ScriptFile, ".ts") {
-				detail.TestFile = "task.test.ts"
-			} else {
-				detail.TestFile = "task.test.js"
-			}
-		}
 	}
+	detail.TestFile, detail.TestExists = tasktest.Discover(spec)
 
 	jsonOK(w, detail)
 }

@@ -97,3 +97,7 @@ spec:
         env:
           - { name: CLIENT_ID,            secret: FIXTURE_CLIENT_ID,    optional: true }
           - { name: FIXTURE_ACCESS_TOKEN, secret: FIXTURE_ACCESS_TOKEN, optional: true }
+    # Python task with a task.test.py — see task-detail-test-file.spec.ts.
+    python-with-test:
+      ref:
+        path: FIXTURES_TASKS_DIR/python-with-test/task.yaml
