@@ -663,3 +663,26 @@ func TestDiscover(t *testing.T) {
 		})
 	}
 }
+
+func TestReadInRoot_RejectsSymlinkedDirEscape(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "Dockerfile"), []byte("FROM alpine:3.21 AS test\nFROM alpine:3.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	taskDir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(taskDir, "docker")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readInRoot(taskDir, filepath.Join("docker", "Dockerfile"), maxDockerfileBytes); err == nil {
+		t.Fatal("readInRoot read a Dockerfile through a directory symlink that leaves the task dir")
+	}
+	if err := os.Mkdir(filepath.Join(taskDir, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "inside", "Dockerfile"), []byte("FROM alpine:3.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readInRoot(taskDir, filepath.Join("inside", "Dockerfile"), maxDockerfileBytes); err != nil {
+		t.Fatalf("readInRoot in-dir: %v", err)
+	}
+}

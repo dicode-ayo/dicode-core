@@ -192,8 +192,31 @@ func discoverDockerfile(spec *task.Spec) (string, bool) {
 	if name == "" {
 		return "", false
 	}
-	_, _, err := readDockerTestStage(spec)
-	return name, err == nil
+	b, err := readInRoot(spec.TaskDir, filepath.FromSlash(name), maxDockerfileBytes)
+	return name, err == nil && dockerTestStageErr(b) == nil
+}
+
+// readInRoot reads rel, a regular file of at most limit bytes, without
+// resolving any path component outside dir.
+func readInRoot(dir, rel string, limit int64) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	fi, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > limit {
+		return nil, fmt.Errorf("tasktest: %s is not a regular file of at most %d bytes", rel, limit)
+	}
+	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readOpenedCapped(f, fi, limit)
 }
 
 // dockerFromRe matches every Dockerfile FROM instruction line, capturing
@@ -257,21 +280,38 @@ func readCapped(path string, lstat os.FileInfo, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readOpenedCapped(f, lstat, limit)
+}
+
+func readOpenedCapped(f *os.File, lstat os.FileInfo, limit int64) ([]byte, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() || !os.SameFile(fi, lstat) {
-		return nil, fmt.Errorf("tasktest: %s changed or is not a regular file", path)
+		return nil, fmt.Errorf("tasktest: %s changed or is not a regular file", f.Name())
 	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("tasktest: %s exceeds %d bytes", path, limit)
+		return nil, fmt.Errorf("tasktest: %s exceeds %d bytes", f.Name(), limit)
 	}
 	return b, nil
+}
+
+// dockerTestStageErr returns nil when content declares a non-final "test"
+// stage, ErrTestStageLast when it is final, ErrNoTestFile when absent.
+func dockerTestStageErr(content []byte) error {
+	if !dockerfileHasTestStage(content) {
+		return ErrNoTestFile
+	}
+	names := dockerStageNames(content)
+	if strings.EqualFold(names[len(names)-1], "test") {
+		return ErrTestStageLast
+	}
+	return nil
 }
 
 // readDockerTestStage returns spec's resolved Dockerfile path and bytes if
@@ -294,12 +334,8 @@ func readDockerTestStage(spec *task.Spec) (path string, content []byte, err erro
 	if readErr != nil {
 		return "", nil, ErrNoTestFile
 	}
-	if !dockerfileHasTestStage(b) {
-		return "", nil, ErrNoTestFile
-	}
-	names := dockerStageNames(b)
-	if strings.EqualFold(names[len(names)-1], "test") {
-		return "", nil, ErrTestStageLast
+	if err := dockerTestStageErr(b); err != nil {
+		return "", nil, err
 	}
 	return dockerfilePath, b, nil
 }
