@@ -632,6 +632,7 @@ func TestDiscover(t *testing.T) {
 		{name: "docker dockerfile outside task dir", runtime: task.RuntimeDocker, docker: &task.DockerConfig{Build: &task.DockerBuild{Dockerfile: "../Dockerfile"}}, wantName: ""},
 		{name: "deno ignores py", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "task.test.py": ""}, wantName: "task.test.js"},
 		{name: "deno test file is a directory", runtime: task.RuntimeDeno, files: map[string]string{"task.ts": ""}, dirs: []string{"task.test.ts"}, wantName: "task.test.ts"},
+		{name: "no runtime ignores py", files: map[string]string{"task.js": "", "task.test.py": ""}, wantName: "task.test.js"},
 		{name: "unsupported runtime", runtime: task.Runtime("ruby"), files: map[string]string{"task.rb": ""}, wantName: ""},
 	}
 	for _, tc := range cases {

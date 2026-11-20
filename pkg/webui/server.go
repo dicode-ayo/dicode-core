@@ -1852,7 +1852,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	// Determine script file
 	switch spec.Runtime {
 	case task.RuntimeDocker, task.RuntimePodman:
-		detail.ScriptFile = "Dockerfile"
+		detail.ScriptFile = tasktest.DockerfileName(spec)
 	default:
 		// Use the runtime's own script discovery (Spec.ScriptPath) so the UI
 		// reports exactly the file the runtime would execute — ScriptPath

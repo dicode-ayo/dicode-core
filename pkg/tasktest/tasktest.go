@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dicode/dicode/internal/fsutil"
@@ -141,7 +142,8 @@ func findTestFile(spec *task.Spec) (string, error) {
 // relative to its task dir, and whether it exists. For Docker/Podman that is
 // the Dockerfile, existing when it declares a "test" stage that isn't its
 // last. A Dockerfile outside the task dir is never read and reports ("",
-// false). When nothing exists, name is the file a new test should go in, or
+// false), although Run still accepts one: Discover backs a read-only view
+// that also serves tasks still pending approval. When nothing exists, name is the file a new test should go in, or
 // "" for a runtime tasktest can't run.
 func Discover(spec *task.Spec) (name string, exists bool) {
 	switch spec.Runtime {
@@ -151,7 +153,7 @@ func Discover(spec *task.Spec) (name string, exists bool) {
 	default:
 		return "", false
 	}
-	if p, err := findTestFile(spec); err == nil {
+	if p, err := findTestFile(spec); err == nil && (spec.Runtime == runtimePython || filepath.Ext(p) != ".py") {
 		return filepath.Base(p), true
 	}
 	if spec.Runtime == runtimePython {
@@ -163,20 +165,31 @@ func Discover(spec *task.Spec) (name string, exists bool) {
 	return "task.test.js", false
 }
 
-func discoverDockerfile(spec *task.Spec) (string, bool) {
+// DockerfileName returns spec's Dockerfile relative to its task dir, or ""
+// when docker.build points outside it. Without a build config it is
+// "Dockerfile".
+func DockerfileName(spec *task.Spec) string {
 	if spec.Docker == nil || spec.Docker.Build == nil {
-		return "Dockerfile", false
+		return "Dockerfile"
 	}
 	path, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
 	if within, err := pathguard.WithinResolved(spec.TaskDir, path); err != nil || !within {
-		return "", false
+		return ""
 	}
 	rel, err := filepath.Rel(spec.TaskDir, path)
 	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+func discoverDockerfile(spec *task.Spec) (string, bool) {
+	name := DockerfileName(spec)
+	if name == "" {
 		return "", false
 	}
-	_, _, err = readDockerTestStage(spec)
-	return filepath.ToSlash(rel), err == nil
+	_, _, err := readDockerTestStage(spec)
+	return name, err == nil
 }
 
 // dockerFromRe matches every Dockerfile FROM instruction line, capturing
@@ -232,8 +245,11 @@ var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must no
 // this discovery on every view, including for tasks still pending approval.
 const maxDockerfileBytes = 1 << 20
 
-func readCapped(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
+// readCapped reads path only if the opened file is the regular file lstat
+// saw. O_NONBLOCK keeps a FIFO swapped in after the Lstat from blocking the
+// open.
+func readCapped(path string, lstat os.FileInfo, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +258,8 @@ func readCapped(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("tasktest: %s is not a regular file", path)
+	if !fi.Mode().IsRegular() || !os.SameFile(fi, lstat) {
+		return nil, fmt.Errorf("tasktest: %s changed or is not a regular file", path)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
@@ -271,7 +287,7 @@ func readDockerTestStage(spec *task.Spec) (path string, content []byte, err erro
 	if statErr != nil || !fi.Mode().IsRegular() || fi.Size() > maxDockerfileBytes {
 		return "", nil, ErrNoTestFile
 	}
-	b, readErr := readCapped(dockerfilePath, maxDockerfileBytes)
+	b, readErr := readCapped(dockerfilePath, fi, maxDockerfileBytes)
 	if readErr != nil {
 		return "", nil, ErrNoTestFile
 	}
