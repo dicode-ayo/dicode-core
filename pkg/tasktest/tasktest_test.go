@@ -623,22 +623,27 @@ func TestDiscover(t *testing.T) {
 		{name: "deno symlink rejected", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "real.test.js": ""}, symlinks: []string{"task.test.js"}, wantName: "task.test.js"},
 		{name: "python symlink rejected", runtime: runtimePython, files: map[string]string{"task.py": "", "real.test.py": ""}, symlinks: []string{"task.test.py"}, wantName: "task.test.py"},
 		{name: "docker test stage", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21 AS test\nFROM alpine:3.21\n"}, wantName: "Dockerfile", wantExists: true},
-		{name: "podman test stage last", runtime: task.RuntimePodman, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\nFROM alpine:3.21 AS test\n"}, wantName: "Dockerfile", wantExists: true},
+		{name: "podman test stage last", runtime: task.RuntimePodman, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\nFROM alpine:3.21 AS test\n"}, wantName: "Dockerfile"},
 		{name: "docker no test stage", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\n"}, wantName: "Dockerfile"},
 		{name: "docker no build config", runtime: task.RuntimeDocker, wantName: "Dockerfile"},
 		{name: "docker dockerfile is a directory", runtime: task.RuntimeDocker, docker: dockerBuild, dirs: []string{"Dockerfile"}, wantName: "Dockerfile"},
 		{name: "docker oversized dockerfile", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21 AS test\nFROM alpine:3.21\n" + strings.Repeat("#", maxDockerfileBytes)}, wantName: "Dockerfile"},
+		{name: "docker custom dockerfile", runtime: task.RuntimeDocker, docker: &task.DockerConfig{Build: &task.DockerBuild{Dockerfile: "docker/Dockerfile.test"}}, dirs: []string{"docker"}, files: map[string]string{"docker/Dockerfile.test": "FROM alpine:3.21 AS test\nFROM alpine:3.21\n"}, wantName: "docker/Dockerfile.test", wantExists: true},
+		{name: "docker dockerfile outside task dir", runtime: task.RuntimeDocker, docker: &task.DockerConfig{Build: &task.DockerBuild{Dockerfile: "../Dockerfile"}}, wantName: ""},
+		{name: "deno ignores py", runtime: task.RuntimeDeno, files: map[string]string{"task.js": "", "task.test.py": ""}, wantName: "task.test.js"},
+		{name: "deno test file is a directory", runtime: task.RuntimeDeno, files: map[string]string{"task.ts": ""}, dirs: []string{"task.test.ts"}, wantName: "task.test.ts"},
+		{name: "unsupported runtime", runtime: task.Runtime("ruby"), files: map[string]string{"task.rb": ""}, wantName: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			for name, body := range tc.files {
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			for _, name := range tc.dirs {
+				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
-			for _, name := range tc.dirs {
-				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
 					t.Fatal(err)
 				}
 			}

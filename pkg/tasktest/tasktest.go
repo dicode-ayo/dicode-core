@@ -7,7 +7,6 @@ package tasktest
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/runtime/imagegc"
 	"github.com/dicode/dicode/pkg/task"
@@ -114,33 +114,42 @@ func findTestFile(spec *task.Spec) (string, error) {
 	// For a Python-runtime spec, only .py is considered — otherwise a stale
 	// task.test.ts left behind in a task dir that was converted to
 	// runtime: python would silently shadow the real task.test.py and get run
-	// through the wrong runtime. For every other runtime (including unset/""),
-	// the Deno/TS extensions are checked first (matching the priority order used
-	// by pkg/task.ScriptPath, ts-preferred-over-js), with .py checked last as a
-	// defensive fallback for hand-constructed specs. Symlinks are rejected to
-	// stay consistent with the production script-path policy.
-	exts := []string{".ts", ".js", ".mjs", ".py"}
-	if spec.Runtime == runtimePython {
+	// through the wrong runtime. Deno considers only its own extensions, in
+	// pkg/task.ScriptPath's ts-preferred-over-js order. A hand-constructed
+	// spec with no runtime also falls back to .py. Only regular files count:
+	// symlinks are rejected to stay consistent with the production
+	// script-path policy.
+	var exts []string
+	switch spec.Runtime {
+	case runtimePython:
 		exts = []string{".py"}
+	case task.RuntimeDeno, "js":
+		exts = []string{".ts", ".js", ".mjs"}
+	default:
+		exts = []string{".ts", ".js", ".mjs", ".py"}
 	}
 	for _, ext := range exts {
 		p := filepath.Join(spec.TaskDir, "task.test"+ext)
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
 			return p, nil
 		}
 	}
 	return "", ErrNoTestFile
 }
 
-// Discover reports the base name of the test file `dicode task test` would
-// run for spec and whether it exists. For Docker/Podman that is the
-// Dockerfile, existing when it declares a "test" stage. When nothing exists,
-// name is the file a new test should go in.
+// Discover reports the test file `dicode task test` would run for spec,
+// relative to its task dir, and whether it exists. For Docker/Podman that is
+// the Dockerfile, existing when it declares a "test" stage that isn't its
+// last. A Dockerfile outside the task dir is never read and reports ("",
+// false). When nothing exists, name is the file a new test should go in, or
+// "" for a runtime tasktest can't run.
 func Discover(spec *task.Spec) (name string, exists bool) {
 	switch spec.Runtime {
 	case task.RuntimeDocker, task.RuntimePodman:
-		_, _, err := readDockerTestStage(spec)
-		return "Dockerfile", err == nil || errors.Is(err, ErrTestStageLast)
+		return discoverDockerfile(spec)
+	case task.RuntimeDeno, "js", "", runtimePython:
+	default:
+		return "", false
 	}
 	if p, err := findTestFile(spec); err == nil {
 		return filepath.Base(p), true
@@ -152,6 +161,22 @@ func Discover(spec *task.Spec) (name string, exists bool) {
 		return "task.test.ts", false
 	}
 	return "task.test.js", false
+}
+
+func discoverDockerfile(spec *task.Spec) (string, bool) {
+	if spec.Docker == nil || spec.Docker.Build == nil {
+		return "Dockerfile", false
+	}
+	path, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
+	if within, err := pathguard.WithinResolved(spec.TaskDir, path); err != nil || !within {
+		return "", false
+	}
+	rel, err := filepath.Rel(spec.TaskDir, path)
+	if err != nil {
+		return "", false
+	}
+	_, _, err = readDockerTestStage(spec)
+	return filepath.ToSlash(rel), err == nil
 }
 
 // dockerFromRe matches every Dockerfile FROM instruction line, capturing
@@ -213,6 +238,13 @@ func readCapped(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("tasktest: %s is not a regular file", path)
+	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err

@@ -163,7 +163,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 - **`apikeys.go`** — `apiKeyStore`: `generate` (returns raw `dck_`-prefixed key once; prefix truncation bounds-checked), `validate` (hash-compare + `last_used` update), `list`, `revoke`. `requireAPIKey` middleware for MCP. HTTP handlers: `apiListAPIKeys`, `apiCreateAPIKey`, `apiRevokeAPIKey`.
 - `apiSecretsUnlock` extended: accepts `trust: true` → issues device cookie alongside session cookie
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
-- `GET /api/tasks/{id}` — `test_file`/`test_exists` come from `tasktest.Discover`, the same discovery `dicode task test` uses (Python → `task.test.py` only; Deno → `.ts`/`.js`/`.mjs`; Docker/Podman → `Dockerfile` with a `test` stage); `script_file` falls back to `task.py` for a Python task with no script
+- `GET /api/tasks/{id}` — `test_file`/`test_exists` come from `tasktest.Discover`, the same discovery `dicode task test` uses (Python → `task.test.py` only; Deno → `.ts`/`.js`/`.mjs`; Docker/Podman → the in-task-dir Dockerfile with a non-final `test` stage); `script_file` falls back to `task.py` for a Python task with no script
 - **New auth endpoints**: `POST /api/secrets/unlock` (with trust), `POST /api/auth/refresh`, `GET/DELETE /api/auth/devices/{id}`, `POST /api/auth/logout`, `POST /api/auth/logout-all`, `GET/POST/DELETE /api/auth/keys/{id}`
 - **Source management** (`sources.go`): `SourceManager` (maps source name → `*taskset.Source`), `GET /api/sources`, `PATCH /api/sources/:name/dev`, `GET /api/sources/:name/branches`
 - **MCP server** at `/mcp`: protected by `requireAPIKey` when auth enabled

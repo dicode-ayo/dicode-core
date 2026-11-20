@@ -71,13 +71,19 @@ the full build+run log either way).
 
 `GET /api/tasks/{id}` reports `test_file` and `test_exists` from the same
 discovery (`tasktest.Discover`), so the task detail names exactly the file
-`dicode task test` runs: only `task.test.py` for a Python task (a stale
-`task.test.ts` beside it doesn't count), `task.test.ts`/`.js`/`.mjs` for
-Deno, and `Dockerfile` for Docker/Podman, existing when it declares a `test`
-stage. Symlinked test files don't count, and neither does a Dockerfile that
-isn't a regular file or is over 1 MiB. When none exists, `test_file` is the
-name a new test should use: `task.test.py`, `Dockerfile`, or `task.test.js`
-for a Deno task whose script is `task.js` and `task.test.ts` otherwise.
+`dicode task test` runs:
+
+- Python: only `task.test.py` (a stale `task.test.ts` beside it doesn't count).
+- Deno: `task.test.ts`, `.js` or `.mjs`, never `.py`.
+- Docker/Podman: the task's Dockerfile (`docker.build.dockerfile`, relative to
+  the task dir), existing when it declares a `test` stage that isn't its last.
+  A Dockerfile outside the task dir isn't read and reports an empty
+  `test_file`; one that isn't a regular file or is over 1 MiB doesn't count.
+
+Only regular files count as tests; symlinks and directories don't. When no
+test exists, `test_file` is the name a new test should use: `task.test.py`,
+`task.test.js` for a Deno task whose script is `task.js`, and `task.test.ts`
+otherwise. Runtimes `dicode task test` can't run report an empty `test_file`.
 
 ### Output formats
 
