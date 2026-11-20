@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,9 +203,30 @@ func dockerfileHasTestStage(content []byte) bool {
 // the real one.
 var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must not be its last stage")
 
+// maxDockerfileBytes bounds the Dockerfile read: the task-detail API runs
+// this discovery on every view, including for tasks still pending approval.
+const maxDockerfileBytes = 1 << 20
+
+func readCapped(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("tasktest: %s exceeds %d bytes", path, limit)
+	}
+	return b, nil
+}
+
 // readDockerTestStage returns spec's resolved Dockerfile path and bytes if
 // it exists and declares a "test" build stage, ErrNoTestFile otherwise (no
-// docker.build config, no Dockerfile, symlinked Dockerfile, or a Dockerfile
+// docker.build config, no Dockerfile, a Dockerfile that is not a regular
+// file (symlink, FIFO, device) or exceeds maxDockerfileBytes, or a Dockerfile
 // with no test stage) — the Docker/Podman equivalent of a missing
 // task.test.*. ErrTestStageLast instead if a test stage exists but is the
 // last one declared.
@@ -214,10 +236,10 @@ func readDockerTestStage(spec *task.Spec) (path string, content []byte, err erro
 	}
 	dockerfilePath, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
 	fi, statErr := os.Lstat(dockerfilePath)
-	if statErr != nil || fi.Mode()&os.ModeSymlink != 0 {
+	if statErr != nil || !fi.Mode().IsRegular() || fi.Size() > maxDockerfileBytes {
 		return "", nil, ErrNoTestFile
 	}
-	b, readErr := os.ReadFile(dockerfilePath)
+	b, readErr := readCapped(dockerfilePath, maxDockerfileBytes)
 	if readErr != nil {
 		return "", nil, ErrNoTestFile
 	}

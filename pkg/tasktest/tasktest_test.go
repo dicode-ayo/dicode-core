@@ -607,6 +607,7 @@ func TestDiscover(t *testing.T) {
 		docker     *task.DockerConfig
 		files      map[string]string
 		symlinks   []string
+		dirs       []string
 		wantName   string
 		wantExists bool
 	}{
@@ -625,12 +626,19 @@ func TestDiscover(t *testing.T) {
 		{name: "podman test stage last", runtime: task.RuntimePodman, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\nFROM alpine:3.21 AS test\n"}, wantName: "Dockerfile", wantExists: true},
 		{name: "docker no test stage", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21\n"}, wantName: "Dockerfile"},
 		{name: "docker no build config", runtime: task.RuntimeDocker, wantName: "Dockerfile"},
+		{name: "docker dockerfile is a directory", runtime: task.RuntimeDocker, docker: dockerBuild, dirs: []string{"Dockerfile"}, wantName: "Dockerfile"},
+		{name: "docker oversized dockerfile", runtime: task.RuntimeDocker, docker: dockerBuild, files: map[string]string{"Dockerfile": "FROM alpine:3.21 AS test\nFROM alpine:3.21\n" + strings.Repeat("#", maxDockerfileBytes)}, wantName: "Dockerfile"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			for name, body := range tc.files {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range tc.dirs {
+				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
