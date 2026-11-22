@@ -189,12 +189,13 @@ Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. T
 **Task shim sockets** (per-run, temporary):
 
 - **Wire format**: 4-byte little-endian length prefix + JSON payload
+- **Malformed requests**: a fully read frame whose JSON doesn't fit `Request` (e.g. a numeric `key`) is never dispatched. A frame with a string `id` gets `{"id":...,"error":"ipc: invalid request: <reason>"}`; one without is dropped (logged on task sockets). The connection keeps serving. Framing errors (short header/body, zero length, over 8 MiB) still close it, as do handshake failures
 - **Handshake**: client sends `{"token":"<DICODE_TOKEN>"}`, server validates HMAC-signed token and replies `{"proto":1,"caps":[...]}`
 - **Capability tokens**: HMAC-SHA256 signed, scoped to a specific run ID. Task shims get `log`, `params.read`, `input.read`, `kv.read`, `kv.write`, `output.write`, `return`, `tasks.list`, `runs.list`, `config.read`; additionally `tasks.trigger` / `mcp.call` based on security config; `http.register` for daemon tasks
 - `server.go` — `Server` struct; `Start()` returns `(socketPath, token, error)`. Dispatcher enforces capability checks before every handler
 - `gateway.go` — `Gateway` HTTP dispatch layer: priority-ordered pattern routing (longest-prefix wins). Two handler types: Go handlers (webhook tasks) and IPC handlers (daemon tasks via `http.register`). `ipcHandler` bridges HTTP requests to open IPC connections via `HTTPInboundRequest` push + `http.respond` reply
 - `token.go` — `IssueToken` / `IssueTokenWithTTL` / `VerifyToken` (HMAC-SHA256); `NewSecret()`
-- `conn.go` — `readMsg` / `writeMsg` (length-prefix framing) with outbound size guard (8 MiB)
+- `conn.go` — `readMsg` / `writeMsg` (length-prefix framing) with outbound size guard (8 MiB); `readMsg` returns a `*decodeError` for a frame read whole but undecodable, which `invalidRequest` turns into a per-request error reply
 - `capability.go` — capability constants; `defaultTaskCaps()`; **`CapCLI*` constants** + `cliCaps()` for control socket clients
 - `message.go` — `Request`, `Response`, `OutputResult`, `EngineRunner`, `RunResult`, `HTTPInboundRequest`, **`TaskSummary`**, **`LogEntry`**, **`DaemonStatus`** types
 

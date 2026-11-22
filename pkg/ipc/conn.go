@@ -53,7 +53,41 @@ func readMsg(r io.Reader, v any) error {
 		return fmt.Errorf("ipc: read body: %w", err)
 	}
 	if err := json.Unmarshal(buf, v); err != nil {
-		return fmt.Errorf("ipc: unmarshal: %w", err)
+		return &decodeError{raw: buf, err: err}
 	}
 	return nil
+}
+
+// decodeError is returned by readMsg when a frame was read whole but its JSON
+// does not fit the target. Unlike a framing error, the stream is still in sync.
+type decodeError struct {
+	raw []byte
+	err error
+}
+
+func (e *decodeError) Error() string { return "ipc: unmarshal: " + e.err.Error() }
+func (e *decodeError) Unwrap() error { return e.err }
+
+const maxInvalidReasonLen = 200
+
+// invalidRequest classifies a readMsg error from a request loop. ok is false
+// for a framing error, after which the connection must be closed. Otherwise
+// id is the frame's string id ("" when absent or not a string) and msg is the
+// error text to reply with.
+func invalidRequest(err error) (id, msg string, ok bool) {
+	var de *decodeError
+	if !errors.As(err, &de) {
+		return "", "", false
+	}
+	var probe struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(de.raw, &probe) == nil {
+		_ = json.Unmarshal(probe.ID, &id)
+	}
+	reason := de.err.Error()
+	if len(reason) > maxInvalidReasonLen {
+		reason = reason[:maxInvalidReasonLen] + "..."
+	}
+	return id, "ipc: invalid request: " + reason, true
 }

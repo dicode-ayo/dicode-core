@@ -78,6 +78,13 @@ result = {"processed": 42}
 The Python runtime injects the same SDK globals as the Deno runtime via a Unix
 socket bridge. No imports are needed — all globals are available at module level.
 
+A call the daemon rejects — a missing permission, or arguments of the wrong JSON
+type such as `kv.get(123)` — raises `RuntimeError` with the daemon's error
+(`ipc: invalid request: ...` for a wrongly typed argument) from that call only.
+The connection stays up, so the task can catch it and keep using the SDK.
+Fire-and-forget calls (`kv.set`, `kv.delete`) get no reply, so a
+wrongly typed one is dropped silently.
+
 ### `log`
 
 ```python

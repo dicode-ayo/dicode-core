@@ -80,6 +80,8 @@ return { processed: limit }
 
 The Deno runtime injects all globals via an IPC bridge — a Unix socket, or a loopback TCP connection on Windows. No imports needed — all globals are available at the top level.
 
+A call the daemon rejects — a missing permission, or arguments of the wrong JSON type such as `kv.get(123)` — rejects only that call's promise with the daemon's error (`ipc: invalid request: ...` for a wrongly typed argument). The connection stays up, so the task can catch the error and keep using the SDK. Fire-and-forget calls (`kv.set`, `kv.delete`) get no reply, so a wrongly typed one is dropped silently.
+
 ### Logging
 
 Use standard `console` methods — stdout is captured as `info` and stderr as `error` in the run log:

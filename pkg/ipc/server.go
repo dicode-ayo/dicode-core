@@ -547,7 +547,15 @@ func (s *Server) handleConn(conn net.Conn) {
 	for {
 		var req Request
 		if err := readMsg(conn, &req); err != nil {
-			return // EOF or closed connection
+			id, msg, ok := invalidRequest(err)
+			if !ok {
+				return // EOF, closed connection or broken framing
+			}
+			if id == "" {
+				s.log.Warn("ipc: dropped invalid request", zap.String("run", s.runID), zap.Error(err))
+			}
+			reply(id, nil, msg)
+			continue
 		}
 
 		switch req.Method {
