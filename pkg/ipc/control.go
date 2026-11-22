@@ -280,7 +280,17 @@ func (cs *ControlServer) handleConn(ctx context.Context, conn net.Conn) {
 	for {
 		var req Request
 		if err := readMsg(conn, &req); err != nil {
-			return
+			id, msg, ok := invalidRequest(err)
+			if !ok {
+				return
+			}
+			if id == "" {
+				continue
+			}
+			if err := writeMsg(conn, Response{ID: id, Error: msg}); err != nil {
+				return
+			}
+			continue
 		}
 		if req.ID == "" {
 			continue // fire-and-forget not used on control socket

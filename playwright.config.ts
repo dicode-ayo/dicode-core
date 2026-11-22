@@ -58,6 +58,7 @@ export default defineConfig({
         '**/approval-review.spec.ts',
         '**/approval-hash-binding.spec.ts',
         '**/file-status.spec.ts',
+        '**/ipc-bad-request.spec.ts',
         '**/pending-task-list-signals.spec.ts',
         '**/task-load-failure.spec.ts',
         '**/task-state-armed.spec.ts',
