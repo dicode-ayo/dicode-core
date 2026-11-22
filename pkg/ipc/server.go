@@ -554,12 +554,14 @@ func (s *Server) handleConn(conn net.Conn) {
 				return // EOF, closed connection or broken framing
 			}
 			if id == "" {
+				line := s.redactor.Load().RedactString("ipc: dropped invalid request: " + strings.TrimPrefix(msg, invalidRequestPrefix))
 				if !warnedDrop {
 					warnedDrop = true
-					s.log.Warn("ipc: dropped invalid request", zap.String("run", s.runID), zap.Error(err))
+					s.log.Warn(line, zap.String("run", s.runID))
 				}
-				reason := strings.TrimPrefix(msg, invalidRequestPrefix)
-				s.bufferLog("error", s.redactor.Load().RedactString("ipc: dropped invalid request: "+reason))
+				if hasCap(caps, CapLog) {
+					s.bufferLog("error", line)
+				}
 				continue
 			}
 			reply(id, nil, msg)
