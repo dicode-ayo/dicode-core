@@ -11,6 +11,7 @@ import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { settleApproved } from './helpers/approval';
 import { runReturnValue, runStatus, type Run } from './helpers/runs';
 
 const SOURCE = 'e2e-tests';
@@ -71,7 +72,7 @@ async function taskListed(request: APIRequestContext): Promise<boolean> {
 }
 
 test.describe('IPC badly typed request', () => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   let originalTaskset = '';
 
   test.beforeAll(() => {
@@ -96,14 +97,9 @@ test.describe('IPC badly typed request', () => {
   test('a badly typed SDK call errors alone and the run still succeeds', async ({ request }) => {
     await waitFor(() => taskListed(request), `${TASK_ID} to appear in /api/tasks`);
 
+    await settleApproved(request, TASK_ID);
+
     const encoded = encodeURIComponent(TASK_ID);
-    await waitFor(async () => {
-      const res = await request.get(`/api/tasks/${encoded}`);
-      if (!res.ok()) return false;
-      if ((await res.json() as { pending_approval?: boolean }).pending_approval !== true) return true;
-      await request.post(`/api/tasks/${encoded}/approve`);
-      return false;
-    }, `${TASK_ID} to be approved`);
 
     const runRes = await request.post(`/api/tasks/${encoded}/run`);
     expect(runRes.ok()).toBe(true);

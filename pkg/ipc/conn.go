@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 const maxMessageSize = 8 * 1024 * 1024 // 8 MiB — guards against runaway allocations
@@ -68,7 +69,10 @@ type decodeError struct {
 func (e *decodeError) Error() string { return "ipc: unmarshal: " + e.err.Error() }
 func (e *decodeError) Unwrap() error { return e.err }
 
-const maxInvalidReasonLen = 200
+const (
+	maxInvalidReasonLen  = 200
+	invalidRequestPrefix = "ipc: invalid request: "
+)
 
 // invalidRequest classifies a readMsg error from a request loop. ok is false
 // for a framing error, after which the connection must be closed. Otherwise
@@ -87,7 +91,11 @@ func invalidRequest(err error) (id, msg string, ok bool) {
 	}
 	reason := de.err.Error()
 	if len(reason) > maxInvalidReasonLen {
-		reason = reason[:maxInvalidReasonLen] + "..."
+		cut := maxInvalidReasonLen
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut--
+		}
+		reason = reason[:cut] + "..."
 	}
-	return id, "ipc: invalid request: " + reason, true
+	return id, invalidRequestPrefix + reason, true
 }

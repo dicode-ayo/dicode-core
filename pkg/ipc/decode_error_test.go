@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func writeRawFrame(t *testing.T, conn net.Conn, body []byte) {
@@ -106,6 +108,55 @@ func TestInvalidRequest_TruncatesReason(t *testing.T) {
 	}
 	if len(msg) > 300 {
 		t.Errorf("reason not truncated: %d bytes", len(msg))
+	}
+}
+
+func TestInvalidRequest_TruncatesOnRuneBoundary(t *testing.T) {
+	reason := strings.Repeat("x", maxInvalidReasonLen-1) + "é" + strings.Repeat("y", 50)
+	_, msg, ok := invalidRequest(&decodeError{raw: []byte(`{"id":"1"}`), err: errors.New(reason)})
+	if !ok {
+		t.Fatal("expected decode error")
+	}
+	if !utf8.ValidString(msg) {
+		t.Fatalf("truncation split a rune: %q", msg)
+	}
+	want := invalidRequestPrefix + strings.Repeat("x", maxInvalidReasonLen-1) + "..."
+	if msg != want {
+		t.Errorf("msg = %q, want %q", msg, want)
+	}
+}
+
+func TestServer_BadlyTypedRequestWithoutID_LoggedToRunLog(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	writeRawFrame(t, conn, []byte(`{"method":"kv.set","key":123,"value":"v"}`))
+	writeRawFrame(t, conn, []byte(`not json`))
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "kv.get", "key": "k"})
+	if resp := recvMsg(t, conn); resp["id"] != "1" {
+		t.Fatalf("expected reply to id 1, got %v", resp)
+	}
+	conn.Close()
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropped []string
+	for _, l := range logs {
+		if strings.HasPrefix(l.Message, "ipc: dropped invalid request: ") {
+			if l.Level != "error" {
+				t.Errorf("level = %q, want error", l.Level)
+			}
+			dropped = append(dropped, l.Message)
+		}
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("want 2 dropped-request lines, got %d: %+v", len(dropped), logs)
+	}
+	if !strings.Contains(dropped[0], "cannot unmarshal number") {
+		t.Errorf("first line lacks the decode reason: %q", dropped[0])
 	}
 }
 

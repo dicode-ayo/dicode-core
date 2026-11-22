@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -544,6 +545,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 	}
 
+	warnedDrop := false
 	for {
 		var req Request
 		if err := readMsg(conn, &req); err != nil {
@@ -552,7 +554,13 @@ func (s *Server) handleConn(conn net.Conn) {
 				return // EOF, closed connection or broken framing
 			}
 			if id == "" {
-				s.log.Warn("ipc: dropped invalid request", zap.String("run", s.runID), zap.Error(err))
+				if !warnedDrop {
+					warnedDrop = true
+					s.log.Warn("ipc: dropped invalid request", zap.String("run", s.runID), zap.Error(err))
+				}
+				reason := strings.TrimPrefix(msg, invalidRequestPrefix)
+				s.bufferLog("error", s.redactor.Load().RedactString("ipc: dropped invalid request: "+reason))
+				continue
 			}
 			reply(id, nil, msg)
 			continue

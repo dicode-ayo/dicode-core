@@ -83,7 +83,8 @@ type such as `kv.get(123)` — raises `RuntimeError` with the daemon's error
 (`ipc: invalid request: ...` for a wrongly typed argument) from that call only.
 The connection stays up, so the task can catch it and keep using the SDK.
 Fire-and-forget calls (`kv.set`, `kv.delete`) get no reply, so a
-wrongly typed one is dropped silently.
+wrongly typed one is dropped and an `ipc: dropped invalid request: ...` error
+line is added to the run log instead.
 
 ### `log`
 
