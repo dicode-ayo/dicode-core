@@ -110,8 +110,7 @@ func PathMatches(pattern, urlPath string) bool {
 // its open IPC connection. The gateway pushes an HTTPInboundRequest; the task
 // replies with http.respond. A 60-second timeout applies per request.
 type ipcHandler struct {
-	writeMu sync.Mutex          // serialises concurrent writes to push
-	push    func(msg any) error // writes to the task's IPC connection
+	push    func(msg any) error // writes to the task's IPC connection; safe for concurrent use
 	pending sync.Map            // requestID → chan ipcResponse
 }
 
@@ -153,10 +152,7 @@ func (h *ipcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ReqHeaders: headers,
 		ReqBody:    body,
 	}
-	h.writeMu.Lock()
-	err := h.push(inbound)
-	h.writeMu.Unlock()
-	if err != nil {
+	if err := h.push(inbound); err != nil {
 		http.Error(w, "gateway: send to handler failed", http.StatusBadGateway)
 		return
 	}

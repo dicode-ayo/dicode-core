@@ -1,0 +1,604 @@
+package ipc
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
+)
+
+// recordingWriter keeps every Write call's bytes separately.
+type recordingWriter struct {
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (r *recordingWriter) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.writes = append(r.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+// assertWholeFrame fails unless p is exactly one complete length-prefixed frame.
+func assertWholeFrame(t *testing.T, i int, p []byte) {
+	t.Helper()
+	r := bytes.NewReader(p)
+	var m map[string]any
+	if err := readMsg(r, &m); err != nil {
+		t.Fatalf("write %d (%d bytes) is not a complete frame: %v", i, len(p), err)
+	}
+	if r.Len() != 0 {
+		t.Fatalf("write %d carries %d trailing bytes after its frame", i, r.Len())
+	}
+}
+
+func TestWriteMsg_OneWritePerFrame(t *testing.T) {
+	rw := &recordingWriter{}
+	for i := 0; i < 3; i++ {
+		if err := writeMsg(rw, Response{ID: fmt.Sprint(i), Result: "ok"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(rw.writes) != 3 {
+		t.Fatalf("expected 3 Write calls for 3 frames, got %d", len(rw.writes))
+	}
+	for i, p := range rw.writes {
+		assertWholeFrame(t, i, p)
+	}
+}
+
+func TestFrameWriter_OneWritePerFrame(t *testing.T) {
+	rw := &recordingWriter{}
+	fw := newFrameWriter(rw)
+	if err := fw.writeMsg(Response{ID: "1", Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.writeMsg(HTTPInboundRequest{RequestID: "r1", HTTPMethod: "GET", Path: "/x"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rw.writes) != 2 {
+		t.Fatalf("expected 2 Write calls, got %d", len(rw.writes))
+	}
+	for i, p := range rw.writes {
+		assertWholeFrame(t, i, p)
+	}
+}
+
+func TestFrameWriter_TooLargeWritesNothing(t *testing.T) {
+	rw := &recordingWriter{}
+	fw := newFrameWriter(rw)
+	err := fw.writeMsg(Response{ID: "1", Result: strings.Repeat("x", maxMessageSize)})
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("expected ErrMessageTooLarge, got %v", err)
+	}
+	if len(rw.writes) != 0 {
+		t.Fatalf("expected no Write for an oversized frame, got %d", len(rw.writes))
+	}
+}
+
+func TestEncodeFrame_MatchesJSONMarshal(t *testing.T) {
+	v := Response{ID: "<a&b>", Result: map[string]any{"html": "<script>&</script>", "n": 1}}
+	want, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := encodeFrame(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := binary.LittleEndian.Uint32(got[:4]); int(n) != len(want) {
+		t.Fatalf("length prefix %d, want %d", n, len(want))
+	}
+	if !bytes.Equal(got[4:], want) {
+		t.Fatalf("frame body %q, want %q", got[4:], want)
+	}
+}
+
+// closeRecorder records Close.
+type closeRecorder struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+
+func (c *closeRecorder) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// A peer that never reads must not hold a push, or any push queued behind it,
+// forever; a push that sent nothing leaves the stream in sync and open.
+func TestFrameWriter_StalledPeerTimesOut(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
+
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func(i int) { errs <- push(Response{ID: fmt.Sprint(i), Result: "ok"}) }(i)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("push %d: expected a deadline error, got %v", i, err)
+			}
+			if errors.Is(err, errFramePartial) {
+				t.Fatalf("push %d: reported a partial frame though nothing was read: %v", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("push %d still blocked on a peer that never reads", i)
+		}
+	}
+	if c.isClosed() {
+		t.Fatal("connection closed after a push that wrote nothing")
+	}
+
+	got := make(chan Response, 1)
+	go func() {
+		var r Response
+		_ = readMsg(b, &r)
+		got <- r
+	}()
+	if err := push(Response{ID: "after", Result: "ok"}); err != nil {
+		t.Fatalf("push after a timed-out push failed: %v", err)
+	}
+	if r := <-got; r.ID != "after" {
+		t.Fatalf("stream out of sync after a timed-out push: got id %q", r.ID)
+	}
+}
+
+// A push that times out after part of its frame went out closes the connection.
+func TestFrameWriter_PartialPushTimeoutCloses(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
+
+	go func() { _, _ = io.ReadFull(b, make([]byte, 10)) }()
+	err := push(Response{ID: "1", Result: strings.Repeat("x", 1024)})
+	if !errors.Is(err, errFramePartial) || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected a partial-frame deadline error, got %v", err)
+	}
+	if !c.isClosed() {
+		t.Fatal("connection left open after a partially written push")
+	}
+}
+
+// SDK replies carry no deadline: a live task busy for longer than the push
+// timeout still receives its reply once it reads.
+func TestFrameWriter_ReplyHasNoDeadline(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 50 * time.Millisecond
+
+	got := make(chan Response, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		var r Response
+		_ = readMsg(b, &r)
+		got <- r
+	}()
+	if err := fw.writeMsg(Response{ID: "late", Result: "ok"}); err != nil {
+		t.Fatalf("reply to a reader that starts after the timeout failed: %v", err)
+	}
+	if r := <-got; r.ID != "late" {
+		t.Fatalf("reply decoded to id %q", r.ID)
+	}
+}
+
+// A peer that keeps reading, however slowly, must receive a push that takes
+// far longer than the timeout to deliver.
+func TestFrameWriter_SlowReaderCompletes(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = time.Second
+
+	want := strings.Repeat("s", 6<<20)
+	frame, err := encodeFrame(Response{ID: "slow", Result: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 1)
+	go func() {
+		err := fw.writeMsgBounded(Response{ID: "slow", Result: want})
+		if err != nil {
+			a.Close()
+		}
+		errs <- err
+	}()
+
+	var got bytes.Buffer
+	piece := make([]byte, 16*1024)
+	start := time.Now()
+	for got.Len() < len(frame) {
+		n, err := b.Read(piece)
+		if err != nil {
+			t.Fatalf("read after %d bytes in %v: %v; push: %v", got.Len(), time.Since(start), err, <-errs)
+		}
+		got.Write(piece[:n])
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("push to a slow but live reader failed after %v: %v", time.Since(start), err)
+	}
+	if el := time.Since(start); el < 3*fw.timeout/2 {
+		t.Fatalf("frame delivered in %v, too fast to exercise the timeout", el)
+	}
+	var resp Response
+	if err := readMsg(&got, &resp); err != nil {
+		t.Fatalf("frame corrupt: %v", err)
+	}
+	if resp.ID != "slow" || resp.Result != want {
+		t.Fatalf("frame decoded to the wrong message (id %q)", resp.ID)
+	}
+}
+
+// failingConn fails every Write and records Close.
+type failingConn struct {
+	closeRecorder
+}
+
+func (f *failingConn) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// partialConn accepts the first n bytes of a Write, then fails.
+type partialConn struct {
+	closeRecorder
+	n int
+}
+
+func (p *partialConn) Write(b []byte) (int, error) {
+	return min(p.n, len(b)), errors.New("broken pipe")
+}
+
+func TestCloseOnWriteFailure(t *testing.T) {
+	t.Run("write error closes", func(t *testing.T) {
+		c := &failingConn{}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		if err := push(Response{ID: "1"}); err == nil {
+			t.Fatal("expected write error")
+		}
+		if !c.isClosed() {
+			t.Fatal("connection left open after a failed push")
+		}
+	})
+	t.Run("partial write closes", func(t *testing.T) {
+		c := &partialConn{n: 7}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		err := push(Response{ID: "1"})
+		if !errors.Is(err, errFramePartial) {
+			t.Fatalf("expected a partial-frame error, got %v", err)
+		}
+		if !c.isClosed() {
+			t.Fatal("connection left open after a partially written push")
+		}
+	})
+	t.Run("too large keeps open", func(t *testing.T) {
+		c := &failingConn{}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		err := push(Response{ID: "1", Result: strings.Repeat("x", maxMessageSize)})
+		if !errors.Is(err, ErrMessageTooLarge) {
+			t.Fatalf("expected ErrMessageTooLarge, got %v", err)
+		}
+		if c.isClosed() {
+			t.Fatal("connection closed for an oversized frame that wrote nothing")
+		}
+	})
+}
+
+// choppyWriter accepts each Write in small chunks and yields between them,
+// so any two unserialized writers interleave their bytes.
+type choppyWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *choppyWriter) Write(p []byte) (int, error) {
+	for off := 0; off < len(p); off += 3 {
+		end := min(off+3, len(p))
+		c.mu.Lock()
+		c.buf.Write(p[off:end])
+		c.mu.Unlock()
+		runtime.Gosched()
+	}
+	return len(p), nil
+}
+
+func TestFrameWriter_ConcurrentWritersDoNotInterleave(t *testing.T) {
+	cw := &choppyWriter{}
+	fw := newFrameWriter(cw)
+
+	const writers, perWriter = 8, 25
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				var msg any = Response{ID: fmt.Sprintf("%d-%d", w, i), Result: strings.Repeat("r", 64)}
+				if w%2 == 0 {
+					msg = HTTPInboundRequest{RequestID: fmt.Sprintf("%d-%d", w, i), HTTPMethod: "POST", ReqBody: bytes.Repeat([]byte("b"), 64)}
+				}
+				if err := fw.writeMsg(msg); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	r := bytes.NewReader(cw.buf.Bytes())
+	n := 0
+	for r.Len() > 0 {
+		var m map[string]any
+		if err := readMsg(r, &m); err != nil {
+			t.Fatalf("frame %d corrupt: %v", n, err)
+		}
+		n++
+	}
+	if n != writers*perWriter {
+		t.Fatalf("decoded %d frames, want %d", n, writers*perWriter)
+	}
+}
+
+// Gateway pushes (HTTP goroutines) and SDK replies (read-loop goroutine) share
+// one task connection; every frame the task reads must decode intact.
+func TestServer_GatewayPushesAndRepliesDoNotInterleave(t *testing.T) {
+	g := NewGateway()
+	e := newTestEnv(t)
+
+	params := map[string]string{"blob": strings.Repeat("p", 16*1024)}
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	spec := &task.Spec{ID: "race-daemon", Trigger: task.TriggerConfig{Daemon: true}}
+	srv := New(runID, "race-daemon", e.secret, e.reg, e.db, params, nil, zap.NewNop(), spec, nil)
+	srv.SetGateway(g)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{"id": "reg", "method": "http.register", "pattern": "/hooks/race-daemon"})
+	if resp := recvMsg(t, conn); resp["error"] != nil {
+		t.Fatalf("http.register error: %v", resp["error"])
+	}
+
+	_ = conn.SetReadDeadline(time.Time{})
+
+	const pushes, calls = 100, 100
+	client := newFrameWriter(conn)
+
+	readErr := make(chan error, 1)
+	repliesDone := make(chan struct{})
+	go func() {
+		replies := 0
+		for {
+			var m map[string]any
+			if err := readMsg(conn, &m); err != nil {
+				if !errors.Is(err, io.EOF) {
+					select {
+					case readErr <- err:
+					default:
+					}
+				}
+				return
+			}
+			if rid, ok := m["requestID"].(string); ok {
+				go func() {
+					_ = client.writeMsg(map[string]any{
+						"method": "http.respond", "requestID": rid, "status": 200, "respBody": []byte(rid),
+					})
+				}()
+				continue
+			}
+			if _, ok := m["id"].(string); !ok {
+				select {
+				case readErr <- fmt.Errorf("unexpected frame: %v", m):
+				default:
+				}
+				return
+			}
+			if m["error"] != nil {
+				select {
+				case readErr <- fmt.Errorf("reply error: %v", m["error"]):
+				default:
+				}
+				return
+			}
+			replies++
+			if replies == calls {
+				close(repliesDone)
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	codes := make(chan int, pushes)
+	for i := 0; i < pushes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := strings.NewReader(strings.Repeat("h", 16*1024))
+			req := httptest.NewRequest(http.MethodPost, "/hooks/race-daemon", body)
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, req)
+			codes <- w.Code
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < calls; i++ {
+			if err := client.writeMsg(map[string]any{"id": fmt.Sprint(i), "method": "params"}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	timeout := time.After(15 * time.Second)
+	for _, ch := range []chan struct{}{done, repliesDone} {
+		select {
+		case <-ch:
+		case err := <-readErr:
+			t.Fatalf("task-side read desynced: %v", err)
+		case <-timeout:
+			t.Fatal("timed out waiting for pushes and replies")
+		}
+	}
+	close(codes)
+	for c := range codes {
+		if c != http.StatusOK {
+			t.Fatalf("gateway request returned %d, want 200", c)
+		}
+	}
+}
+
+// An error reply too large to frame is replaced by a short error and leaves
+// the connection usable.
+func TestServer_OversizedErrorReplyKeepsConnection(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	// %q doubles each tab, so the error outgrows the frame limit the request fits.
+	sendMsg(t, conn, map[string]any{"id": "big", "method": strings.Repeat("\t", 3<<20)})
+	resp := recvMsg(t, conn)
+	if resp["id"] != "big" || resp["error"] != "ipc: response too large to return" {
+		t.Fatalf("unexpected reply: id=%v error=%.80v", resp["id"], resp["error"])
+	}
+
+	sendMsg(t, conn, map[string]any{"id": "next", "method": "params"})
+	if resp := recvMsg(t, conn); resp["id"] != "next" || resp["error"] != nil {
+		t.Fatalf("connection unusable after an oversized error reply: %v", resp)
+	}
+}
+
+// A push does not wait without bound for the lock held by a reply stuck on a
+// task that stopped reading; giving up leaves the connection open.
+func TestFrameWriter_PushGivesUpBehindStuckReply(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	entered := make(chan struct{})
+	fw := newFrameWriter(&writeSignalConn{Conn: a, entered: entered})
+	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
+
+	replyDone := make(chan error, 1)
+	go func() { replyDone <- fw.writeMsg(Response{ID: "stuck", Result: "ok"}) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reply did not reach Write")
+	}
+
+	pushErr := make(chan error, 1)
+	go func() { pushErr <- push(Response{ID: "p", Result: "ok"}) }()
+	select {
+	case err := <-pushErr:
+		if !errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, errFramePartial) {
+			t.Fatalf("expected a nothing-written deadline error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("push still waiting behind a stuck reply")
+	}
+	if c.isClosed() {
+		t.Fatal("connection closed after a push that wrote nothing")
+	}
+
+	var r Response
+	if err := readMsg(b, &r); err != nil || r.ID != "stuck" {
+		t.Fatalf("reply after the abandoned push: id %q, err %v", r.ID, err)
+	}
+	if err := <-replyDone; err != nil {
+		t.Fatalf("reply failed: %v", err)
+	}
+}
+
+// writeSignalConn closes entered the first time Write is called.
+type writeSignalConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *writeSignalConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(p)
+}
+
+// Concurrent gateway requests to a task whose connection is held by a stuck
+// reply each fail within one push timeout instead of queueing behind each other.
+func TestIPCHandler_QueuedPushesShareOneBound(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	entered := make(chan struct{})
+	fw := newFrameWriter(&writeSignalConn{Conn: a, entered: entered})
+	fw.timeout = 200 * time.Millisecond
+	h := &ipcHandler{push: closeOnWriteFailure(fw, &closeRecorder{})}
+
+	go func() { _ = fw.writeMsg(Response{ID: "stuck", Result: "ok"}) }()
+	<-entered
+
+	const callers = 5
+	start := time.Now()
+	codes := make(chan int, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/x", strings.NewReader("b")))
+			codes <- w.Code
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		select {
+		case code := <-codes:
+			if code != http.StatusBadGateway {
+				t.Fatalf("caller got %d, want 502", code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("caller still waiting")
+		}
+	}
+	if d := time.Since(start); d > 3*fw.timeout {
+		t.Fatalf("queued callers took %v, want about one push timeout (%v)", d, fw.timeout)
+	}
+}
