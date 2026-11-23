@@ -508,3 +508,40 @@ func TestServer_OversizedErrorReplyKeepsConnection(t *testing.T) {
 		t.Fatalf("connection unusable after an oversized error reply: %v", resp)
 	}
 }
+
+// A push does not wait without bound for the lock held by a reply stuck on a
+// task that stopped reading; giving up leaves the connection open.
+func TestFrameWriter_PushGivesUpBehindStuckReply(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
+
+	replyDone := make(chan error, 1)
+	go func() { replyDone <- fw.writeMsg(Response{ID: "stuck", Result: "ok"}) }()
+	time.Sleep(50 * time.Millisecond)
+
+	pushErr := make(chan error, 1)
+	go func() { pushErr <- push(Response{ID: "p", Result: "ok"}) }()
+	select {
+	case err := <-pushErr:
+		if !errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, errFramePartial) {
+			t.Fatalf("expected a nothing-written deadline error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("push still waiting behind a stuck reply")
+	}
+	if c.isClosed() {
+		t.Fatal("connection closed after a push that wrote nothing")
+	}
+
+	var r Response
+	if err := readMsg(b, &r); err != nil || r.ID != "stuck" {
+		t.Fatalf("reply after the abandoned push: id %q, err %v", r.ID, err)
+	}
+	if err := <-replyDone; err != nil {
+		t.Fatalf("reply failed: %v", err)
+	}
+}

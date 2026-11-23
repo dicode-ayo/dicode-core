@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -52,13 +51,13 @@ type writeDeadliner interface {
 // goroutines: each frame goes out under one lock, so frames never interleave
 // on the wire.
 type frameWriter struct {
-	mu      sync.Mutex
+	sem     chan struct{} // one-slot lock; a bounded write can give up waiting for it
 	w       io.Writer
 	timeout time.Duration
 }
 
 func newFrameWriter(w io.Writer) *frameWriter {
-	return &frameWriter{w: w, timeout: frameWriteTimeout}
+	return &frameWriter{sem: make(chan struct{}, 1), w: w, timeout: frameWriteTimeout}
 }
 
 // writeMsg sends a frame in a single Write with no deadline: a task that has
@@ -68,24 +67,35 @@ func (f *frameWriter) writeMsg(v any) error {
 	if err != nil {
 		return err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.sem <- struct{}{}
+	defer func() { <-f.sem }()
 	if _, err := f.w.Write(buf); err != nil {
 		return fmt.Errorf("ipc: write: %w", err)
 	}
 	return nil
 }
 
-// writeMsgBounded sends a frame that fails once the peer accepts no bytes for
-// f.timeout, when the writer supports write deadlines. A failure after part
+// writeMsgBounded sends a frame that fails if it cannot take the lock within
+// f.timeout or, when the writer supports write deadlines, once the peer
+// accepts no bytes for f.timeout. A failure after part
 // of the frame went out wraps errFramePartial.
 func (f *frameWriter) writeMsgBounded(v any) error {
 	buf, err := encodeFrame(v)
 	if err != nil {
 		return err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.timeout > 0 {
+		t := time.NewTimer(f.timeout)
+		select {
+		case f.sem <- struct{}{}:
+			t.Stop()
+		case <-t.C:
+			return fmt.Errorf("ipc: write: waiting for the connection: %w", os.ErrDeadlineExceeded)
+		}
+	} else {
+		f.sem <- struct{}{}
+	}
+	defer func() { <-f.sem }()
 	d, ok := f.w.(writeDeadliner)
 	if !ok || f.timeout <= 0 {
 		return writeErr(f.w.Write(buf))
