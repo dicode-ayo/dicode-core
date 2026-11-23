@@ -189,12 +189,14 @@ Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. T
 **Task shim sockets** (per-run, temporary):
 
 - **Wire format**: 4-byte little-endian length prefix + JSON payload
+- **Write serialization**: after the handshake every write to a task connection — SDK replies and gateway `HTTPInboundRequest` pushes alike — goes through one per-connection `frameWriter` (`framewriter.go`) that sends each frame as a single `Write` under one lock, so frames from the read loop and HTTP goroutines never interleave
 - **Handshake**: client sends `{"token":"<DICODE_TOKEN>"}`, server validates HMAC-signed token and replies `{"proto":1,"caps":[...]}`
 - **Capability tokens**: HMAC-SHA256 signed, scoped to a specific run ID. Task shims get `log`, `params.read`, `input.read`, `kv.read`, `kv.write`, `output.write`, `return`, `tasks.list`, `runs.list`, `config.read`; additionally `tasks.trigger` / `mcp.call` based on security config; `http.register` for daemon tasks
 - `server.go` — `Server` struct; `Start()` returns `(socketPath, token, error)`. Dispatcher enforces capability checks before every handler
 - `gateway.go` — `Gateway` HTTP dispatch layer: priority-ordered pattern routing (longest-prefix wins). Two handler types: Go handlers (webhook tasks) and IPC handlers (daemon tasks via `http.register`). `ipcHandler` bridges HTTP requests to open IPC connections via `HTTPInboundRequest` push + `http.respond` reply
 - `token.go` — `IssueToken` / `IssueTokenWithTTL` / `VerifyToken` (HMAC-SHA256); `NewSecret()`
 - `conn.go` — `readMsg` / `writeMsg` (length-prefix framing) with outbound size guard (8 MiB)
+- `framewriter.go` — `encodeFrame` (header + body in one buffer) and `frameWriter`, the locked single writer for a shared task connection
 - `capability.go` — capability constants; `defaultTaskCaps()`; **`CapCLI*` constants** + `cliCaps()` for control socket clients
 - `message.go` — `Request`, `Response`, `OutputResult`, `EngineRunner`, `RunResult`, `HTTPInboundRequest`, **`TaskSummary`**, **`LogEntry`**, **`DaemonStatus`** types
 

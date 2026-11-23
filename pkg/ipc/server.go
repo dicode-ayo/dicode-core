@@ -518,6 +518,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 	caps := claims.Caps
+	fw := newFrameWriter(conn)
 
 	// ── message loop ─────────────────────────────────────────────────────────
 	reply := func(id string, result any, errMsg string) {
@@ -529,12 +530,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			r.Error = errMsg
 			r.Result = nil
 		}
-		if werr := writeMsg(conn, r); werr != nil {
+		if werr := fw.writeMsg(r); werr != nil {
 			// A result too large to frame leaves the connection healthy — reply
 			// with an error to this one request so the caller rejects instead of
 			// hanging, keeping the run's other calls working.
 			if r.Error == "" && errors.Is(werr, ErrMessageTooLarge) {
-				_ = writeMsg(conn, Response{ID: id, Error: "ipc: response too large to return"})
+				_ = fw.writeMsg(Response{ID: id, Error: "ipc: response too large to return"})
 				return
 			}
 			// A genuine write failure (peer gone) means the socket is dead;
@@ -1501,7 +1502,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			if httpH == nil {
-				httpH = &ipcHandler{push: func(msg any) error { return writeMsg(conn, msg) }}
+				httpH = &ipcHandler{push: fw.writeMsg}
 			}
 			// Register the new pattern before removing the old one to avoid
 			// a brief window where requests for the path return 404.

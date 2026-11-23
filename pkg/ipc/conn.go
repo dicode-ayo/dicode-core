@@ -15,22 +15,15 @@ const maxMessageSize = 8 * 1024 * 1024 // 8 MiB — guards against runaway alloc
 // error to the specific request instead of tearing the connection down.
 var ErrMessageTooLarge = errors.New("ipc: outbound message too large")
 
-// writeMsg encodes v as JSON and writes it with a 4-byte little-endian length prefix.
+// writeMsg encodes v as JSON and writes it with a 4-byte little-endian length
+// prefix, as a single Write.
 func writeMsg(w io.Writer, v any) error {
-	data, err := json.Marshal(v)
+	buf, err := encodeFrame(v)
 	if err != nil {
-		return fmt.Errorf("ipc: marshal: %w", err)
+		return err
 	}
-	if len(data) > maxMessageSize {
-		return fmt.Errorf("%w (%d bytes)", ErrMessageTooLarge, len(data))
-	}
-	var hdr [4]byte
-	binary.LittleEndian.PutUint32(hdr[:], uint32(len(data)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return fmt.Errorf("ipc: write header: %w", err)
-	}
-	if _, err := w.Write(data); err != nil {
-		return fmt.Errorf("ipc: write body: %w", err)
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("ipc: write: %w", err)
 	}
 	return nil
 }
