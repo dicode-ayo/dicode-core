@@ -531,10 +531,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			r.Result = nil
 		}
 		if werr := fw.writeMsg(r); werr != nil {
-			// A result too large to frame leaves the connection healthy — reply
+			// A reply too large to frame leaves the connection healthy — reply
 			// with an error to this one request so the caller rejects instead of
 			// hanging, keeping the run's other calls working.
-			if r.Error == "" && errors.Is(werr, ErrMessageTooLarge) {
+			if errors.Is(werr, ErrMessageTooLarge) {
 				_ = fw.writeMsg(Response{ID: id, Error: "ipc: response too large to return"})
 				return
 			}

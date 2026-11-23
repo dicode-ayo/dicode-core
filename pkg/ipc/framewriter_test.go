@@ -134,6 +134,47 @@ func TestFrameWriter_StalledPeerTimesOut(t *testing.T) {
 	}
 }
 
+// A peer that keeps reading, however slowly, must receive a frame that takes
+// far longer than the timeout to deliver.
+func TestFrameWriter_SlowReaderCompletes(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 200 * time.Millisecond
+
+	want := strings.Repeat("s", 1<<20)
+	errs := make(chan error, 1)
+	go func() { errs <- fw.writeMsg(Response{ID: "slow", Result: want}) }()
+
+	var got bytes.Buffer
+	piece := make([]byte, 8*1024)
+	start := time.Now()
+	for {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("write to a slow but live reader failed after %v: %v", time.Since(start), err)
+			}
+			var resp Response
+			if err := readMsg(&got, &resp); err != nil {
+				t.Fatalf("frame corrupt: %v", err)
+			}
+			if resp.ID != "slow" || resp.Result != want {
+				t.Fatalf("frame decoded to the wrong message (id %q)", resp.ID)
+			}
+			if el := time.Since(start); el < 3*fw.timeout {
+				t.Fatalf("frame delivered in %v, too fast to exercise the timeout", el)
+			}
+			return
+		default:
+		}
+		_ = b.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		n, _ := b.Read(piece)
+		got.Write(piece[:n])
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // failingConn fails every Write and records Close.
 type failingConn struct {
 	mu     sync.Mutex
@@ -344,5 +385,24 @@ func TestServer_GatewayPushesAndRepliesDoNotInterleave(t *testing.T) {
 		if c != http.StatusOK {
 			t.Fatalf("gateway request returned %d, want 200", c)
 		}
+	}
+}
+
+// An error reply too large to frame is replaced by a short error and leaves
+// the connection usable.
+func TestServer_OversizedErrorReplyKeepsConnection(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	// %q doubles each tab, so the error outgrows the frame limit the request fits.
+	sendMsg(t, conn, map[string]any{"id": "big", "method": strings.Repeat("\t", 3<<20)})
+	resp := recvMsg(t, conn)
+	if resp["id"] != "big" || resp["error"] != "ipc: response too large to return" {
+		t.Fatalf("unexpected reply: id=%v error=%.80v", resp["id"], resp["error"])
+	}
+
+	sendMsg(t, conn, map[string]any{"id": "next", "method": "params"})
+	if resp := recvMsg(t, conn); resp["id"] != "next" || resp["error"] != nil {
+		t.Fatalf("connection unusable after an oversized error reply: %v", resp)
 	}
 }

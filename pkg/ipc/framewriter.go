@@ -11,9 +11,14 @@ import (
 	"time"
 )
 
-// frameWriteTimeout bounds one frame Write on a connection that supports
-// write deadlines, so a task that stops reading cannot hold the writer forever.
-const frameWriteTimeout = 30 * time.Second
+// frameWriteTimeout is how long a write may make no progress on a connection
+// that supports write deadlines before it fails, so a task that stops reading
+// cannot hold the writer forever while a slow reader still gets large frames.
+const frameWriteTimeout = 2 * time.Minute
+
+// frameWriteChunk is the most a deadline-bounded write sends per Write; the
+// deadline is renewed before each chunk.
+const frameWriteChunk = 64 * 1024
 
 // encodeFrame marshals v as JSON behind a 4-byte little-endian length prefix.
 // The JSON bytes are identical to json.Marshal's.
@@ -38,8 +43,8 @@ type writeDeadliner interface {
 }
 
 // frameWriter is the single writer for a connection shared by several
-// goroutines: each frame goes out as one Write under one lock, so frames
-// never interleave on the wire.
+// goroutines: each frame goes out under one lock, so frames never interleave
+// on the wire. Without write deadlines a frame is a single Write.
 type frameWriter struct {
 	mu      sync.Mutex
 	w       io.Writer
@@ -57,14 +62,23 @@ func (f *frameWriter) writeMsg(v any) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if d, ok := f.w.(writeDeadliner); ok && f.timeout > 0 {
+	d, ok := f.w.(writeDeadliner)
+	if !ok || f.timeout <= 0 {
+		if _, err := f.w.Write(buf); err != nil {
+			return fmt.Errorf("ipc: write: %w", err)
+		}
+		return nil
+	}
+	defer func() { _ = d.SetWriteDeadline(time.Time{}) }()
+	for len(buf) > 0 {
 		if err := d.SetWriteDeadline(time.Now().Add(f.timeout)); err != nil {
 			return fmt.Errorf("ipc: write: %w", err)
 		}
-		defer func() { _ = d.SetWriteDeadline(time.Time{}) }()
-	}
-	if _, err := f.w.Write(buf); err != nil {
-		return fmt.Errorf("ipc: write: %w", err)
+		n, err := f.w.Write(buf[:min(len(buf), frameWriteChunk)])
+		if err != nil {
+			return fmt.Errorf("ipc: write: %w", err)
+		}
+		buf = buf[n:]
 	}
 	return nil
 }
