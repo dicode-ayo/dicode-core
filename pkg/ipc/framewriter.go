@@ -77,7 +77,7 @@ func (f *frameWriter) writeMsg(v any) error {
 
 // writeMsgBounded sends a frame that fails if it cannot take the lock within
 // f.timeout or, when the writer supports write deadlines, once the peer
-// accepts no bytes for f.timeout. A failure after part
+// does not accept one chunk within f.timeout. A failure after part
 // of the frame went out wraps errFramePartial.
 func (f *frameWriter) writeMsgBounded(v any) error {
 	buf, err := encodeFrame(v)
