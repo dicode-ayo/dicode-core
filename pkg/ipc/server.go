@@ -535,8 +535,9 @@ func (s *Server) handleConn(conn net.Conn) {
 			// with an error to this one request so the caller rejects instead of
 			// hanging, keeping the run's other calls working.
 			if errors.Is(werr, ErrMessageTooLarge) {
-				_ = fw.writeMsg(Response{ID: id, Error: "ipc: response too large to return"})
-				return
+				if werr = fw.writeMsg(Response{ID: id, Error: "ipc: response too large to return"}); werr == nil {
+					return
+				}
 			}
 			// A genuine write failure (peer gone) means the socket is dead;
 			// surface it and close so the task's read loop unblocks.
