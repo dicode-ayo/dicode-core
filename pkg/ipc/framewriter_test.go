@@ -398,6 +398,8 @@ func TestServer_GatewayPushesAndRepliesDoNotInterleave(t *testing.T) {
 		t.Fatalf("http.register error: %v", resp["error"])
 	}
 
+	_ = conn.SetReadDeadline(time.Time{})
+
 	const pushes, calls = 100, 100
 	client := newFrameWriter(conn)
 
@@ -514,14 +516,19 @@ func TestServer_OversizedErrorReplyKeepsConnection(t *testing.T) {
 func TestFrameWriter_PushGivesUpBehindStuckReply(t *testing.T) {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
-	fw := newFrameWriter(a)
+	entered := make(chan struct{})
+	fw := newFrameWriter(&writeSignalConn{Conn: a, entered: entered})
 	fw.timeout = 100 * time.Millisecond
 	c := &closeRecorder{}
 	push := closeOnWriteFailure(fw, c)
 
 	replyDone := make(chan error, 1)
 	go func() { replyDone <- fw.writeMsg(Response{ID: "stuck", Result: "ok"}) }()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reply did not reach Write")
+	}
 
 	pushErr := make(chan error, 1)
 	go func() { pushErr <- push(Response{ID: "p", Result: "ok"}) }()
@@ -543,5 +550,55 @@ func TestFrameWriter_PushGivesUpBehindStuckReply(t *testing.T) {
 	}
 	if err := <-replyDone; err != nil {
 		t.Fatalf("reply failed: %v", err)
+	}
+}
+
+// writeSignalConn closes entered the first time Write is called.
+type writeSignalConn struct {
+	net.Conn
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *writeSignalConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.entered) })
+	return c.Conn.Write(p)
+}
+
+// Concurrent gateway requests to a task whose connection is held by a stuck
+// reply each fail within one push timeout instead of queueing behind each other.
+func TestIPCHandler_QueuedPushesShareOneBound(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	entered := make(chan struct{})
+	fw := newFrameWriter(&writeSignalConn{Conn: a, entered: entered})
+	fw.timeout = 200 * time.Millisecond
+	h := &ipcHandler{push: closeOnWriteFailure(fw, &closeRecorder{})}
+
+	go func() { _ = fw.writeMsg(Response{ID: "stuck", Result: "ok"}) }()
+	<-entered
+
+	const callers = 5
+	start := time.Now()
+	codes := make(chan int, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hooks/x", strings.NewReader("b")))
+			codes <- w.Code
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		select {
+		case code := <-codes:
+			if code != http.StatusBadGateway {
+				t.Fatalf("caller got %d, want 502", code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("caller still waiting")
+		}
+	}
+	if d := time.Since(start); d > 3*fw.timeout {
+		t.Fatalf("queued callers took %v, want about one push timeout (%v)", d, fw.timeout)
 	}
 }
