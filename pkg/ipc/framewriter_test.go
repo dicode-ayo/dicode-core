@@ -3,11 +3,15 @@ package ipc
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -86,6 +90,87 @@ func TestFrameWriter_TooLargeWritesNothing(t *testing.T) {
 	if len(rw.writes) != 0 {
 		t.Fatalf("expected no Write for an oversized frame, got %d", len(rw.writes))
 	}
+}
+
+func TestEncodeFrame_MatchesJSONMarshal(t *testing.T) {
+	v := Response{ID: "<a&b>", Result: map[string]any{"html": "<script>&</script>", "n": 1}}
+	want, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := encodeFrame(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := binary.LittleEndian.Uint32(got[:4]); int(n) != len(want) {
+		t.Fatalf("length prefix %d, want %d", n, len(want))
+	}
+	if !bytes.Equal(got[4:], want) {
+		t.Fatalf("frame body %q, want %q", got[4:], want)
+	}
+}
+
+// A peer that never reads must not hold the writer, or any writer queued
+// behind it, forever.
+func TestFrameWriter_StalledPeerTimesOut(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 100 * time.Millisecond
+
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func(i int) { errs <- fw.writeMsg(Response{ID: fmt.Sprint(i), Result: "ok"}) }(i)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("writer %d: expected a deadline error, got %v", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("writer %d still blocked on a peer that never reads", i)
+		}
+	}
+}
+
+// failingConn fails every Write and records Close.
+type failingConn struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (f *failingConn) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func (f *failingConn) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	return nil
+}
+
+func TestCloseOnWriteFailure(t *testing.T) {
+	t.Run("write error closes", func(t *testing.T) {
+		c := &failingConn{}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		if err := push(Response{ID: "1"}); err == nil {
+			t.Fatal("expected write error")
+		}
+		if !c.closed {
+			t.Fatal("connection left open after a failed push")
+		}
+	})
+	t.Run("too large keeps open", func(t *testing.T) {
+		c := &failingConn{}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		err := push(Response{ID: "1", Result: strings.Repeat("x", maxMessageSize)})
+		if !errors.Is(err, ErrMessageTooLarge) {
+			t.Fatalf("expected ErrMessageTooLarge, got %v", err)
+		}
+		if c.closed {
+			t.Fatal("connection closed for an oversized frame that wrote nothing")
+		}
+	})
 }
 
 // choppyWriter accepts each Write in small chunks and yields between them,

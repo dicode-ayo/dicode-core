@@ -1502,7 +1502,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			if httpH == nil {
-				httpH = &ipcHandler{push: fw.writeMsg}
+				httpH = &ipcHandler{push: closeOnWriteFailure(fw, conn)}
 			}
 			// Register the new pattern before removing the old one to avoid
 			// a brief window where requests for the path return 404.
