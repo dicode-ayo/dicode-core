@@ -7,18 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 )
 
-// frameWriteTimeout is how long a write may make no progress on a connection
-// that supports write deadlines before it fails, so a task that stops reading
-// cannot hold the writer forever while a slow reader still gets large frames.
+// frameWriteTimeout is how long a gateway push may make no progress on a
+// connection that supports write deadlines before it fails, so a task that
+// stops reading cannot hold an HTTP caller forever while a slow reader still
+// gets large frames.
 const frameWriteTimeout = 2 * time.Minute
 
 // frameWriteChunk is the most a deadline-bounded write sends per Write; the
 // deadline is renewed before each chunk.
 const frameWriteChunk = 64 * 1024
+
+// errFramePartial marks a write that failed after sending part of its frame,
+// leaving the stream unreadable.
+var errFramePartial = errors.New("ipc: frame partially written")
 
 // encodeFrame marshals v as JSON behind a 4-byte little-endian length prefix.
 // The JSON bytes are identical to json.Marshal's.
@@ -44,7 +50,7 @@ type writeDeadliner interface {
 
 // frameWriter is the single writer for a connection shared by several
 // goroutines: each frame goes out under one lock, so frames never interleave
-// on the wire. Without write deadlines a frame is a single Write.
+// on the wire.
 type frameWriter struct {
 	mu      sync.Mutex
 	w       io.Writer
@@ -55,7 +61,25 @@ func newFrameWriter(w io.Writer) *frameWriter {
 	return &frameWriter{w: w, timeout: frameWriteTimeout}
 }
 
+// writeMsg sends a frame in a single Write with no deadline: a task that has
+// exited closes its socket, which fails the Write.
 func (f *frameWriter) writeMsg(v any) error {
+	buf, err := encodeFrame(v)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.w.Write(buf); err != nil {
+		return fmt.Errorf("ipc: write: %w", err)
+	}
+	return nil
+}
+
+// writeMsgBounded sends a frame that fails once the peer accepts no bytes for
+// f.timeout, when the writer supports write deadlines. A failure after part
+// of the frame went out wraps errFramePartial.
+func (f *frameWriter) writeMsgBounded(v any) error {
 	buf, err := encodeFrame(v)
 	if err != nil {
 		return err
@@ -64,34 +88,50 @@ func (f *frameWriter) writeMsg(v any) error {
 	defer f.mu.Unlock()
 	d, ok := f.w.(writeDeadliner)
 	if !ok || f.timeout <= 0 {
-		if _, err := f.w.Write(buf); err != nil {
-			return fmt.Errorf("ipc: write: %w", err)
-		}
-		return nil
+		return writeErr(f.w.Write(buf))
 	}
 	defer func() { _ = d.SetWriteDeadline(time.Time{}) }()
-	for len(buf) > 0 {
+	sent := 0
+	for sent < len(buf) {
 		if err := d.SetWriteDeadline(time.Now().Add(f.timeout)); err != nil {
-			return fmt.Errorf("ipc: write: %w", err)
+			return writeErr(sent, err)
 		}
-		n, err := f.w.Write(buf[:min(len(buf), frameWriteChunk)])
+		n, err := f.w.Write(buf[sent:min(len(buf), sent+frameWriteChunk)])
+		sent += n
 		if err != nil {
-			return fmt.Errorf("ipc: write: %w", err)
+			return writeErr(sent, err)
 		}
-		buf = buf[n:]
 	}
 	return nil
 }
 
-// closeOnWriteFailure wraps fw.writeMsg so a failed write closes c: a Write
-// that fails may have sent part of a frame, leaving the stream unreadable.
-// ErrMessageTooLarge is raised before any byte is written and leaves c open.
+func writeErr(sent int, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case sent > 0:
+		return fmt.Errorf("ipc: write: %w: %w", errFramePartial, err)
+	default:
+		return fmt.Errorf("ipc: write: %w", err)
+	}
+}
+
+// closeOnWriteFailure wraps fw.writeMsgBounded so a failed write closes c
+// unless the stream is still in sync: an oversized frame or a push that timed
+// out before sending any byte leaves c open.
 func closeOnWriteFailure(fw *frameWriter, c io.Closer) func(any) error {
 	return func(v any) error {
-		err := fw.writeMsg(v)
-		if err != nil && !errors.Is(err, ErrMessageTooLarge) {
+		err := fw.writeMsgBounded(v)
+		if err != nil && !streamIntact(err) {
 			_ = c.Close()
 		}
 		return err
 	}
+}
+
+func streamIntact(err error) bool {
+	if errors.Is(err, ErrMessageTooLarge) {
+		return true
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, errFramePartial)
 }

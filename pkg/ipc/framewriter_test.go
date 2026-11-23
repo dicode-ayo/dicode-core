@@ -110,84 +110,175 @@ func TestEncodeFrame_MatchesJSONMarshal(t *testing.T) {
 	}
 }
 
-// A peer that never reads must not hold the writer, or any writer queued
-// behind it, forever.
+// closeRecorder records Close.
+type closeRecorder struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+
+func (c *closeRecorder) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// A peer that never reads must not hold a push, or any push queued behind it,
+// forever; a push that sent nothing leaves the stream in sync and open.
 func TestFrameWriter_StalledPeerTimesOut(t *testing.T) {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
 	fw := newFrameWriter(a)
 	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
 
 	errs := make(chan error, 2)
 	for i := 0; i < 2; i++ {
-		go func(i int) { errs <- fw.writeMsg(Response{ID: fmt.Sprint(i), Result: "ok"}) }(i)
+		go func(i int) { errs <- push(Response{ID: fmt.Sprint(i), Result: "ok"}) }(i)
 	}
 	for i := 0; i < 2; i++ {
 		select {
 		case err := <-errs:
 			if !errors.Is(err, os.ErrDeadlineExceeded) {
-				t.Fatalf("writer %d: expected a deadline error, got %v", i, err)
+				t.Fatalf("push %d: expected a deadline error, got %v", i, err)
+			}
+			if errors.Is(err, errFramePartial) {
+				t.Fatalf("push %d: reported a partial frame though nothing was read: %v", i, err)
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatalf("writer %d still blocked on a peer that never reads", i)
+			t.Fatalf("push %d still blocked on a peer that never reads", i)
 		}
+	}
+	if c.isClosed() {
+		t.Fatal("connection closed after a push that wrote nothing")
+	}
+
+	got := make(chan Response, 1)
+	go func() {
+		var r Response
+		_ = readMsg(b, &r)
+		got <- r
+	}()
+	if err := push(Response{ID: "after", Result: "ok"}); err != nil {
+		t.Fatalf("push after a timed-out push failed: %v", err)
+	}
+	if r := <-got; r.ID != "after" {
+		t.Fatalf("stream out of sync after a timed-out push: got id %q", r.ID)
 	}
 }
 
-// A peer that keeps reading, however slowly, must receive a frame that takes
+// A push that times out after part of its frame went out closes the connection.
+func TestFrameWriter_PartialPushTimeoutCloses(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 100 * time.Millisecond
+	c := &closeRecorder{}
+	push := closeOnWriteFailure(fw, c)
+
+	go func() { _, _ = io.ReadFull(b, make([]byte, 10)) }()
+	err := push(Response{ID: "1", Result: strings.Repeat("x", 1024)})
+	if !errors.Is(err, errFramePartial) || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected a partial-frame deadline error, got %v", err)
+	}
+	if !c.isClosed() {
+		t.Fatal("connection left open after a partially written push")
+	}
+}
+
+// SDK replies carry no deadline: a live task busy for longer than the push
+// timeout still receives its reply once it reads.
+func TestFrameWriter_ReplyHasNoDeadline(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	fw := newFrameWriter(a)
+	fw.timeout = 50 * time.Millisecond
+
+	got := make(chan Response, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		var r Response
+		_ = readMsg(b, &r)
+		got <- r
+	}()
+	if err := fw.writeMsg(Response{ID: "late", Result: "ok"}); err != nil {
+		t.Fatalf("reply to a reader that starts after the timeout failed: %v", err)
+	}
+	if r := <-got; r.ID != "late" {
+		t.Fatalf("reply decoded to id %q", r.ID)
+	}
+}
+
+// A peer that keeps reading, however slowly, must receive a push that takes
 // far longer than the timeout to deliver.
 func TestFrameWriter_SlowReaderCompletes(t *testing.T) {
 	a, b := net.Pipe()
 	t.Cleanup(func() { a.Close(); b.Close() })
 	fw := newFrameWriter(a)
-	fw.timeout = 200 * time.Millisecond
+	fw.timeout = time.Second
 
-	want := strings.Repeat("s", 1<<20)
+	want := strings.Repeat("s", 6<<20)
+	frame, err := encodeFrame(Response{ID: "slow", Result: want})
+	if err != nil {
+		t.Fatal(err)
+	}
 	errs := make(chan error, 1)
-	go func() { errs <- fw.writeMsg(Response{ID: "slow", Result: want}) }()
+	go func() {
+		err := fw.writeMsgBounded(Response{ID: "slow", Result: want})
+		if err != nil {
+			a.Close()
+		}
+		errs <- err
+	}()
 
 	var got bytes.Buffer
-	piece := make([]byte, 8*1024)
+	piece := make([]byte, 16*1024)
 	start := time.Now()
-	for {
-		select {
-		case err := <-errs:
-			if err != nil {
-				t.Fatalf("write to a slow but live reader failed after %v: %v", time.Since(start), err)
-			}
-			var resp Response
-			if err := readMsg(&got, &resp); err != nil {
-				t.Fatalf("frame corrupt: %v", err)
-			}
-			if resp.ID != "slow" || resp.Result != want {
-				t.Fatalf("frame decoded to the wrong message (id %q)", resp.ID)
-			}
-			if el := time.Since(start); el < 3*fw.timeout {
-				t.Fatalf("frame delivered in %v, too fast to exercise the timeout", el)
-			}
-			return
-		default:
+	for got.Len() < len(frame) {
+		n, err := b.Read(piece)
+		if err != nil {
+			t.Fatalf("read after %d bytes in %v: %v; push: %v", got.Len(), time.Since(start), err, <-errs)
 		}
-		_ = b.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		n, _ := b.Read(piece)
 		got.Write(piece[:n])
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("push to a slow but live reader failed after %v: %v", time.Since(start), err)
+	}
+	if el := time.Since(start); el < 3*fw.timeout/2 {
+		t.Fatalf("frame delivered in %v, too fast to exercise the timeout", el)
+	}
+	var resp Response
+	if err := readMsg(&got, &resp); err != nil {
+		t.Fatalf("frame corrupt: %v", err)
+	}
+	if resp.ID != "slow" || resp.Result != want {
+		t.Fatalf("frame decoded to the wrong message (id %q)", resp.ID)
 	}
 }
 
 // failingConn fails every Write and records Close.
 type failingConn struct {
-	mu     sync.Mutex
-	closed bool
+	closeRecorder
 }
 
 func (f *failingConn) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
 
-func (f *failingConn) Close() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closed = true
-	return nil
+// partialConn accepts the first n bytes of a Write, then fails.
+type partialConn struct {
+	closeRecorder
+	n int
+}
+
+func (p *partialConn) Write(b []byte) (int, error) {
+	return min(p.n, len(b)), errors.New("broken pipe")
 }
 
 func TestCloseOnWriteFailure(t *testing.T) {
@@ -197,8 +288,19 @@ func TestCloseOnWriteFailure(t *testing.T) {
 		if err := push(Response{ID: "1"}); err == nil {
 			t.Fatal("expected write error")
 		}
-		if !c.closed {
+		if !c.isClosed() {
 			t.Fatal("connection left open after a failed push")
+		}
+	})
+	t.Run("partial write closes", func(t *testing.T) {
+		c := &partialConn{n: 7}
+		push := closeOnWriteFailure(newFrameWriter(c), c)
+		err := push(Response{ID: "1"})
+		if !errors.Is(err, errFramePartial) {
+			t.Fatalf("expected a partial-frame error, got %v", err)
+		}
+		if !c.isClosed() {
+			t.Fatal("connection left open after a partially written push")
 		}
 	})
 	t.Run("too large keeps open", func(t *testing.T) {
@@ -208,7 +310,7 @@ func TestCloseOnWriteFailure(t *testing.T) {
 		if !errors.Is(err, ErrMessageTooLarge) {
 			t.Fatalf("expected ErrMessageTooLarge, got %v", err)
 		}
-		if c.closed {
+		if c.isClosed() {
 			t.Fatal("connection closed for an oversized frame that wrote nothing")
 		}
 	})
