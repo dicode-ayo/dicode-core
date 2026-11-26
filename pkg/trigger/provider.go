@@ -85,7 +85,7 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 	}
 
 	if !runtimecaps.For(spec.Runtime).SecretOutput {
-		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output (only deno and python runtimes support dicode.output(..., {secret: true}) over IPC)", providerID, spec.Runtime)
+		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output over IPC (dicode.output(..., {secret: true}))", providerID, spec.Runtime)
 	}
 	switch runtimecaps.Normalize(spec.Runtime) {
 	case task.RuntimeDeno:

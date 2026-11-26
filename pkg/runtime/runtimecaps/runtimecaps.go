@@ -15,7 +15,8 @@ type Caps struct {
 	// dicode.suspend() into a suspended run, so CapSuspend may be granted.
 	Suspend bool
 	// SecretOutput: the task can send dicode.output(..., {secret: true}) over
-	// IPC, so it can act as an env-resolver provider.
+	// IPC, so it can act as an env-resolver provider. The engine also needs a
+	// wiring case for the runtime in trigger.(*Engine).Run.
 	SecretOutput bool
 	// LocalImageBuild: the runtime builds local container images from a
 	// docker.build section, which image GC must account for.
