@@ -343,3 +343,5 @@ make clean   # removes the binary
 All packages compile with `go test -race ./...` as of 2026-07-10.
 
 E2E test suites (Playwright) cover core UI flows, file changes, webhooks, config, and auth (PRs #18–#20).
+
+On Windows, CI (`test-windows`) runs a scoped subset rather than `go test ./...`: the IPC endpoint and the sandbox grants derived from it, one Deno and one Python task end to end, and the `internal/gitops` clone tests that pull a local bare fixture over a `file://` URL. The rest of the suite still has POSIX-only fixtures (#875).
