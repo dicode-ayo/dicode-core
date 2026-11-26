@@ -2790,7 +2790,7 @@ func TestServer_SuspendCap_GrantedByRuntime(t *testing.T) {
 		{task.RuntimeDocker, false},
 		{task.RuntimePodman, false},
 		{task.Runtime("js"), true},
-		{task.Runtime("custom"), true},
+		{task.Runtime("custom"), false},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.runtime), func(t *testing.T) {

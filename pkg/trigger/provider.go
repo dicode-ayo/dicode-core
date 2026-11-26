@@ -63,17 +63,13 @@ func (e *Engine) Resolver() *envresolve.Resolver {
 }
 
 // Run satisfies envresolve.ProviderRunner. It spawns the provider task
-// synchronously and waits for it to finish; the secret map is collected
-// over a channel passed to this one run via RunOptions.SecretOutputCh
-// (issue #719) — not shared runtime state, so concurrent Run calls for
-// different provider tasks (or the same one) never share a channel and
-// need no serialization between them.
+// synchronously and waits for it to finish; the secret map arrives over a
+// channel owned by this one run (RunOptions.SecretOutputCh), so concurrent
+// Run calls need no serialization.
 //
-// Only runtimes with runtimecaps SecretOutput (deno, python) have an
-// IPC-secret-output surface (docker and podman tasks have no
-// dicode.output(..., {secret:true}) IPC method at all), so the runtime is
-// validated up front and rejected with a clear error rather than left to
-// silently time out waiting on a channel no executor will ever write to.
+// Only runtimes with runtimecaps SecretOutput can send a secret map; any
+// other runtime is rejected up front, since its run would never write to
+// the channel.
 //
 // Errors:
 //   - ctx.Err() if the caller context expires
@@ -100,6 +96,8 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 		if e.pythonRuntime == nil {
 			return nil, fmt.Errorf("python runtime not wired to engine (runtime=%q)", spec.Runtime)
 		}
+	default:
+		return nil, fmt.Errorf("provider task %q: runtime %q not wired to engine", providerID, spec.Runtime)
 	}
 
 	ch := make(chan map[string]string, 1)

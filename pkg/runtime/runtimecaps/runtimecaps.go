@@ -1,9 +1,7 @@
-// Package runtimecaps is the one place runtime capabilities are declared:
-// what each task runtime can do, keyed by its task.yaml runtime name. Code
-// outside pkg/runtime asks For(rt) instead of switching on runtime names.
+// Package runtimecaps declares what each task runtime supports, keyed by its
+// task.yaml runtime name.
 //
-// It imports only pkg/task so that packages pkg/runtime itself depends on
-// (pkg/ipc) can read it without an import cycle.
+// Must import only pkg/task: pkg/ipc depends on it.
 package runtimecaps
 
 import "github.com/dicode/dicode/pkg/task"
@@ -31,10 +29,8 @@ var table = map[task.Runtime]Caps{
 	task.RuntimePodman: {LocalImageBuild: true},
 }
 
-// unknown applies to runtime names not in the table. Spec validation accepts
-// any runtime name, so this is reachable; Suspend stays granted because only
-// container runtimes are known to drop a suspend payload.
-var unknown = Caps{Suspend: true}
+// Runtime names not in the table support nothing.
+var unknown = Caps{}
 
 // For returns the capabilities of rt. The legacy aliases "" and "js" are deno.
 func For(rt task.Runtime) Caps {

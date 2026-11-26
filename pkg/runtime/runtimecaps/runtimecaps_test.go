@@ -17,7 +17,7 @@ func TestFor(t *testing.T) {
 		{RuntimePython, Caps{Suspend: true, SecretOutput: true}},
 		{task.RuntimeDocker, Caps{LocalImageBuild: true}},
 		{task.RuntimePodman, Caps{LocalImageBuild: true}},
-		{"ruby", Caps{Suspend: true}},
+		{"ruby", Caps{}},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.rt), func(t *testing.T) {
