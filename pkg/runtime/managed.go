@@ -10,7 +10,9 @@ import "context"
 //
 // Implementing this interface is all that is needed to make a new managed
 // runtime appear in the Runtimes section of the Config UI and participate in
-// on-demand installation via the /api/runtimes/{name}/install endpoint.
+// on-demand installation via the /api/runtimes/{name}/install endpoint. What
+// its tasks may do (suspend, secret output) is declared separately in
+// pkg/runtime/runtimecaps; a runtime missing from that table gets none of it.
 //
 // The concrete implementation should be created in main.go (or equivalent)
 // where all dependencies (registry, log, secrets, etc.) are available.

@@ -87,8 +87,8 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 	if !runtimecaps.For(spec.Runtime).SecretOutput {
 		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output (only deno and python runtimes support dicode.output(..., {secret: true}) over IPC)", providerID, spec.Runtime)
 	}
-	switch spec.Runtime {
-	case task.RuntimeDeno, "", "js":
+	switch runtimecaps.Normalize(spec.Runtime) {
+	case task.RuntimeDeno:
 		if e.denoRuntime == nil {
 			return nil, fmt.Errorf("deno runtime not wired to engine")
 		}

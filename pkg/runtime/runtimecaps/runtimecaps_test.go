@@ -21,15 +21,8 @@ func TestFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.rt), func(t *testing.T) {
-			got := For(tc.rt)
-			if got.Suspend != tc.want.Suspend {
-				t.Errorf("Suspend = %v, want %v", got.Suspend, tc.want.Suspend)
-			}
-			if got.SecretOutput != tc.want.SecretOutput {
-				t.Errorf("SecretOutput = %v, want %v", got.SecretOutput, tc.want.SecretOutput)
-			}
-			if got.LocalImageBuild != tc.want.LocalImageBuild {
-				t.Errorf("LocalImageBuild = %v, want %v", got.LocalImageBuild, tc.want.LocalImageBuild)
+			if got := For(tc.rt); got != tc.want {
+				t.Errorf("For(%q) = %+v, want %+v", tc.rt, got, tc.want)
 			}
 		})
 	}

@@ -32,12 +32,17 @@ var table = map[task.Runtime]Caps{
 // Runtime names not in the table support nothing.
 var unknown = Caps{}
 
-// For returns the capabilities of rt. The legacy aliases "" and "js" are deno.
-func For(rt task.Runtime) Caps {
+// Normalize maps the legacy aliases "" and "js" to deno.
+func Normalize(rt task.Runtime) task.Runtime {
 	if rt == "" || rt == "js" {
-		rt = task.RuntimeDeno
+		return task.RuntimeDeno
 	}
-	if c, ok := table[rt]; ok {
+	return rt
+}
+
+// For returns the capabilities of rt, after Normalize.
+func For(rt task.Runtime) Caps {
+	if c, ok := table[Normalize(rt)]; ok {
 		return c
 	}
 	return unknown

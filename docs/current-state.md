@@ -133,7 +133,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 
 ### `pkg/runtime/runtimecaps/` ✅
 
-- `runtimecaps.For(rt)` — the one table of what each runtime supports (`Suspend`, `SecretOutput`, `LocalImageBuild`), with `""`/`"js"` normalized to deno; unknown runtime names get no capabilities. Read by `pkg/ipc` (whether to grant `CapSuspend`), `pkg/trigger` (which runtimes can be secret-output providers) and `pkg/runtime/imagegc` (which tasks build local images). Imports only `pkg/task`, so `pkg/ipc` can use it without a cycle through `pkg/runtime`.
+- `runtimecaps.For(rt)` — the table of what each runtime supports (`Suspend`, `SecretOutput`, `LocalImageBuild`), with `""`/`"js"` normalized to deno; unknown runtime names get no capabilities. Read by `pkg/ipc` (whether to grant `CapSuspend`), `pkg/trigger` (which runtimes can be secret-output providers) and `pkg/runtime/imagegc` (which tasks build local images). `pkg/webui` and `pkg/tasktest` still check docker/podman by name. A new runtime must be added to this table to get suspend or secret output. Imports only `pkg/task`, so `pkg/ipc` can use it without a cycle through `pkg/runtime`.
 
 ### `pkg/trigger/` ✅
 
