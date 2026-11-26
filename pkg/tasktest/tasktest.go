@@ -8,15 +8,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/runtime/imagegc"
 	"github.com/dicode/dicode/pkg/task"
@@ -112,22 +115,108 @@ func findTestFile(spec *task.Spec) (string, error) {
 	// For a Python-runtime spec, only .py is considered — otherwise a stale
 	// task.test.ts left behind in a task dir that was converted to
 	// runtime: python would silently shadow the real task.test.py and get run
-	// through the wrong runtime. For every other runtime (including unset/""),
-	// the Deno/TS extensions are checked first (matching the priority order used
-	// by pkg/task.ScriptPath, ts-preferred-over-js), with .py checked last as a
-	// defensive fallback for hand-constructed specs. Symlinks are rejected to
-	// stay consistent with the production script-path policy.
-	exts := []string{".ts", ".js", ".mjs", ".py"}
-	if spec.Runtime == runtimePython {
+	// through the wrong runtime. Deno considers only its own extensions, in
+	// pkg/task.ScriptPath's ts-preferred-over-js order. A hand-constructed
+	// spec with no runtime also falls back to .py. Only regular files count:
+	// symlinks are rejected to stay consistent with the production
+	// script-path policy.
+	var exts []string
+	switch spec.Runtime {
+	case runtimePython:
 		exts = []string{".py"}
+	case task.RuntimeDeno, "js":
+		exts = []string{".ts", ".js", ".mjs"}
+	default:
+		exts = []string{".ts", ".js", ".mjs", ".py"}
 	}
 	for _, ext := range exts {
 		p := filepath.Join(spec.TaskDir, "task.test"+ext)
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
 			return p, nil
 		}
 	}
 	return "", ErrNoTestFile
+}
+
+// Discover reports the test file `dicode task test` would run for spec,
+// relative to its task dir, and whether it exists. For Docker/Podman that is
+// the Dockerfile, existing when it declares a "test" stage that isn't its
+// last. A Dockerfile outside the task dir is never read and reports ("",
+// false), although Run still accepts one; so does an image-only task. When nothing exists, name is the file a new test should go in, or
+// "" for a runtime tasktest can't run.
+func Discover(spec *task.Spec) (name string, exists bool) {
+	switch spec.Runtime {
+	case task.RuntimeDocker, task.RuntimePodman:
+		return discoverDockerfile(spec)
+	case task.RuntimeDeno, "js", "", runtimePython:
+	default:
+		return "", false
+	}
+	if p, err := findTestFile(spec); err == nil && (spec.Runtime == runtimePython || filepath.Ext(p) != ".py") {
+		return filepath.Base(p), true
+	}
+	if spec.Runtime == runtimePython {
+		return "task.test.py", false
+	}
+	deno := *spec
+	deno.Runtime = task.RuntimeDeno
+	if p := deno.ScriptPath(); p == "" || strings.HasSuffix(p, ".ts") {
+		return "task.test.ts", false
+	}
+	return "task.test.js", false
+}
+
+// DockerfileName returns spec's Dockerfile relative to its task dir, or ""
+// when docker.build points outside it. Without a build config it is
+// "Dockerfile".
+func DockerfileName(spec *task.Spec) string {
+	if spec.Docker == nil || spec.Docker.Build == nil {
+		return "Dockerfile"
+	}
+	path, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
+	if within, err := pathguard.WithinResolved(spec.TaskDir, path); err != nil || !within {
+		return ""
+	}
+	rel, err := filepath.Rel(spec.TaskDir, path)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+func discoverDockerfile(spec *task.Spec) (string, bool) {
+	if spec.Docker == nil || spec.Docker.Build == nil {
+		return "", false
+	}
+	name := DockerfileName(spec)
+	if name == "" {
+		return "", false
+	}
+	b, err := readInRoot(spec.TaskDir, filepath.FromSlash(name), maxDockerfileBytes)
+	return name, err == nil && dockerTestStageErr(b) == nil
+}
+
+// readInRoot reads rel, a regular file of at most limit bytes, without
+// resolving any path component outside dir.
+func readInRoot(dir, rel string, limit int64) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	fi, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > limit {
+		return nil, fmt.Errorf("tasktest: %s is not a regular file of at most %d bytes", rel, limit)
+	}
+	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readOpenedCapped(f, fi, limit)
 }
 
 // dockerFromRe matches every Dockerfile FROM instruction line, capturing
@@ -179,9 +268,56 @@ func dockerfileHasTestStage(content []byte) bool {
 // the real one.
 var ErrTestStageLast = fmt.Errorf("tasktest: Dockerfile's \"test\" stage must not be its last stage")
 
+// maxDockerfileBytes bounds the Dockerfile read.
+const maxDockerfileBytes = 1 << 20
+
+// readCapped reads path only if the opened file is the regular file lstat
+// saw. O_NONBLOCK keeps a FIFO swapped in after the Lstat from blocking the
+// open.
+func readCapped(path string, lstat os.FileInfo, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readOpenedCapped(f, lstat, limit)
+}
+
+func readOpenedCapped(f *os.File, lstat os.FileInfo, limit int64) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || !os.SameFile(fi, lstat) {
+		return nil, fmt.Errorf("tasktest: %s changed or is not a regular file", f.Name())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("tasktest: %s exceeds %d bytes", f.Name(), limit)
+	}
+	return b, nil
+}
+
+// dockerTestStageErr returns nil when content declares a non-final "test"
+// stage, ErrTestStageLast when it is final, ErrNoTestFile when absent.
+func dockerTestStageErr(content []byte) error {
+	if !dockerfileHasTestStage(content) {
+		return ErrNoTestFile
+	}
+	names := dockerStageNames(content)
+	if strings.EqualFold(names[len(names)-1], "test") {
+		return ErrTestStageLast
+	}
+	return nil
+}
+
 // readDockerTestStage returns spec's resolved Dockerfile path and bytes if
 // it exists and declares a "test" build stage, ErrNoTestFile otherwise (no
-// docker.build config, no Dockerfile, symlinked Dockerfile, or a Dockerfile
+// docker.build config, no Dockerfile, a Dockerfile that is not a regular
+// file (symlink, FIFO, device) or exceeds maxDockerfileBytes, or a Dockerfile
 // with no test stage) — the Docker/Podman equivalent of a missing
 // task.test.*. ErrTestStageLast instead if a test stage exists but is the
 // last one declared.
@@ -191,19 +327,15 @@ func readDockerTestStage(spec *task.Spec) (path string, content []byte, err erro
 	}
 	dockerfilePath, _ := spec.Docker.Build.ResolvePaths(spec.TaskDir)
 	fi, statErr := os.Lstat(dockerfilePath)
-	if statErr != nil || fi.Mode()&os.ModeSymlink != 0 {
+	if statErr != nil || !fi.Mode().IsRegular() || fi.Size() > maxDockerfileBytes {
 		return "", nil, ErrNoTestFile
 	}
-	b, readErr := os.ReadFile(dockerfilePath)
+	b, readErr := readCapped(dockerfilePath, fi, maxDockerfileBytes)
 	if readErr != nil {
 		return "", nil, ErrNoTestFile
 	}
-	if !dockerfileHasTestStage(b) {
-		return "", nil, ErrNoTestFile
-	}
-	names := dockerStageNames(b)
-	if strings.EqualFold(names[len(names)-1], "test") {
-		return "", nil, ErrTestStageLast
+	if err := dockerTestStageErr(b); err != nil {
+		return "", nil, err
 	}
 	return dockerfilePath, b, nil
 }

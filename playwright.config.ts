@@ -81,6 +81,7 @@ export default defineConfig({
         '**/login-no-passphrase.spec.ts',
         '**/task-create-registers.spec.ts',
         '**/task-create-fresh-install.spec.ts',
+        '**/task-detail-test-file.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],
