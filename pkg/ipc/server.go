@@ -19,6 +19,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runtime/runtimecaps"
 	"github.com/dicode/dicode/pkg/schemavalidate"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitsource "github.com/dicode/dicode/pkg/source/git"
@@ -206,7 +207,7 @@ func (s *Server) Start(ctx context.Context) (addr, token string, err error) {
 	// Core I/O caps are always granted; dicode.* API caps require explicit
 	// opt-in via permissions.dicode in task.yaml.
 	caps := defaultTaskCaps()
-	if s.spec != nil && runtimeSupportsSuspend(s.spec.Runtime) {
+	if s.spec != nil && runtimecaps.For(s.spec.Runtime).Suspend {
 		caps = append(caps, CapSuspend)
 	}
 	if dp := dicodePerms(s.spec); dp != nil {
