@@ -38,6 +38,7 @@ Full configuration loading. All structs defined and validated:
 - **`MCPPort int`** — declares the port an MCP daemon task listens on
 - **`OnFailureChain *string`** — per-task override (`nil` = inherit global default, `""` = disable, `"task-id"` = override)
 - `LoadDir(dir)` — reads and validates `task.yaml` from a directory
+- `runtime.go` — `NormalizeRuntime` maps the legacy runtime aliases `""` and `js` to `deno`; used by the loader, `ExpandSpec` and taskset overrides
 - `Script()` / `ScriptPath()` — reads task script source (returns `""` for non-JS runtimes)
 - `validate()` — schema validation including Docker, daemon restart values, cycle detection stubs
 - `hash.go` — `Hash(dir)` SHA256 over task.yaml + task.js
@@ -60,6 +61,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 - `spec.go` — `TaskSetSpec`, `TaskSetEntry`, `Ref`, `Defaults`, `TaskOverrides` structs. `kind` field required on all yaml files (Task, TaskSet, Config). `Ref` encodes local vs git: `url` present = git ref, `path` only = local ref.
 - `loader.go` — `LoadTaskSet(path)`, `LoadConfig(path)` — loads and validates `kind:TaskSet` and `kind:Config` yaml files. `ValidateRefURL` (and its bool wrapper `IsAllowedRefScheme`, also used by `pkg/webui`'s add-source form) gates `ref.url` to `http`, `https`, `ssh` schemes (plus the `user@host:path` SSH shorthand); the `git://` scheme is rejected outright (#486) — go-git dials it through a native transport with a hardcoded, unguarded `net.Dial`, giving it zero SSRF host validation at any layer, unlike the allowed schemes (`internal/gitops.ValidateRemoteHost` inspects the literal host and is now invoked from `CloneOrPull` itself, not just `ListBranches` — see #489, closing #486's follow-up for the schemes that are still allowed).
+- `override.go` — applies the override layers to the base spec; `overrides.runtime` is passed through `task.NormalizeRuntime`, so the legacy `js` alias resolves to `deno` just as it does when loaded from `task.yaml`.
 - `resolver.go` — `Resolver` struct (per `(url, branch)` repo dedup), `Resolve(ctx, namespace, rootRef, configDefaults, parentOverrides) []*ResolvedTask`. Implements 6-level precedence stack: task.yaml base → kind:Config defaults → spec.defaults → parent overrides.defaults → parent overrides.entries[key] → entry overrides (leaf wins). `SetDevMode(bool)` / `DevMode() bool`.
 - `source.go` — `Source` implementing `source.Source`: polls by re-resolving the full task tree and diffing against snapshot. `SetDevMode(ctx, enabled, localPath)` — swaps the root ref to a local path and triggers immediate re-sync. `DevMode() bool`, `DevRootPath() string`.
 - 11 tests passing (resolver override ordering, nested overrides, source event emission).

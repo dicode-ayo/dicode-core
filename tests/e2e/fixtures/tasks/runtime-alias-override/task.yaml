@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Runtime Alias Override
+description: A deno webhook task whose taskset entry overrides runtime with the legacy js alias.
+runtime: deno
+trigger:
+  webhook: /hooks/runtime-alias-override
+timeout: 10s

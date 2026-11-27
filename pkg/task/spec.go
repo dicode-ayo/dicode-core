@@ -751,9 +751,7 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	// ${VAR} placeholder once expansion has been attempted.
 	normalizeWebhookAuth(&spec)
 
-	if spec.Runtime == "" || spec.Runtime == "js" {
-		spec.Runtime = RuntimeDeno
-	}
+	spec.Runtime = NormalizeRuntime(spec.Runtime)
 	return &spec, nil
 }
 

@@ -103,7 +103,7 @@ file.
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, resume-params-redaction, cli-suspend specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, resume-params-redaction, cli-suspend, taskset-runtime-alias specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
 | `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
@@ -113,8 +113,8 @@ The authenticated project is a separate server start, hence a separate
 
 ## Test inventory
 
-128 non-relay tests total: 91 in `unauthenticated` + 14 in `webui` + 23 in
-`authenticated` (136 including the 8 opt-in `relay` tests).
+130 non-relay tests total: 93 in `unauthenticated` + 14 in `webui` + 23 in
+`authenticated` (138 including the 8 opt-in `relay` tests).
 
 ### [webhooks.spec.ts](webhooks.spec.ts) — Open Webhook (8 tests)
 
@@ -131,6 +131,16 @@ verifies response shape and log persistence.
 | 6 | webhook run navigable in UI | `dc-run-detail` renders at `/hooks/webui/runs/{id}` with a `.badge-success`. |
 | 7 | GET to webhook without index.html fires task | GET falls through to task execution (not 404). |
 | 8 | webhook logs contain received input | `/api/runs/{id}/logs` contains the task's stdout ("webhook received …"). |
+
+### [taskset-runtime-alias.spec.ts](taskset-runtime-alias.spec.ts) — TaskSet runtime alias override (2 tests)
+
+Covers the `runtime-alias-override` fixture: a `runtime: deno` task whose
+taskset entry sets `overrides.runtime: js`.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | overrides.runtime: js runs the task on deno | The webhook fire returns the task's output and the run ends in `success` (no `no executor for runtime js`). |
+| 2 | task resolves with runtime deno | `GET /api/tasks/{id}` reports `runtime: deno`. |
 
 ### [webhooks-secure.spec.ts](webhooks-secure.spec.ts) — HMAC Webhook (7 tests)
 

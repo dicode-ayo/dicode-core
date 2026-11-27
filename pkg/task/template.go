@@ -271,9 +271,7 @@ func copyOverridesForExpand(o *Overrides) *Overrides {
 func ExpandSpec(spec *Spec, taskDir string, extras map[string]string) {
 	expandSpec(spec, builtinVars(taskDir, extras))
 	normalizeWebhookAuth(spec)
-	if spec.Runtime == "" || spec.Runtime == "js" {
-		spec.Runtime = RuntimeDeno
-	}
+	spec.Runtime = NormalizeRuntime(spec.Runtime)
 }
 
 // builtinVars returns the template var map for a task loaded from dir, with

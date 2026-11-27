@@ -59,7 +59,7 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 		spec.Timeout = o.Timeout
 	}
 	if o.Runtime != "" {
-		spec.Runtime = task.Runtime(o.Runtime)
+		spec.Runtime = task.NormalizeRuntime(task.Runtime(o.Runtime))
 	}
 }
 
