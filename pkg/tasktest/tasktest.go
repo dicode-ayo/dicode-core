@@ -87,13 +87,18 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return runContainerTest(ctx, binary, spec, dockerfilePath, content)
 	}
 
+	// Normalized here too for callers that build a task.Spec without the
+	// loader, so the test file lookup and the dispatch agree on the runtime.
+	normalized := *spec
+	normalized.Runtime = task.NormalizeRuntime(spec.Runtime)
+	spec = &normalized
+
 	testFile, err := findTestFile(spec)
 	if err != nil {
 		return Result{TaskID: spec.ID}, err
 	}
 
-	// Normalized here too for callers that build a task.Spec without the loader.
-	switch task.NormalizeRuntime(spec.Runtime) {
+	switch spec.Runtime {
 	case task.RuntimeDeno:
 		return runDeno(ctx, spec, testFile)
 	case runtimePython:
