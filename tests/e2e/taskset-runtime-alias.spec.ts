@@ -2,8 +2,7 @@
  * taskset-runtime-alias.spec.ts
  *
  * A taskset entry whose `overrides.runtime` is the legacy `js` alias must
- * resolve to the deno runtime, so the task actually executes instead of
- * failing with "no executor for runtime js".
+ * resolve to the deno runtime, so the task actually executes.
  */
 
 import { test, expect } from '@playwright/test';

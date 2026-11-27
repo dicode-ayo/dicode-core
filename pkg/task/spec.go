@@ -908,9 +908,8 @@ func (s *Spec) validate() error {
 		}
 		s.Warnings = append(s.Warnings, warns...)
 	}
-	switch s.Runtime {
-	case RuntimeDeno, "js", "":
-		// ok — "js" is a legacy alias for "deno"
+	switch NormalizeRuntime(s.Runtime) {
+	case RuntimeDeno:
 	case RuntimeDocker, RuntimePodman:
 		if s.Docker == nil {
 			return fmt.Errorf("runtime %s requires a docker: section in task.yaml", s.Runtime)

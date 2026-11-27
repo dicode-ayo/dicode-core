@@ -92,13 +92,9 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return Result{TaskID: spec.ID}, err
 	}
 
-	switch spec.Runtime {
-	// The "" and "js" aliases are defensive — pkg/task.applyDefaults
-	// normalizes both to RuntimeDeno at spec-load time, so the registry
-	// never hands us a non-normalized value. Keeping the aliases matches
-	// pkg/task/spec.go:validate and protects direct callers who construct
-	// a task.Spec without going through the loader.
-	case task.RuntimeDeno, "", "js":
+	// Normalized here too for callers that build a task.Spec without the loader.
+	switch task.NormalizeRuntime(spec.Runtime) {
+	case task.RuntimeDeno:
 		return runDeno(ctx, spec, testFile)
 	case runtimePython:
 		return runPython(ctx, spec, testFile)
