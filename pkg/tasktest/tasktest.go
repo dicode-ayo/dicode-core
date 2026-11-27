@@ -117,8 +117,8 @@ func findTestFile(spec *task.Spec) (string, error) {
 	// task.test.ts left behind in a task dir that was converted to
 	// runtime: python would silently shadow the real task.test.py and get run
 	// through the wrong runtime. Deno considers only its own extensions, in
-	// pkg/task.ScriptPath's ts-preferred-over-js order. A hand-constructed
-	// spec with no runtime also falls back to .py. Only regular files count:
+	// pkg/task.ScriptPath's ts-preferred-over-js order. Discover passes the
+	// raw runtime, so a hand-constructed spec with none also considers .py. Only regular files count:
 	// symlinks are rejected to stay consistent with the production
 	// script-path policy.
 	var exts []string
