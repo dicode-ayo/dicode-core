@@ -21,7 +21,7 @@ func hostAbs(p string) string {
 }
 
 func specWithPerms(perms task.Permissions) *task.Spec {
-	return &task.Spec{ID: "t/perm", TaskDir: "/srv/tasks/perm", Permissions: perms}
+	return &task.Spec{ID: "t/perm", TaskDir: hostAbs("/srv/tasks/perm"), Permissions: perms}
 }
 
 func TestBuildGuardPolicy_NetModes(t *testing.T) {

@@ -116,8 +116,13 @@ jobs:
       # protected-path rendering is checked against Windows path semantics.
       # The rest of the arg-building suites still hardcode POSIX paths, which
       # filepath reads as relative on Windows.
+      # The per-name grep fails the step if a renamed test stops matching -run.
       - name: Test fs grant and protected-path rendering
-        run: go test ./pkg/runtime/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run '^(TestBridgeDeps_SetProtectedPaths|TestBuildDenoArgs_ProtectedPathsDenied|TestBuildDenoArgs_FSPathCleaned|TestBuildDenoArgs_RelativeFSPathCleaned|TestTempFileNamingEmbedsRunID|TestBuildGuardPolicy_FSWriteResolution|TestBuildGuardPolicy_ProtectedPathsBecomeDenyList)$' -timeout 300s
+        shell: bash
+        run: |
+          tests="TestBridgeDeps_SetProtectedPaths TestBuildDenoArgs_ProtectedPathsDenied TestBuildDenoArgs_FSPathCleaned TestBuildDenoArgs_RelativeFSPathCleaned TestTempFileNamingEmbedsRunID TestBuildGuardPolicy_FSWriteResolution TestBuildGuardPolicy_ProtectedPathsBecomeDenyList"
+          go test ./pkg/runtime/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run "^($(echo $tests | tr ' ' '|'))\$" -v -timeout 300s | tee fsgrant.log
+          for t in $tests; do grep -q -- "--- PASS: $t " fsgrant.log; done
 
       # Clones local bare fixtures over file:// URLs; go-git's file transport
       # runs git-upload-pack, which Git for Windows provides.
