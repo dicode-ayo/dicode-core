@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/runtime/runtimecaps"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -68,7 +69,7 @@ func CurrentTags(specs []*task.Spec) (current map[string]map[string]bool, skip m
 		if spec == nil || spec.Docker == nil || spec.Docker.Build == nil {
 			continue
 		}
-		if spec.Runtime != task.RuntimeDocker && spec.Runtime != task.RuntimePodman {
+		if !runtimecaps.For(spec.Runtime).LocalImageBuild {
 			continue
 		}
 		repo := Repository(spec.ID)

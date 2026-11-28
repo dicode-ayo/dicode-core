@@ -15,6 +15,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
+	"github.com/dicode/dicode/pkg/runtime/runtimecaps"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -62,17 +63,13 @@ func (e *Engine) Resolver() *envresolve.Resolver {
 }
 
 // Run satisfies envresolve.ProviderRunner. It spawns the provider task
-// synchronously and waits for it to finish; the secret map is collected
-// over a channel passed to this one run via RunOptions.SecretOutputCh
-// (issue #719) — not shared runtime state, so concurrent Run calls for
-// different provider tasks (or the same one) never share a channel and
-// need no serialization between them.
+// synchronously and waits for it to finish; the secret map arrives over a
+// channel owned by this one run (RunOptions.SecretOutputCh), so concurrent
+// Run calls need no serialization.
 //
-// Only deno and python runtimes have an IPC-secret-output surface (docker
-// and podman tasks have no dicode.output(..., {secret:true}) IPC method at
-// all), so the runtime is validated up front and rejected with a clear
-// error rather than left to silently time out waiting on a channel no
-// executor will ever write to.
+// Only runtimes with runtimecaps SecretOutput can send a secret map; any
+// other runtime is rejected up front, since its run would never write to
+// the channel.
 //
 // Errors:
 //   - ctx.Err() if the caller context expires
@@ -87,17 +84,20 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 		return nil, fmt.Errorf("provider task %q not registered", providerID)
 	}
 
-	switch spec.Runtime {
-	case task.RuntimeDeno, "", "js":
+	if !runtimecaps.For(spec.Runtime).SecretOutput {
+		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output over IPC (dicode.output(..., {secret: true}))", providerID, spec.Runtime)
+	}
+	switch runtimecaps.Normalize(spec.Runtime) {
+	case task.RuntimeDeno:
 		if e.denoRuntime == nil {
 			return nil, fmt.Errorf("deno runtime not wired to engine")
 		}
-	case task.Runtime("python"):
+	case runtimecaps.RuntimePython:
 		if e.pythonRuntime == nil {
 			return nil, fmt.Errorf("python runtime not wired to engine (runtime=%q)", spec.Runtime)
 		}
 	default:
-		return nil, fmt.Errorf("provider task %q: runtime %q cannot produce secret output (only deno and python runtimes support dicode.output(..., {secret: true}) over IPC)", providerID, spec.Runtime)
+		return nil, fmt.Errorf("provider task %q: runtime %q not wired to engine", providerID, spec.Runtime)
 	}
 
 	ch := make(chan map[string]string, 1)
