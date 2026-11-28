@@ -2,15 +2,26 @@ package python
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/task"
 )
 
+// hostAbs returns the POSIX absolute path p as an absolute path on the host:
+// unchanged on Unix, rooted at the temp dir's volume on Windows.
+func hostAbs(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	return filepath.VolumeName(os.TempDir()) + filepath.FromSlash(p)
+}
+
 func specWithPerms(perms task.Permissions) *task.Spec {
-	return &task.Spec{ID: "t/perm", TaskDir: "/srv/tasks/perm", Permissions: perms}
+	return &task.Spec{ID: "t/perm", TaskDir: hostAbs("/srv/tasks/perm"), Permissions: perms}
 }
 
 func TestBuildGuardPolicy_NetModes(t *testing.T) {
@@ -74,16 +85,16 @@ func TestBuildGuardPolicy_RunModes(t *testing.T) {
 
 func TestBuildGuardPolicy_FSWriteResolution(t *testing.T) {
 	spec := specWithPerms(task.Permissions{FS: []task.FSEntry{
-		{Path: "data", Permission: "rw"},        // relative → joined to TaskDir
-		{Path: "/var/log/out", Permission: "w"}, // absolute → kept
-		{Path: "readonly", Permission: "r"},     // read entry → not in write allowlist
+		{Path: "data", Permission: "rw"},                 // relative → joined to TaskDir
+		{Path: hostAbs("/var/log/out"), Permission: "w"}, // absolute → kept
+		{Path: "readonly", Permission: "r"},              // read entry → not in write allowlist
 	}})
 	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
 
 	want := []string{
 		"/tmp/dicode.sock", // IPC socket always writable
 		filepath.Join(spec.TaskDir, "data"),
-		"/var/log/out",
+		hostAbs("/var/log/out"),
 	}
 	if len(pol.FSWrite) != len(want) {
 		t.Fatalf("fs_write = %v, want %v", pol.FSWrite, want)
@@ -143,12 +154,12 @@ func TestBuildGuardPolicy_ProtectedPathsBecomeDenyList(t *testing.T) {
 	// A broad "w" grant on the config dir would otherwise cover dicode.lock;
 	// the protected paths must land in fs_deny so the hook rejects them.
 	spec := specWithPerms(task.Permissions{FS: []task.FSEntry{
-		{Path: "/etc/dicode", Permission: "w"},
+		{Path: hostAbs("/etc/dicode"), Permission: "w"},
 	}})
-	protected := []string{"/etc/dicode/dicode.lock", "/etc/dicode/../dicode/dicode.yaml"}
+	protected := []string{hostAbs("/etc/dicode/dicode.lock"), hostAbs("/etc/dicode/../dicode/dicode.yaml")}
 	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", protected)
 
-	want := []string{"/etc/dicode/dicode.lock", "/etc/dicode/dicode.yaml"}
+	want := []string{hostAbs("/etc/dicode/dicode.lock"), hostAbs("/etc/dicode/dicode.yaml")}
 	if len(pol.FSDeny) != len(want) {
 		t.Fatalf("fs_deny = %v, want %v", pol.FSDeny, want)
 	}

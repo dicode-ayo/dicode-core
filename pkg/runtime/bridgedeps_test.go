@@ -23,9 +23,9 @@ func TestBridgeDeps_SetProtectedPaths(t *testing.T) {
 	})
 
 	want := []string{
-		filepath.Clean("/data//dicode.lock"),
-		filepath.Clean("/data/tasks/../dicode.yaml"),
-		"/already/clean",
+		filepath.FromSlash("/data/dicode.lock"),
+		filepath.FromSlash("/data/dicode.yaml"),
+		filepath.FromSlash("/already/clean"),
 	}
 	if !reflect.DeepEqual(d.ProtectedPaths, want) {
 		t.Errorf("SetProtectedPaths = %v, want %v", d.ProtectedPaths, want)

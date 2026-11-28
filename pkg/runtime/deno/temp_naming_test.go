@@ -34,10 +34,7 @@ func TestTempFileNamingEmbedsRunID(t *testing.T) {
 			_ = f.Close()
 			t.Cleanup(func() { _ = os.Remove(name) })
 
-			base := name
-			if idx := strings.LastIndexByte(name, '/'); idx >= 0 {
-				base = name[idx+1:]
-			}
+			base := filepath.Base(name)
 			if !strings.HasPrefix(base, tc.prefix) {
 				t.Errorf("name %q missing prefix %q", base, tc.prefix)
 			}

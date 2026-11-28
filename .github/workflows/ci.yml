@@ -108,11 +108,20 @@ jobs:
         with:
           python-version: '3.14'
 
-      # Scoped to the endpoint and the grants derived from it. The wider
-      # arg-building suites stay out: their fixtures hardcode POSIX paths, which
-      # filepath reads as relative on Windows (#875).
+      # Scoped to the endpoint and the grants derived from it.
       - name: Test the IPC endpoint and the sandbox grants derived from it
         run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_NetDenyBlocksConnect|TestPythonSDK' -timeout 300s
+
+      # Fs-grant and protected-path rendering under Windows path semantics.
+      # The rest of the arg-building suites still hardcode POSIX paths, which
+      # filepath reads as relative on Windows.
+      # The per-name grep fails the step if a renamed test stops matching -run.
+      - name: Test fs grant and protected-path rendering
+        shell: bash
+        run: |
+          tests="TestBridgeDeps_SetProtectedPaths TestBuildDenoArgs_ProtectedPathsDenied TestBuildDenoArgs_FSPathCleaned TestBuildDenoArgs_RelativeFSPathCleaned TestTempFileNamingEmbedsRunID TestBuildGuardPolicy_FSWriteResolution TestBuildGuardPolicy_ProtectedPathsBecomeDenyList"
+          go test ./pkg/runtime/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run "^($(echo $tests | tr ' ' '|'))\$" -v -timeout 300s | tee fsgrant.log
+          for t in $tests; do grep -q -- "--- PASS: $t " fsgrant.log; done
 
       # Clones local bare fixtures over file:// URLs; go-git's file transport
       # runs git-upload-pack, which Git for Windows provides.

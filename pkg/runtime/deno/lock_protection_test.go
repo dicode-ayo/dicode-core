@@ -3,12 +3,22 @@ package deno
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 )
+
+// hostAbs returns the POSIX absolute path p as an absolute path on the host:
+// unchanged on Unix, rooted at the temp dir's volume on Windows.
+func hostAbs(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	return filepath.VolumeName(os.TempDir()) + filepath.FromSlash(p)
+}
 
 // findArg returns the value of the first --flag=value entry, or "" if absent.
 func findArg(args []string, flag string) (string, bool) {
@@ -27,12 +37,12 @@ func findArg(args []string, flag string) (string, bool) {
 func TestBuildDenoArgs_ProtectedPathsDenied(t *testing.T) {
 	spec := &task.Spec{
 		ID:      "t/broad",
-		TaskDir: "/srv/tasks/broad",
+		TaskDir: hostAbs("/srv/tasks/broad"),
 		Permissions: task.Permissions{
-			FS: []task.FSEntry{{Path: "/etc/dicode", Permission: "w"}},
+			FS: []task.FSEntry{{Path: hostAbs("/etc/dicode"), Permission: "w"}},
 		},
 	}
-	protected := []string{"/etc/dicode/dicode.lock", "/etc/dicode/dicode.yaml"}
+	protected := []string{hostAbs("/etc/dicode/dicode.lock"), hostAbs("/etc/dicode/dicode.yaml")}
 
 	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", protected, "2.3.3")
 
@@ -47,7 +57,7 @@ func TestBuildDenoArgs_ProtectedPathsDenied(t *testing.T) {
 	}
 	// The broad grant is still honored — legitimate broad-fs tasks keep working.
 	allow, ok := findArg(args, "--allow-write")
-	if !ok || !strings.Contains(allow, "/etc/dicode") {
+	if !ok || !strings.Contains(allow, hostAbs("/etc/dicode")) {
 		t.Errorf("expected broad --allow-write to remain; got %q", allow)
 	}
 }
@@ -67,15 +77,15 @@ func TestBuildDenoArgs_NoProtectedPaths(t *testing.T) {
 func TestBuildDenoArgs_FSPathCleaned(t *testing.T) {
 	spec := &task.Spec{
 		ID:      "t/dirty",
-		TaskDir: "/srv/tasks/dirty",
+		TaskDir: hostAbs("/srv/tasks/dirty"),
 		Permissions: task.Permissions{
-			FS: []task.FSEntry{{Path: "/data/foo/../bar", Permission: "w"}},
+			FS: []task.FSEntry{{Path: hostAbs("/data/foo/../bar"), Permission: "w"}},
 		},
 	}
 	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil, "2.3.3")
 	allow, _ := findArg(args, "--allow-write")
-	if !strings.Contains(allow, "/data/bar") {
-		t.Errorf("expected cleaned /data/bar in --allow-write; got %q", allow)
+	if want := hostAbs("/data/bar"); !strings.Contains(allow, want) {
+		t.Errorf("expected cleaned %s in --allow-write; got %q", want, allow)
 	}
 	if strings.Contains(allow, "..") {
 		t.Errorf("--allow-write still contains unresolved '..'; got %q", allow)
@@ -87,15 +97,15 @@ func TestBuildDenoArgs_FSPathCleaned(t *testing.T) {
 func TestBuildDenoArgs_RelativeFSPathCleaned(t *testing.T) {
 	spec := &task.Spec{
 		ID:      "t/rel",
-		TaskDir: "/srv/tasks/rel",
+		TaskDir: hostAbs("/srv/tasks/rel"),
 		Permissions: task.Permissions{
 			FS: []task.FSEntry{{Path: "sub/../out", Permission: "rw"}},
 		},
 	}
 	args := buildDenoArgs(spec, "/tmp/d.sock", "/tmp/shim.ts", "/tmp/runner.ts", nil, "2.3.3")
 	allow, _ := findArg(args, "--allow-write")
-	if !strings.Contains(allow, "/srv/tasks/rel/out") {
-		t.Errorf("expected /srv/tasks/rel/out in --allow-write; got %q", allow)
+	if want := hostAbs("/srv/tasks/rel/out"); !strings.Contains(allow, want) {
+		t.Errorf("expected %s in --allow-write; got %q", want, allow)
 	}
 }
 

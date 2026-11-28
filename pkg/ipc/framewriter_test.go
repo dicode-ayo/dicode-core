@@ -500,7 +500,13 @@ func TestServer_OversizedErrorReplyKeepsConnection(t *testing.T) {
 
 	// %q doubles each tab, so the error outgrows the frame limit the request fits.
 	sendMsg(t, conn, map[string]any{"id": "big", "method": strings.Repeat("\t", 3<<20)})
-	resp := recvMsg(t, conn)
+	// Decoding and quoting the 3 MiB method takes seconds under -race, past
+	// recvMsg's 2s deadline.
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var resp map[string]any
+	if err := readMsg(conn, &resp); err != nil {
+		t.Fatalf("read oversized-error reply: %v", err)
+	}
 	if resp["id"] != "big" || resp["error"] != "ipc: response too large to return" {
 		t.Fatalf("unexpected reply: id=%v error=%.80v", resp["id"], resp["error"])
 	}
