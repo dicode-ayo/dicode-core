@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.7](https://github.com/dicode-ayo/dicode-core/compare/v0.6.6...v0.6.7) (2026-11-28)
+
+
+### Features
+
+* **cli:** add dicode task search over configured and remote TaskSets ([#932](https://github.com/dicode-ayo/dicode-core/issues/932)) ([d00bede](https://github.com/dicode-ayo/dicode-core/commit/d00bedeecbbbd0e829eab2900bf4617ec7854071))
+
+
+### Bug Fixes
+
+* **ipc:** serialize every write to a task connection through one frame writer ([#938](https://github.com/dicode-ayo/dicode-core/issues/938)) ([3d4ee27](https://github.com/dicode-ayo/dicode-core/commit/3d4ee27398653da2c264493051329501aee51600))
+* **registry:** deregister a removed source's tasks and clean its dev clones ([#922](https://github.com/dicode-ayo/dicode-core/issues/922)) ([ae93a1f](https://github.com/dicode-ayo/dicode-core/commit/ae93a1ffb7bfca842f4049331912290ef1913e05))
+* **webui:** report the test file dicode task test actually runs ([#934](https://github.com/dicode-ayo/dicode-core/issues/934)) ([94006e4](https://github.com/dicode-ayo/dicode-core/commit/94006e4888c70dc7639e8794cb5974c765d8a3e0))
+
 ## [0.6.6](https://github.com/dicode-ayo/dicode-core/compare/v0.6.5...v0.6.6) (2026-10-22)
 
 
