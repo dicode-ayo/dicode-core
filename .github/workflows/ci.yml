@@ -112,8 +112,7 @@ jobs:
       - name: Test the IPC endpoint and the sandbox grants derived from it
         run: go test ./pkg/ipc/ ./pkg/runtime/deno/ ./pkg/runtime/python/ -run 'TestIsLoopbackAddr|TestListenIPC|TestIPCSocket_Mode0600|TestModuleURL|TestBuildDenoArgs_LoopbackIPC|TestBuildDenoArgs_UnixIPC|TestBuildGuardPolicy_LoopbackIPC|TestGuard_NetDenyBlocksConnect|TestPythonSDK' -timeout 300s
 
-      # Fixtures here root their paths at a host volume, so the fs-grant and
-      # protected-path rendering is checked against Windows path semantics.
+      # Fs-grant and protected-path rendering under Windows path semantics.
       # The rest of the arg-building suites still hardcode POSIX paths, which
       # filepath reads as relative on Windows.
       # The per-name grep fails the step if a renamed test stops matching -run.
