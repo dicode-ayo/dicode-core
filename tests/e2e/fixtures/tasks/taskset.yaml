@@ -60,6 +60,13 @@ spec:
     file-status-probe:
       ref:
         path: FIXTURES_TASKS_DIR/file-status-probe/task.yaml
+    # The legacy `js` runtime alias in overrides must resolve to deno — see
+    # taskset-runtime-alias.spec.ts.
+    runtime-alias-override:
+      ref:
+        path: FIXTURES_TASKS_DIR/runtime-alias-override/task.yaml
+      overrides:
+        runtime: js
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

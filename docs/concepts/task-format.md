@@ -63,7 +63,7 @@ permissions:
 | --- | --- | --- | --- |
 | `name` | string | ✅ | Human-readable task name |
 | `description` | string | | One-line description |
-| `runtime` | string | | `deno` (default), `python`, `docker`, or `podman` |
+| `runtime` | string | | `deno` (default), `python`, `docker`, or `podman`. The legacy alias `js` (here or in a TaskSet entry's `overrides.runtime`) resolves to `deno` |
 | `trigger` | object | ✅ | Exactly one trigger must be set |
 | `trigger.cron` | string | | Standard cron expression (5 fields) |
 | `trigger.webhook` | string | | Webhook path, e.g. `/github-push` |

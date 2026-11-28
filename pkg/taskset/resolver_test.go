@@ -1561,3 +1561,34 @@ spec:
 		})
 	}
 }
+
+func TestResolver_OverrideRuntimeJSAliasNormalized(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "hello")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    hello:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        runtime: js
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, _, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if got := rtSpec(results[0]).Runtime; got != task.RuntimeDeno {
+		t.Errorf("runtime = %q, want %q", got, task.RuntimeDeno)
+	}
+}

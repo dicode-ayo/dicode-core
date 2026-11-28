@@ -90,6 +90,19 @@ func TestRun_UnsupportedRuntime(t *testing.T) {
 	}
 }
 
+func TestRun_EmptyRuntimeIgnoresPythonTestFile(t *testing.T) {
+	spec := &task.Spec{ID: "foo", TaskDir: t.TempDir()}
+	_ = os.WriteFile(filepath.Join(spec.TaskDir, "task.test.py"), []byte(""), 0644)
+
+	_, err := Run(context.Background(), spec)
+	if err != ErrNoTestFile {
+		t.Errorf("err = %v, want ErrNoTestFile", err)
+	}
+	if spec.Runtime != "" {
+		t.Errorf("Run mutated spec.Runtime to %q", spec.Runtime)
+	}
+}
+
 func TestRun_NoTestFile(t *testing.T) {
 	spec := &task.Spec{ID: "foo", TaskDir: t.TempDir(), Runtime: task.RuntimeDeno}
 	_, err := Run(context.Background(), spec)

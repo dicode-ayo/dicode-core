@@ -87,18 +87,19 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 		return runContainerTest(ctx, binary, spec, dockerfilePath, content)
 	}
 
+	// Normalized here too for callers that build a task.Spec without the
+	// loader, so the test file lookup and the dispatch agree on the runtime.
+	normalized := *spec
+	normalized.Runtime = task.NormalizeRuntime(spec.Runtime)
+	spec = &normalized
+
 	testFile, err := findTestFile(spec)
 	if err != nil {
 		return Result{TaskID: spec.ID}, err
 	}
 
 	switch spec.Runtime {
-	// The "" and "js" aliases are defensive — pkg/task.applyDefaults
-	// normalizes both to RuntimeDeno at spec-load time, so the registry
-	// never hands us a non-normalized value. Keeping the aliases matches
-	// pkg/task/spec.go:validate and protects direct callers who construct
-	// a task.Spec without going through the loader.
-	case task.RuntimeDeno, "", "js":
+	case task.RuntimeDeno:
 		return runDeno(ctx, spec, testFile)
 	case runtimePython:
 		return runPython(ctx, spec, testFile)
@@ -116,8 +117,8 @@ func findTestFile(spec *task.Spec) (string, error) {
 	// task.test.ts left behind in a task dir that was converted to
 	// runtime: python would silently shadow the real task.test.py and get run
 	// through the wrong runtime. Deno considers only its own extensions, in
-	// pkg/task.ScriptPath's ts-preferred-over-js order. A hand-constructed
-	// spec with no runtime also falls back to .py. Only regular files count:
+	// pkg/task.ScriptPath's ts-preferred-over-js order. Discover passes the
+	// raw runtime, so a hand-constructed spec with none also considers .py. Only regular files count:
 	// symlinks are rejected to stay consistent with the production
 	// script-path policy.
 	var exts []string
